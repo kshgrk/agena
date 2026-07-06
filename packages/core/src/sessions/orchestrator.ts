@@ -575,7 +575,7 @@ export class SessionOrchestrator {
     if (assistant) {
       events.push({
         type:
-          reason === "daemon_shutdown"
+          reason !== "runtime_error"
             ? "message.assistant.aborted"
             : "message.assistant.failed",
         v: 1,

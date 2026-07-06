@@ -27,6 +27,16 @@ const approvalRequested = (store: InMemoryEventStore) =>
     });
   });
 
+const assistantStarted = (store: InMemoryEventStore) =>
+  new Promise<void>((resolve) => {
+    const off = store.onCommitted((batch) => {
+      if (batch.events.some((e) => e.type === "message.assistant.started")) {
+        off();
+        resolve();
+      }
+    });
+  });
+
 test("happy path: prompt yields the exact durable sequence plus delta frames", async () => {
   const store = new InMemoryEventStore();
   const frames: AgenaFrame[] = [];
@@ -167,6 +177,25 @@ test("runtime rehydrates with the persisted runtime session ref", async () => {
     sessionId: session.sessionId,
     runtimeSessionRef: `fake:${session.sessionId}`,
   });
+});
+
+test("abort terminalizes active work as aborted, not failed", async () => {
+  const store = new InMemoryEventStore();
+  const orch = new SessionOrchestrator(
+    store,
+    new FakeRuntimeAdapter({ delayMs: 5, script: () => ["a", "b", "c"] }),
+  );
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+
+  const started = assistantStarted(store);
+  await orch.handlePrompt(session.sessionId, [{ type: "text", text: "stop" }]);
+  await started;
+  await expect(orch.handleAbort(session.sessionId)).resolves.toEqual({});
+
+  const { events } = await store.readEvents(session.sessionId, 0);
+  expect(events.map((e) => e.type)).toContain("message.assistant.aborted");
+  expect(events.map((e) => e.type)).toContain("run.aborted");
+  expect(events.map((e) => e.type)).not.toContain("message.assistant.failed");
 });
 
 test("runtime info is served from the runtime session", async () => {
