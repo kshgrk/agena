@@ -17,6 +17,13 @@ const userMessage = (text: string): NewEvent => ({
   payload: { messageId: ulid(), content: [{ type: "text", text }] },
 });
 const runtime: EventSource = { kind: "runtime" };
+const pi: EventSource = { kind: "runtime", runtime: "pi" };
+const approvalRequest = (approvalId = ulid()): NewEvent => ({
+  type: "approval.requested",
+  v: 1,
+  source: pi,
+  payload: { approvalId, kind: "confirm", message: "Continue?" },
+});
 
 afterEach(() => {
   for (const dir of dirs.splice(0))
@@ -28,6 +35,19 @@ function dbPath(): string {
   dirs.push(dir);
   return join(dir, "agena.db");
 }
+
+test("uses rollback journal so live local inspection does not depend on WAL sidecars", () => {
+  const path = dbPath();
+  const store = new SqliteEventStore(path);
+  store.close();
+
+  const db = new DatabaseSync(path);
+  const row = db.prepare("PRAGMA journal_mode").get() as {
+    journal_mode: string;
+  };
+  expect(row.journal_mode).toBe("delete");
+  db.close();
+});
 
 test("persists sessions and events across store reopen", async () => {
   const path = dbPath();
@@ -59,6 +79,88 @@ test("persists sessions and events across store reopen", async () => {
   second.close();
 });
 
+test("persists runtime session refs across store reopen", async () => {
+  const path = dbPath();
+  const first = new SqliteEventStore(path);
+  const session = await first.createSession({ workspaceId: "ws-1" });
+  await expect(
+    first.updateRuntimeSessionRef(
+      session.sessionId,
+      "/var/lib/agena/pi/s.jsonl",
+    ),
+  ).resolves.toMatchObject({
+    sessionId: session.sessionId,
+    runtimeSessionRef: "/var/lib/agena/pi/s.jsonl",
+  });
+  first.close();
+
+  const second = new SqliteEventStore(path);
+  await expect(second.getSession(session.sessionId)).resolves.toMatchObject({
+    runtimeSessionRef: "/var/lib/agena/pi/s.jsonl",
+  });
+  second.close();
+});
+
+test("stores M4 project scope and filters project/global sessions", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const a = await store.createSession({
+    workspaceId: "ws-1",
+    title: "a",
+    projectId: "project-a",
+    projectRoot: "repo-a",
+    cwd: "repo-a/pkg",
+    hostCwdHint: "/host/repo-a/pkg",
+  });
+  const b = await store.createSession({
+    workspaceId: "ws-1",
+    title: "b",
+    projectId: "project-b",
+    projectRoot: "repo-a",
+    cwd: "repo-a",
+  });
+  const global = await store.createSession({
+    workspaceId: "ws-1",
+    title: "g",
+    scope: "global",
+  });
+
+  expect(await store.getSession(a.sessionId)).toMatchObject({
+    sessionId: a.sessionId,
+    scope: "project",
+    projectId: "project-a",
+    projectRoot: "repo-a",
+    cwd: "repo-a/pkg",
+    hostCwdHint: "/host/repo-a/pkg",
+  });
+  expect(
+    (await store.listSessions({ projectId: "project-a" })).map(id),
+  ).toEqual([a.sessionId]);
+  expect(
+    (
+      await store.listSessions({ scope: "project", projectId: "project-a" })
+    ).map(id),
+  ).toEqual([a.sessionId]);
+  expect((await store.listSessions()).map(id).sort()).toEqual(
+    [a.sessionId, b.sessionId].sort(),
+  );
+  expect((await store.listSessions({ scope: "global" })).map(id)).toEqual([
+    global.sessionId,
+  ]);
+  expect(
+    (await store.listSessions({ allProjects: true })).map(id).sort(),
+  ).toEqual([a.sessionId, b.sessionId, global.sessionId].sort());
+
+  const replay = await store.readEvents(a.sessionId, 0, 10);
+  expect(replay.events[0]?.payload).toMatchObject({
+    scope: "project",
+    projectId: "project-a",
+    projectRoot: "repo-a",
+    cwd: "repo-a/pkg",
+    hostCwdHint: "/host/repo-a/pkg",
+  });
+  store.close();
+});
+
 test("rejects invalid batches without consuming a seq", async () => {
   const store = new SqliteEventStore(dbPath());
   const session = await store.createSession({ workspaceId: "ws-1" });
@@ -76,6 +178,107 @@ test("rejects invalid batches without consuming a seq", async () => {
 
   const replay = await store.readEvents(session.sessionId, 0, 10);
   expect(replay.events.map((e) => e.type)).toEqual(["session.created"]);
+  store.close();
+});
+
+test("stores M4.5 control events and lists pending approvals after reopen", async () => {
+  const path = dbPath();
+  const first = new SqliteEventStore(path);
+  const a = await first.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+  });
+  const b = await first.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-b",
+  });
+  const pending = ulid();
+  const answered = ulid();
+  await first.appendEvents({
+    sessionId: a.sessionId,
+    branchId: a.rootBranchId,
+    events: [
+      approvalRequest(pending),
+      approvalRequest(answered),
+      {
+        type: "approval.responded",
+        v: 1,
+        source: user,
+        payload: {
+          approvalId: answered,
+          response: { kind: "confirm", accepted: true },
+          respondedBy: "client-1",
+        },
+      },
+      {
+        type: "model.changed",
+        v: 1,
+        source: user,
+        payload: { to: { provider: "fake", id: "fake-2" }, reason: "auto" },
+      },
+      {
+        type: "thinking.level.changed",
+        v: 1,
+        source: user,
+        payload: { from: "low", to: "high" },
+      },
+      {
+        type: "compaction.created",
+        v: 1,
+        source: pi,
+        payload: {
+          compactionId: ulid(),
+          summary: [{ type: "text", text: "summary" }],
+          replacesUpToSeq: 1,
+          trigger: "auto",
+        },
+      },
+    ],
+  });
+  await first.appendEvents({
+    sessionId: b.sessionId,
+    branchId: b.rootBranchId,
+    events: [approvalRequest()],
+  });
+  first.close();
+
+  const second = new SqliteEventStore(path);
+  expect(await second.listPendingApprovals({ projectId: "project-a" })).toEqual(
+    [
+      expect.objectContaining({
+        sessionId: a.sessionId,
+        branchId: a.rootBranchId,
+        approvalId: pending,
+        payload: expect.objectContaining({ message: "Continue?" }),
+      }),
+    ],
+  );
+  await expect(second.rebuildProjections()).resolves.toMatchObject({
+    events: 9,
+  });
+  second.close();
+});
+
+test("reconcileOpenWork cancels dangling approvals", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  const approvalId = ulid();
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [approvalRequest(approvalId)],
+  });
+
+  await expect(store.reconcileOpenWork()).resolves.toEqual({
+    sessions: 1,
+    appended: 1,
+  });
+  await expect(store.listPendingApprovals()).resolves.toEqual([]);
+  const replay = await store.readEvents(session.sessionId, 0, 10);
+  expect(replay.events.at(-1)).toMatchObject({
+    type: "approval.cancelled",
+    payload: { approvalId, reason: "daemon_restart" },
+  });
   store.close();
 });
 
@@ -103,6 +306,48 @@ test("rebuildProjections recreates byte-identical message rows from the event lo
   });
   store.close();
   expect(rows(path, "messages")).toEqual(before);
+});
+
+test("search is project-filtered and rebuild restores identical FTS hits", async () => {
+  const path = dbPath();
+  let store = new SqliteEventStore(path);
+  const a = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+  });
+  const b = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-b",
+  });
+  await store.appendEvents({
+    sessionId: a.sessionId,
+    branchId: a.rootBranchId,
+    events: [userMessage("needle in project alpha")],
+  });
+  await store.appendEvents({
+    sessionId: b.sessionId,
+    branchId: b.rootBranchId,
+    events: [userMessage("needle in project beta")],
+  });
+
+  const before = await store.search("needle", { projectId: "project-a" });
+  expect(before.map((h) => h.sessionId)).toEqual([a.sessionId]);
+  await expect(
+    store.search("needle", { allProjects: true }),
+  ).resolves.toHaveLength(2);
+  store.close();
+
+  exec(path, "DELETE FROM messages_fts");
+  store = new SqliteEventStore(path);
+  await expect(
+    store.search("needle", { projectId: "project-a" }),
+  ).resolves.toEqual([]);
+
+  await store.rebuildProjections();
+  await expect(
+    store.search("needle", { projectId: "project-a" }),
+  ).resolves.toEqual(before);
+  store.close();
 });
 
 test("reconcileOpenWork terminalizes dangling assistant and run rows", async () => {
@@ -171,3 +416,5 @@ function exec(path: string, sql: string): void {
     db.close();
   }
 }
+
+const id = (s: { sessionId: string }) => s.sessionId;

@@ -6,12 +6,16 @@
 // and deterministic per-session command serialization; M1 needs only
 // reject-while-busy (§5.4 prompt → SESSION_BUSY). Dispatch-failure durable
 // records (run.failed {phase:"dispatch"}) are M2 (§8.6).
+import { resolve } from "node:path";
 import type {
   AgenaFrame,
+  ApprovalResponse,
   ContentBlock,
   ErrorCode,
   EventSource,
   InFlightSnapshot,
+  ModelRef,
+  ThinkingLevel,
 } from "@agena/protocol";
 import { ulid } from "ulid";
 import type {
@@ -20,6 +24,7 @@ import type {
   NewEvent,
   SessionRecord,
 } from "../events/store.ts";
+import { pendingApprovalsFromEvents } from "../events/store.ts";
 import type {
   RuntimeAdapter,
   RuntimeEvent,
@@ -47,6 +52,9 @@ interface SessionState {
   busy: boolean; // single in-flight turn per session (§5.4)
   run: { runId: string; triggerMessageId: string } | null;
   runtime: RuntimeSession | null;
+  model: ModelRef | null;
+  thinkingLevel: ThinkingLevel;
+  commandQueue: Promise<void>;
 }
 
 export class SessionOrchestrator {
@@ -85,6 +93,7 @@ export class SessionOrchestrator {
   ): Promise<InFlightSnapshot> {
     const s = await this.#state(sessionId);
     const runtime = s.runtime?.getInFlightSnapshot() ?? null;
+    const pendingApprovals = await this.#pendingApprovals(sessionId);
     const assistant = runtime?.assistantMessage
       ? {
           messageId: runtime.assistantMessage.messageId,
@@ -101,7 +110,7 @@ export class SessionOrchestrator {
       afterSeq,
       assistant,
       toolCalls: [],
-      pendingApprovals: [],
+      pendingApprovals: pendingApprovals.map((a) => a.payload),
       retry: null,
       queue: { steerCount: 0, followUpCount: 0 },
       status: { state: s.busy ? "generating" : "idle" },
@@ -125,44 +134,181 @@ export class SessionOrchestrator {
     clientId?: string,
   ): Promise<{ messageId: string; seq: number }> {
     const s = await this.#state(sessionId);
-    if (s.busy) {
-      throw new OrchestratorError("SESSION_BUSY", "a turn is already active");
-    }
-    s.busy = true; // set before any await so check-and-set is atomic
-    try {
-      const messageId = ulid();
-      const source: EventSource = clientId
-        ? { kind: "user", clientId }
-        : { kind: "user" };
-      const { lastSeq } = await this.#append(s, [
+    return this.#serialize(s, () =>
+      this.#submitText(s, "prompt", content, clientId),
+    );
+  }
+
+  async handleSteer(
+    sessionId: string,
+    content: ContentBlock[],
+    clientId?: string,
+  ): Promise<{ messageId: string; seq: number }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, () =>
+      this.#submitText(s, "steer", content, clientId),
+    );
+  }
+
+  async handleFollowUp(
+    sessionId: string,
+    content: ContentBlock[],
+    clientId?: string,
+  ): Promise<{ messageId: string; seq: number }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, () =>
+      this.#submitText(s, "followUp", content, clientId),
+    );
+  }
+
+  async handleAbort(sessionId: string): Promise<Record<string, never>> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      if (!s.busy || !s.run) {
+        throw new OrchestratorError("TURN_NOT_ACTIVE", "no turn is active");
+      }
+      await this.#terminalize(s, "user_abort");
+      await s.runtime?.abort();
+      return {};
+    });
+  }
+
+  async handleRuntimeInfo(sessionId: string) {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => (await this.#runtime(s)).info());
+  }
+
+  async handleSetModel(
+    sessionId: string,
+    model: ModelRef,
+  ): Promise<{ model: ModelRef }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      if (s.busy) {
+        throw new OrchestratorError("SESSION_BUSY", "a turn is already active");
+      }
+      try {
+        await (await this.#runtime(s)).setModel(model);
+      } catch (err) {
+        throw new OrchestratorError("MODEL_UNAVAILABLE", message(err));
+      }
+      await this.#append(s, [
         {
-          type: "message.user.created",
+          type: "model.changed",
           v: 1,
-          source,
-          payload: { messageId, content },
+          source: { kind: "user" },
+          payload: {
+            ...(s.model ? { from: s.model } : {}),
+            to: model,
+            reason: "user_selected",
+          },
         },
       ]);
-      try {
-        const runtime = await this.#runtime(s);
-        // §5.4: v1 prompt content is text blocks only; core concatenates them.
-        await runtime.prompt({
-          messageId,
-          text: content.map((b) => (b.type === "text" ? b.text : "")).join(""),
-        });
-      } catch (err) {
-        await this.#appendRuntime(s, "run.failed", {
-          runId: ulid(),
-          triggerMessageId: messageId,
-          phase: "dispatch",
-          error: { code: "runtime_error", message: message(err) },
-        });
-        throw err;
+      s.model = model;
+      return { model };
+    });
+  }
+
+  async handleSetThinkingLevel(
+    sessionId: string,
+    thinkingLevel: ThinkingLevel,
+  ): Promise<{ thinkingLevel: ThinkingLevel }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      if (s.busy) {
+        throw new OrchestratorError("SESSION_BUSY", "a turn is already active");
       }
-      return { messageId, seq: lastSeq };
-    } catch (err) {
-      s.busy = false;
-      throw err;
-    }
+      try {
+        await (await this.#runtime(s)).setThinkingLevel(thinkingLevel);
+      } catch (err) {
+        throw new OrchestratorError("RUNTIME_UNAVAILABLE", message(err));
+      }
+      await this.#append(s, [
+        {
+          type: "thinking.level.changed",
+          v: 1,
+          source: { kind: "user" },
+          payload: { from: s.thinkingLevel, to: thinkingLevel },
+        },
+      ]);
+      s.thinkingLevel = thinkingLevel;
+      return { thinkingLevel };
+    });
+  }
+
+  async handleCompact(sessionId: string): Promise<{ compactionSeq: number }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      if (s.busy) {
+        throw new OrchestratorError("SESSION_BUSY", "a turn is already active");
+      }
+      const replacesUpToSeq = s.lastSeq;
+      const compactionId = ulid();
+      let result: {
+        summary: string;
+        tokensBefore?: number;
+        tokensAfter?: number;
+      };
+      try {
+        result = await (await this.#runtime(s)).compact();
+      } catch (err) {
+        throw new OrchestratorError("RUNTIME_UNAVAILABLE", message(err));
+      }
+      const { lastSeq } = await this.#append(s, [
+        {
+          type: "compaction.created",
+          v: 1,
+          source: { kind: "runtime" },
+          payload: {
+            compactionId,
+            summary: [{ type: "text", text: result.summary }],
+            replacesUpToSeq,
+            ...(result.tokensBefore !== undefined
+              ? { tokensBefore: result.tokensBefore }
+              : {}),
+            ...(result.tokensAfter !== undefined
+              ? { tokensAfter: result.tokensAfter }
+              : {}),
+            trigger: "user",
+          },
+        },
+      ]);
+      return { compactionSeq: lastSeq };
+    });
+  }
+
+  async handleRespondToApproval(
+    sessionId: string,
+    approvalId: string,
+    response: ApprovalResponse,
+    clientId?: string,
+  ): Promise<{ approvalId: string }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      const pending = (await this.#pendingApprovals(sessionId)).find(
+        (a) => a.approvalId === approvalId,
+      );
+      if (!pending) {
+        throw new OrchestratorError(
+          "APPROVAL_NOT_PENDING",
+          `approval ${approvalId} is not pending`,
+        );
+      }
+      await this.#append(s, [
+        {
+          type: "approval.responded",
+          v: 1,
+          source: clientId ? { kind: "user", clientId } : { kind: "user" },
+          payload: {
+            approvalId,
+            response,
+            respondedBy: clientId ?? "unknown",
+          },
+        },
+      ]);
+      await (await this.#runtime(s)).respondToApproval(approvalId, response);
+      return { approvalId };
+    });
   }
 
   async #state(sessionId: string): Promise<SessionState> {
@@ -184,6 +330,9 @@ export class SessionOrchestrator {
       busy: false,
       run: null,
       runtime: null,
+      model: null,
+      thinkingLevel: "off",
+      commandQueue: Promise.resolve(),
     };
     this.#sessions.set(sessionId, state);
     return state;
@@ -194,7 +343,20 @@ export class SessionOrchestrator {
     s.runtime = await this.#adapter.createSession({
       sessionId: s.record.sessionId,
       workspaceDir: this.#workspaceDir,
+      cwd: resolve(this.#workspaceDir, s.record.cwd),
+      ...(s.record.runtimeSessionRef
+        ? { runtimeSessionRef: s.record.runtimeSessionRef }
+        : {}),
     });
+    if (
+      s.runtime.runtimeSessionRef !== s.record.runtimeSessionRef &&
+      this.#store.updateRuntimeSessionRef
+    ) {
+      s.record = await this.#store.updateRuntimeSessionRef(
+        s.record.sessionId,
+        s.runtime.runtimeSessionRef,
+      );
+    }
     void this.#pump(s, s.runtime);
     return s.runtime;
   }
@@ -263,6 +425,20 @@ export class SessionOrchestrator {
           ...(ev.usage ? { usage: ev.usage } : {}),
         });
         return;
+      case "assistant-message-aborted":
+        await this.#appendRuntime(s, "message.assistant.aborted", {
+          messageId: ev.messageId,
+          partialContent: ev.partialContent,
+          reason: ev.reason,
+        });
+        return;
+      case "assistant-message-failed":
+        await this.#appendRuntime(s, "message.assistant.failed", {
+          messageId: ev.messageId,
+          partialContent: ev.partialContent,
+          error: ev.error,
+        });
+        return;
       case "run-completed":
         await this.#appendRuntime(s, "run.completed", {
           runId: ev.runId,
@@ -271,7 +447,105 @@ export class SessionOrchestrator {
         s.run = null;
         s.busy = false;
         return;
+      case "run-aborted":
+        await this.#appendRuntime(s, "run.aborted", {
+          runId: ev.runId,
+          reason: ev.reason,
+        });
+        s.run = null;
+        s.busy = false;
+        return;
+      case "run-failed":
+        await this.#appendRuntime(s, "run.failed", {
+          runId: ev.runId,
+          phase: "runtime",
+          error: ev.error,
+        });
+        s.run = null;
+        s.busy = false;
+        return;
+      case "model-changed":
+        await this.#appendRuntime(s, "model.changed", {
+          ...(ev.from ? { from: ev.from } : {}),
+          to: ev.to,
+          reason: "auto",
+        });
+        s.model = ev.to;
+        return;
+      case "thinking-level-changed":
+        await this.#appendRuntime(s, "thinking.level.changed", {
+          from: ev.from,
+          to: ev.to,
+        });
+        s.thinkingLevel = ev.to as ThinkingLevel;
+        return;
+      case "approval-requested":
+        await this.#appendRuntime(s, "approval.requested", ev.approval);
+        return;
     }
+  }
+
+  async #submitText(
+    s: SessionState,
+    trigger: "prompt" | "steer" | "followUp",
+    content: ContentBlock[],
+    clientId?: string,
+  ): Promise<{ messageId: string; seq: number }> {
+    if (trigger === "prompt" && s.busy) {
+      throw new OrchestratorError("SESSION_BUSY", "a turn is already active");
+    }
+    if (trigger !== "prompt" && !s.busy) {
+      throw new OrchestratorError("TURN_NOT_ACTIVE", "no turn is active");
+    }
+    if (trigger === "prompt") s.busy = true;
+    try {
+      const messageId = ulid();
+      const source: EventSource = clientId
+        ? { kind: "user", clientId }
+        : { kind: "user" };
+      const { lastSeq } = await this.#append(s, [
+        {
+          type: "message.user.created",
+          v: 1,
+          source,
+          payload: {
+            messageId,
+            content,
+            ...(trigger === "prompt" ? {} : { queued: trigger }),
+          },
+        },
+      ]);
+      try {
+        const runtime = await this.#runtime(s);
+        const input = { messageId, text: textContent(content) };
+        if (trigger === "prompt") await runtime.prompt(input);
+        else if (trigger === "steer") await runtime.steer(input);
+        else await runtime.followUp(input);
+      } catch (err) {
+        if (trigger === "prompt") {
+          await this.#appendRuntime(s, "run.failed", {
+            runId: ulid(),
+            triggerMessageId: messageId,
+            phase: "dispatch",
+            error: { code: "runtime_error", message: message(err) },
+          });
+        }
+        throw err;
+      }
+      return { messageId, seq: lastSeq };
+    } catch (err) {
+      if (trigger === "prompt") s.busy = false;
+      throw err;
+    }
+  }
+
+  #serialize<T>(s: SessionState, fn: () => Promise<T>): Promise<T> {
+    const run = s.commandQueue.then(fn, fn);
+    s.commandQueue = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
   }
 
   #appendRuntime(s: SessionState, type: string, payload: unknown) {
@@ -292,7 +566,7 @@ export class SessionOrchestrator {
 
   async #terminalize(
     s: SessionState,
-    reason: "daemon_shutdown" | "runtime_error",
+    reason: "daemon_shutdown" | "runtime_error" | "user_abort",
     err?: unknown,
   ): Promise<void> {
     const runtime = s.runtime?.getInFlightSnapshot() ?? null;
@@ -310,7 +584,7 @@ export class SessionOrchestrator {
             ? { kind: "daemon" }
             : this.#runtimeSource,
         payload:
-          reason === "daemon_shutdown"
+          reason !== "runtime_error"
             ? {
                 messageId: assistant.messageId,
                 partialContent: assistant.blocks.map((b) => ({
@@ -331,14 +605,12 @@ export class SessionOrchestrator {
     }
     if (s.run) {
       events.push({
-        type: reason === "daemon_shutdown" ? "run.aborted" : "run.failed",
+        type: reason !== "runtime_error" ? "run.aborted" : "run.failed",
         v: 1,
         source:
-          reason === "daemon_shutdown"
-            ? { kind: "daemon" }
-            : this.#runtimeSource,
+          reason !== "runtime_error" ? { kind: "daemon" } : this.#runtimeSource,
         payload:
-          reason === "daemon_shutdown"
+          reason !== "runtime_error"
             ? { runId: s.run.runId, reason }
             : {
                 runId: s.run.runId,
@@ -347,12 +619,38 @@ export class SessionOrchestrator {
               },
       });
     }
+    const approvals = await this.#pendingApprovals(s.record.sessionId);
+    for (const approval of approvals) {
+      events.push({
+        type: "approval.cancelled",
+        v: 1,
+        source: { kind: "daemon" },
+        payload: {
+          approvalId: approval.approvalId,
+          reason: reason === "user_abort" ? "turn_aborted" : "daemon_shutdown",
+        },
+      });
+    }
     if (events.length > 0) await this.#append(s, events);
     s.busy = false;
     s.run = null;
+  }
+
+  async #pendingApprovals(sessionId: string) {
+    if (this.#store.listPendingApprovals) {
+      return (
+        await this.#store.listPendingApprovals({ allProjects: true })
+      ).filter((a) => a.sessionId === sessionId);
+    }
+    const { events } = await this.#store.readEvents(sessionId, 0);
+    return pendingApprovalsFromEvents(events);
   }
 }
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function textContent(content: ContentBlock[]): string {
+  return content.map((b) => (b.type === "text" ? b.text : "")).join("");
 }

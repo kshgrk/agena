@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { approvalResponseSchema } from "./commands.ts";
 import {
   contentBlockSchema,
   modelRefSchema,
@@ -23,13 +24,31 @@ export type EventSource = z.infer<typeof eventSourceSchema>;
 // ---- M1 durable payloads, exactly per §5.5 (every payload is v: 1) ----
 // ponytail: the rest of the §5.5 catalog lands with the milestones that emit it (M2+)
 
-export const sessionCreatedSchema = z.object({
-  workspaceId: z.string().min(1),
-  title: z.string().optional(),
-  runtime: z.literal("pi"),
-  origin: z.enum(["native", "import.claude", "import.codex", "control"]),
-  rootBranchId: z.string().min(1),
-});
+export const sessionCreatedSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    title: z.string().optional(),
+    runtime: z.literal("pi"),
+    origin: z.enum(["native", "import.claude", "import.codex", "control"]),
+    scope: z.enum(["project", "global", "control"]),
+    projectId: z.string().min(1).optional(),
+    projectRoot: z.string().min(1).optional(),
+    cwd: z.string().min(1),
+    hostCwdHint: z.string().min(1).optional(),
+    rootBranchId: z.string().min(1),
+  })
+  .superRefine((value, ctx) => {
+    if (value.scope !== "project") return;
+    for (const key of ["projectId", "projectRoot"] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required for project sessions`,
+        });
+      }
+    }
+  });
 export type SessionCreated = z.infer<typeof sessionCreatedSchema>;
 
 export const messageUserCreatedSchema = z.object({
@@ -184,6 +203,113 @@ export const terminalSessionEndedSchema = z.object({
 });
 export type TerminalSessionEnded = z.infer<typeof terminalSessionEndedSchema>;
 
+export const modelChangedSchema = z.object({
+  from: modelRefSchema.optional(),
+  to: modelRefSchema,
+  reason: z.enum(["user_selected", "fallback", "auto"]),
+});
+export type ModelChanged = z.infer<typeof modelChangedSchema>;
+
+export const thinkingLevelChangedSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+});
+export type ThinkingLevelChanged = z.infer<typeof thinkingLevelChangedSchema>;
+
+export const compactionCreatedSchema = z.object({
+  compactionId: z.string().min(1),
+  summary: z.array(contentBlockSchema),
+  replacesUpToSeq: z.number().int().nonnegative(),
+  tokensBefore: z.number().int().nonnegative().optional(),
+  tokensAfter: z.number().int().nonnegative().optional(),
+  trigger: z.enum(["user", "auto"]),
+});
+export type CompactionCreated = z.infer<typeof compactionCreatedSchema>;
+
+export const compactionFailedSchema = z.object({
+  compactionId: z.string().min(1),
+  error: z.object({ code: z.string().min(1), message: z.string() }),
+});
+export type CompactionFailed = z.infer<typeof compactionFailedSchema>;
+
+export const approvalRequestedSchema = z.object({
+  approvalId: z.string().min(1),
+  kind: z.enum(["confirm", "select", "input", "editor"]),
+  title: z.string().optional(),
+  message: z.string(),
+  options: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        label: z.string().min(1),
+        description: z.string().optional(),
+      }),
+    )
+    .optional(),
+  defaultValue: z.string().optional(),
+  toolCallId: z.string().min(1).optional(),
+  expiresAt: z.string().optional(),
+});
+export type ApprovalRequested = z.infer<typeof approvalRequestedSchema>;
+
+export const approvalRespondedSchema = z.object({
+  approvalId: z.string().min(1),
+  response: approvalResponseSchema,
+  respondedBy: z.string().min(1),
+});
+export type ApprovalResponded = z.infer<typeof approvalRespondedSchema>;
+
+export const approvalExpiredSchema = z.object({
+  approvalId: z.string().min(1),
+});
+export type ApprovalExpired = z.infer<typeof approvalExpiredSchema>;
+
+export const approvalCancelledSchema = z.object({
+  approvalId: z.string().min(1),
+  reason: z.enum([
+    "turn_aborted",
+    "daemon_shutdown",
+    "daemon_restart",
+    "runtime_cancelled",
+  ]),
+});
+export type ApprovalCancelled = z.infer<typeof approvalCancelledSchema>;
+
+export const snapshotCreatedSchema = z.object({
+  snapshotId: z.string().min(1),
+  workspaceId: z.string().min(1),
+  name: z.string().optional(),
+  kind: z.enum(["manual", "auto", "pre_tool", "pre_restore"]),
+  storage: z.object({
+    backend: z.literal("tar"),
+    path: z.string().min(1),
+    sha256: z.string().min(1),
+    sizeBytes: z.number().int().nonnegative(),
+  }),
+  fileCount: z.number().int().nonnegative().optional(),
+  triggeredBySessionId: z.string().min(1).optional(),
+});
+export type SnapshotCreated = z.infer<typeof snapshotCreatedSchema>;
+
+export const snapshotRestoredSchema = z.object({
+  snapshotId: z.string().min(1),
+  safetySnapshotId: z.string().min(1),
+  triggeredBySessionId: z.string().min(1).optional(),
+});
+export type SnapshotRestored = z.infer<typeof snapshotRestoredSchema>;
+
+export const snapshotRestoreFailedSchema = z.object({
+  snapshotId: z.string().min(1),
+  safetySnapshotId: z.string().min(1).optional(),
+  error: z.object({ code: z.string().min(1), message: z.string() }),
+});
+export type SnapshotRestoreFailed = z.infer<typeof snapshotRestoreFailedSchema>;
+
+export const snapshotDeletedSchema = z.object({
+  snapshotId: z.string().min(1),
+});
+export type SnapshotDeleted = z.infer<typeof snapshotDeletedSchema>;
+
 // Payload registry (§5 `events/index.ts` contract): appendEvents rejects any type
 // not listed here (P12).
 export const durableEventSchemas = {
@@ -205,6 +331,18 @@ export const durableEventSchemas = {
   "tool.call.denied": toolCallDeniedSchema,
   "terminal.session.started": terminalSessionStartedSchema,
   "terminal.session.ended": terminalSessionEndedSchema,
+  "model.changed": modelChangedSchema,
+  "thinking.level.changed": thinkingLevelChangedSchema,
+  "compaction.created": compactionCreatedSchema,
+  "compaction.failed": compactionFailedSchema,
+  "approval.requested": approvalRequestedSchema,
+  "approval.responded": approvalRespondedSchema,
+  "approval.expired": approvalExpiredSchema,
+  "approval.cancelled": approvalCancelledSchema,
+  "snapshot.created": snapshotCreatedSchema,
+  "snapshot.restored": snapshotRestoredSchema,
+  "snapshot.restore_failed": snapshotRestoreFailedSchema,
+  "snapshot.deleted": snapshotDeletedSchema,
 } as const;
 export type DurableEventType = keyof typeof durableEventSchemas;
 
@@ -336,6 +474,78 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("terminal.session.ended"),
     payload: terminalSessionEndedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("model.changed"),
+    payload: modelChangedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("thinking.level.changed"),
+    payload: thinkingLevelChangedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("compaction.created"),
+    payload: compactionCreatedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("compaction.failed"),
+    payload: compactionFailedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("approval.requested"),
+    payload: approvalRequestedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("approval.responded"),
+    payload: approvalRespondedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("approval.expired"),
+    payload: approvalExpiredSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("approval.cancelled"),
+    payload: approvalCancelledSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("snapshot.created"),
+    payload: snapshotCreatedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("snapshot.restored"),
+    payload: snapshotRestoredSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("snapshot.restore_failed"),
+    payload: snapshotRestoreFailedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("snapshot.deleted"),
+    payload: snapshotDeletedSchema,
   }),
 ]);
 export type KnownAgenaEvent = z.infer<typeof knownAgenaEventSchema>;

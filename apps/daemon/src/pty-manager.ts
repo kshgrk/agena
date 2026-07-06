@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
-import type { EventStore } from "@agena/core";
+import type { EventStore, SessionRecord } from "@agena/core";
 import type {
   CreatePtyRequest,
   CreatePtyResponse,
@@ -50,7 +50,7 @@ export class PtyManager {
 
   constructor(store: EventStore, workspaceDir: string) {
     this.#store = store;
-    this.#workspaceDir = resolve(workspaceDir);
+    this.#workspaceDir = realpathSync(resolve(workspaceDir));
   }
 
   async create(input: CreatePtyRequest): Promise<CreatePtyResponse> {
@@ -59,7 +59,7 @@ export class PtyManager {
       : null;
     if (input.sessionId && !session) throw new Error("SESSION_NOT_FOUND");
 
-    const cwd = this.#cwd(input.cwd);
+    const cwd = this.#cwd(input.cwd ?? session?.cwd, session ?? undefined);
     const shell = input.command ?? "/bin/bash";
     const args = input.command ? (input.args ?? []) : ["-l"];
     const id = randomUUID();
@@ -274,17 +274,28 @@ export class PtyManager {
     });
   }
 
-  #cwd(cwd: string | undefined): string {
-    const path = resolve(this.#workspaceDir, cwd ?? ".");
-    if (
-      path !== this.#workspaceDir &&
-      !path.startsWith(`${this.#workspaceDir}/`)
-    ) {
+  #cwd(cwd: string | undefined, session: SessionRecord | undefined): string {
+    try {
+      const path = realpathSync(resolve(this.#workspaceDir, cwd ?? "."));
+      if (!inside(path, this.#workspaceDir)) {
+        throw new Error("INVALID_CWD");
+      }
+      if (!statSync(path).isDirectory()) throw new Error("INVALID_CWD");
+      if (session?.scope === "project") {
+        const root = realpathSync(
+          resolve(this.#workspaceDir, session.projectRoot ?? "."),
+        );
+        if (!inside(path, root)) throw new Error("INVALID_CWD");
+      }
+      return path;
+    } catch {
       throw new Error("INVALID_CWD");
     }
-    if (!existsSync(path)) throw new Error("INVALID_CWD");
-    return path;
   }
+}
+
+function inside(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
 }
 
 function summary(rec: PtyRecord): PtySummary {

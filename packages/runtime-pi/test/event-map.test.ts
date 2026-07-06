@@ -155,8 +155,6 @@ it("normalizes Pi stop reasons to protocol stop reasons", () => {
     ["stop", "end_turn"],
     ["length", "max_tokens"],
     ["toolUse", "tool_use"],
-    ["aborted", "end_turn"],
-    ["error", "end_turn"],
   ] as const;
 
   for (const [piStopReason, stopReason] of cases) {
@@ -182,6 +180,43 @@ it("normalizes Pi stop reasons to protocol stop reasons", () => {
       },
     ] satisfies RuntimeEvent[]);
   }
+});
+
+it("maps Pi error stops to failed events, not empty completions", () => {
+  const state = createMapperState(() => "id-1");
+  state.runId = "run-1";
+  state.turnId = "turn-1";
+  state.messageId = "message-1";
+  const failed = assistantWithStop("", "error");
+  failed.errorMessage = "Cannot read properties of undefined";
+
+  expect(
+    mapPiEvent(state, {
+      type: "message_end",
+      message: failed,
+    }),
+  ).toEqual([
+    {
+      type: "assistant-message-failed",
+      messageId: "message-1",
+      partialContent: [{ type: "text", text: "" }],
+      error: {
+        code: "error",
+        message: "Cannot read properties of undefined",
+      },
+    },
+    {
+      type: "run-failed",
+      runId: "run-1",
+      error: {
+        code: "error",
+        message: "Cannot read properties of undefined",
+      },
+    },
+  ] satisfies RuntimeEvent[]);
+  expect(
+    mapPiEvent(state, { type: "agent_end", messages: [], willRetry: false }),
+  ).toEqual([]);
 });
 
 it("keeps the run open across agent_end with willRetry", () => {

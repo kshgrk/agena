@@ -3,15 +3,41 @@
 import {
   type AgenaEvent,
   type AgenaFrame,
+  type ApprovalResponse,
   COMMAND_ACK_TIMEOUT_MS,
   type CommandName,
+  type CompactAck,
+  type CreateSessionRequest,
+  compactAckSchema,
+  type DiagnosticsResponse,
+  diagnosticsResponseSchema,
+  type EmptyAck,
+  emptyAckSchema,
+  type FileEntry,
   type InFlightSnapshot,
+  type ListSessionsQuery,
+  type ModelRef,
+  type PendingApprovalSummary,
   PING_INTERVAL_MS,
   PROTOCOL_VERSION,
   type PromptAck,
   promptAckSchema,
+  type RespondToApprovalAck,
+  type RuntimeInfoAck,
+  respondToApprovalAckSchema,
+  runtimeInfoAckSchema,
+  type SearchHit,
+  type SearchQuery,
+  type SessionStatus,
+  type SessionSummary,
+  type SetModelAck,
+  type SetThinkingLevelAck,
+  type SnapshotSummary,
   type SubscribeAck,
+  setModelAckSchema,
+  setThinkingLevelAckSchema,
   subscribeAckSchema,
+  type ThinkingLevel,
   type WelcomeEnvelope,
   type WireEnvelope,
   WS_PATH,
@@ -95,6 +121,11 @@ export type OpenPtyOptions = {
   command?: string;
   args?: string[];
 };
+
+export type CreateSessionOptions = Partial<CreateSessionRequest>;
+export type ListSessionsOptions = ListSessionsQuery;
+export type SearchOptions = Partial<Omit<SearchQuery, "q">>;
+export type ListFilesOptions = { path?: string };
 
 export type PtyAttachment = {
   ptyId: string;
@@ -192,6 +223,66 @@ export class AgenaClient {
     return promptAckSchema.parse(res);
   }
 
+  async steer(sessionId: string, text: string): Promise<PromptAck> {
+    const res = await this.command("steer", {
+      sessionId,
+      content: [{ type: "text", text }],
+    });
+    return promptAckSchema.parse(res);
+  }
+
+  async followUp(sessionId: string, text: string): Promise<PromptAck> {
+    const res = await this.command("followUp", {
+      sessionId,
+      content: [{ type: "text", text }],
+    });
+    return promptAckSchema.parse(res);
+  }
+
+  async abort(sessionId: string, reason?: string): Promise<EmptyAck> {
+    const res = await this.command("abort", { sessionId, reason });
+    return emptyAckSchema.parse(res);
+  }
+
+  async runtimeInfo(sessionId: string): Promise<RuntimeInfoAck> {
+    const res = await this.command("runtimeInfo", { sessionId });
+    return runtimeInfoAckSchema.parse(res);
+  }
+
+  async setModel(sessionId: string, model: ModelRef): Promise<SetModelAck> {
+    const res = await this.command("setModel", { sessionId, model });
+    return setModelAckSchema.parse(res);
+  }
+
+  async setThinkingLevel(
+    sessionId: string,
+    thinkingLevel: ThinkingLevel,
+  ): Promise<SetThinkingLevelAck> {
+    const res = await this.command("setThinkingLevel", {
+      sessionId,
+      thinkingLevel,
+    });
+    return setThinkingLevelAckSchema.parse(res);
+  }
+
+  async respondToApproval(
+    sessionId: string,
+    approvalId: string,
+    response: ApprovalResponse,
+  ): Promise<RespondToApprovalAck> {
+    const res = await this.command("respondToApproval", {
+      sessionId,
+      approvalId,
+      response,
+    });
+    return respondToApprovalAckSchema.parse(res);
+  }
+
+  async compact(sessionId: string, instructions?: string): Promise<CompactAck> {
+    const res = await this.command("compact", { sessionId, instructions });
+    return compactAckSchema.parse(res);
+  }
+
   /** Send a cmd envelope; resolves on ack, rejects on error or 30 s timeout. */
   command(name: CommandName, payload: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
@@ -222,29 +313,102 @@ export class AgenaClient {
     });
   }
 
-  // ---- HTTP (M1: protocol has no http.ts yet, shapes are §9.3 prose) -------
+  // ---- HTTP ---------------------------------------------------------------
 
   /** POST /v1/sessions -> new session id. */
-  async createSession(title?: string): Promise<string> {
-    const body = await this.fetchJson(
-      "POST",
-      "/v1/sessions",
-      title ? { title } : {},
-    );
+  async createSession(input?: string | CreateSessionOptions): Promise<string> {
+    const request =
+      typeof input === "string"
+        ? input
+          ? { title: input }
+          : {}
+        : (input ?? {});
+    const body = await this.fetchJson("POST", "/v1/sessions", request);
     return (body as { sessionId: string }).sessionId;
   }
 
   /** GET /v1/sessions -> session ids, newest first (ULIDs sort by time). */
-  async listSessions(): Promise<string[]> {
-    const body = await this.fetchJson("GET", "/v1/sessions");
-    return (body as { sessions: { sessionId: string }[] }).sessions
-      .map((s) => s.sessionId)
-      .sort()
-      .reverse();
+  async listSessions(filters: ListSessionsOptions = {}): Promise<string[]> {
+    return (await this.listSessionSummaries(filters)).map((s) => s.sessionId);
+  }
+
+  async listSessionSummaries(
+    filters: ListSessionsOptions = {},
+  ): Promise<SessionSummary[]> {
+    const body = await this.fetchJson("GET", sessionsPath(filters));
+    return (body as { sessions: SessionSummary[] }).sessions.sort((a, b) =>
+      b.sessionId.localeCompare(a.sessionId),
+    );
+  }
+
+  async updateSessionStatus(
+    sessionId: string,
+    status: SessionStatus,
+  ): Promise<void> {
+    await this.fetchJson("PATCH", `/v1/sessions/${sessionId}`, { status });
   }
 
   async rebuild(sessionId?: string): Promise<unknown> {
     return this.fetchJson("POST", "/v1/admin/rebuild", { sessionId });
+  }
+
+  async search(query: string, opts: SearchOptions = {}): Promise<SearchHit[]> {
+    const body = await this.fetchJson("GET", searchPath(query, opts));
+    return (body as { hits: SearchHit[] }).hits;
+  }
+
+  async listApprovals(): Promise<PendingApprovalSummary[]> {
+    const body = await this.fetchJson("GET", "/v1/approvals?pending=1");
+    return (body as { approvals: PendingApprovalSummary[] }).approvals;
+  }
+
+  async listFiles(opts: ListFilesOptions = {}): Promise<FileEntry[]> {
+    const query = new URLSearchParams();
+    if (opts.path) query.set("path", opts.path);
+    const qs = query.toString();
+    const body = await this.fetchJson("GET", `/v1/files${qs ? `?${qs}` : ""}`);
+    return (body as { entries: FileEntry[] }).entries;
+  }
+
+  async readFile(path: string): Promise<Uint8Array> {
+    return this.fetchBytes("GET", filesContentPath(path));
+  }
+
+  async archiveFiles(path: string): Promise<Uint8Array> {
+    return this.fetchBytes("GET", filesArchivePath(path));
+  }
+
+  async listSnapshots(): Promise<SnapshotSummary[]> {
+    const body = await this.fetchJson("GET", "/v1/snapshots");
+    return (body as { snapshots: SnapshotSummary[] }).snapshots;
+  }
+
+  async createSnapshot(
+    input: { name?: string; sessionId?: string } = {},
+  ): Promise<SnapshotSummary> {
+    const body = await this.fetchJson("POST", "/v1/snapshots", input);
+    return (body as { snapshot: SnapshotSummary }).snapshot;
+  }
+
+  async restoreSnapshot(
+    snapshotId: string,
+    input: { sessionId?: string } = {},
+  ): Promise<{ snapshotId: string; safetySnapshotId: string }> {
+    return this.fetchJson(
+      "POST",
+      `/v1/snapshots/${snapshotId}/restore`,
+      input,
+    ) as Promise<{ snapshotId: string; safetySnapshotId: string }>;
+  }
+
+  async deleteSnapshot(snapshotId: string): Promise<void> {
+    await this.fetchJson("DELETE", `/v1/snapshots/${snapshotId}`);
+  }
+
+  async diagnostics(): Promise<DiagnosticsResponse> {
+    return diagnosticsResponseSchema.parse(
+      await this.fetchJson("GET", "/v1/diagnostics"),
+    );
   }
 
   async openPty(opts: OpenPtyOptions): Promise<PtyAttachment> {
@@ -297,7 +461,43 @@ export class AgenaClient {
         parsed?.retryable ?? false,
       );
     }
+    if (res.status === 204) return {};
     return res.json();
+  }
+
+  private async fetchBytes(method: string, path: string): Promise<Uint8Array> {
+    const res = await this.fetchRaw(method, path);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  private async fetchRaw(method: string, path: string): Promise<Response> {
+    let res: Response;
+    try {
+      res = await fetch(this.httpBase + path, {
+        method,
+        headers: { authorization: `Bearer ${this.token}` },
+      });
+    } catch (err) {
+      throw new AgenaClientError(
+        "CONNECTION_FAILED",
+        `cannot reach daemon at ${this.httpBase}: ${err instanceof Error ? err.message : String(err)}`,
+        true,
+      );
+    }
+    if (!res.ok) {
+      const fallback = res.status === 401 ? "UNAUTHORIZED" : "INTERNAL";
+      const parsed = (await res.json().catch(() => null)) as {
+        code?: string;
+        message?: string;
+        retryable?: boolean;
+      } | null;
+      throw new AgenaClientError(
+        parsed?.code ?? fallback,
+        parsed?.message ?? `${method} ${path} -> HTTP ${res.status}`,
+        parsed?.retryable ?? false,
+      );
+    }
+    return res;
   }
 
   private ptyWsUrl(wsPath: string): string {
@@ -566,4 +766,34 @@ function stringField(body: unknown, key: string): string {
     );
   }
   return value;
+}
+
+function sessionsPath(filters: ListSessionsOptions): string {
+  const query = new URLSearchParams();
+  if (filters.projectId) query.set("projectId", filters.projectId);
+  if (filters.scope) query.set("scope", filters.scope);
+  if (filters.status) query.set("status", filters.status);
+  if (filters.allProjects) query.set("allProjects", "1");
+  if (filters.includeArchived) query.set("includeArchived", "1");
+  const qs = query.toString();
+  return qs ? `/v1/sessions?${qs}` : "/v1/sessions";
+}
+
+function searchPath(q: string, opts: SearchOptions): string {
+  const query = new URLSearchParams({ q });
+  if (opts.projectId) query.set("projectId", opts.projectId);
+  if (opts.sessionId) query.set("sessionId", opts.sessionId);
+  if (opts.allProjects) query.set("allProjects", "1");
+  if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+  return `/v1/search?${query}`;
+}
+
+function filesContentPath(path: string): string {
+  const query = new URLSearchParams({ path });
+  return `/v1/files/content?${query}`;
+}
+
+function filesArchivePath(path: string): string {
+  const query = new URLSearchParams({ path });
+  return `/v1/files/archive?${query}`;
 }

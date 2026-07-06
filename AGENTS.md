@@ -41,6 +41,7 @@ The structure and its rules are defined in `final_plan.md` §4. Do not reshape i
 
 - `packages/protocol` is the contract: it imports nothing internal (only `zod`) and owns every wire name — envelope, commands, durable-event and frame registries, error/close codes, HTTP route schemas. Everything else compiles against it.
 - `packages/core` defines the ports (`EventStore`, `RuntimeAdapter`) and domain logic; **`packages/runtime-pi` is the only package allowed to import Pi.**
+- For any Pi-related work, read the relevant Pi SDK docs first (start at `https://pi.dev/docs/latest/sdk`, especially the heading that matches the feature: model, thinking level, slash commands, session management, ResourceLoader, etc.) and verify against the installed SDK types/source before deciding the implementation. Prefer Pi's surfaced SDK capabilities over stale local assumptions or hand-rolled mirrors.
 - Dependency edges are mechanically enforced by `pnpm boundary`. Do not add an import that crosses a forbidden edge; if you think you need one, the design is off — discuss it.
 - Match the code that is already there: erasable-syntax-only TypeScript (no enums/namespaces — runs under Node 22 type stripping and Bun), explicit `.ts` import extensions, strict types, no `any`, Biome formatting.
 - Put new files where the plan's tree says they go. New wire names, events, or routes are defined in `protocol` first, then used elsewhere.
@@ -48,6 +49,8 @@ The structure and its rules are defined in `final_plan.md` §4. Do not reshape i
 ## 4. Write optimised code
 
 "Optimised" here means minimal and correct, not clever. Reuse before rebuild; the standard library and native platform features before dependencies; a projection or index before a scan when the plan calls for it. Do not micro-optimise speculatively — but do not reintroduce complexity the plan deliberately removed (e.g. never persist streaming deltas as event rows; keep frames ephemeral).
+
+Use subagents when they can make development faster or better without blurring ownership: split independent discovery, implementation, and verification work into clear, non-overlapping scopes, then integrate their results deliberately. Do not spawn subagents for tiny single-file edits or when their work would collide on the same files.
 
 ## 5. Respect milestone scope
 

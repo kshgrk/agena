@@ -2,8 +2,8 @@
 // ports (§8.2) against @earendil-works/pi-coding-agent. The ONLY package
 // importing the Pi SDK (P16).
 // ponytail: M1 surface only — createSession + prompt + text-streaming events
-// (§14 M1). openSession resume, steer/abort/setModel/compact/approvals, the
-// tool bridge, and idle eviction land with M2–M4.
+// (§14 M1). steer/abort/setModel/compact/approvals, the tool bridge, and idle
+// eviction land with M2–M4.
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -13,7 +13,13 @@ import type {
   RuntimeInFlightSnapshot,
   RuntimeSession,
 } from "@agena/core";
-import type { ModelRef } from "@agena/protocol";
+import type {
+  ApprovalResponse,
+  ModelRef,
+  RuntimeInfoAck,
+  ThinkingLevel,
+} from "@agena/protocol";
+import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
   type AgentSession,
   AuthStorage,
@@ -113,28 +119,29 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     );
     const want =
       input.model ??
-      (this.#defaultModel ? parseModelRef(this.#defaultModel) : undefined);
+      (!input.runtimeSessionRef && this.#defaultModel
+        ? parseModelRef(this.#defaultModel)
+        : undefined);
     const model = want ? modelRegistry.find(want.provider, want.id) : undefined;
     if (want && !model) {
       throw new Error(`unknown model "${want.provider}/${want.id}"`);
     }
 
-    const resourceLoader = containedResourceLoader(
-      input.workspaceDir,
-      this.piDir,
-    );
+    const resourceLoader = containedResourceLoader(input.cwd, this.piDir);
     await resourceLoader.reload();
 
     const { session, extensionsResult, modelFallbackMessage } =
       await createAgentSession({
-        cwd: input.workspaceDir,
+        cwd: input.cwd,
         agentDir: this.piDir,
         authStorage,
         modelRegistry,
         resourceLoader,
         // Persistent JSONL raw layer under piDir/sessions (env redirect above).
-        sessionManager: SessionManager.create(input.workspaceDir),
-        thinkingLevel: "off", // §8.3 M1 default; thinking control is M4
+        sessionManager: input.runtimeSessionRef
+          ? SessionManager.open(input.runtimeSessionRef, undefined, input.cwd)
+          : SessionManager.create(input.cwd),
+        ...(!input.runtimeSessionRef ? { thinkingLevel: "off" as const } : {}),
         // ponytail: M1 streams text only — no invisible built-in tool runs;
         // the Agena tool bridge re-enables tools in M3/M4 (§8.3).
         noTools: "all",
@@ -153,7 +160,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const capture = captureEnabled()
       ? createCaptureTee(input.sessionId, this.#capturesDir, PI_SDK_VERSION)
       : null;
-    const runtime = new PiRuntimeSession(input.sessionId, session, capture);
+    const runtime = new PiRuntimeSession(
+      input.sessionId,
+      session,
+      modelRegistry,
+      capture,
+    );
     this.#sessions.set(input.sessionId, runtime);
     return runtime;
   }
@@ -170,6 +182,7 @@ class PiRuntimeSession implements RuntimeSession {
   state: "idle" | "running" | "errored" | "disposed" = "idle";
 
   #session: AgentSession;
+  #modelRegistry: ModelRegistry;
   #map: MapperState = createMapperState(randomUUID);
   #queue: RuntimeEvent[] = [];
   #wake: (() => void) | null = null;
@@ -183,10 +196,12 @@ class PiRuntimeSession implements RuntimeSession {
   constructor(
     sessionId: string,
     session: AgentSession,
+    modelRegistry: ModelRegistry,
     capture: ((event: unknown) => void) | null,
   ) {
     this.sessionId = sessionId;
     this.#session = session;
+    this.#modelRegistry = modelRegistry;
     const ref = session.sessionFile;
     if (!ref) {
       throw new Error(
@@ -251,6 +266,63 @@ class PiRuntimeSession implements RuntimeSession {
       if (this.state === "running") this.state = "idle"; // preflight rejection: still usable
       throw err;
     }
+  }
+
+  async steer(input: { messageId: string; text: string }): Promise<void> {
+    this.#map.triggerMessageId = input.messageId;
+    await callPi(this.#session, "steer", input.text);
+  }
+
+  async followUp(input: { messageId: string; text: string }): Promise<void> {
+    this.#map.triggerMessageId = input.messageId;
+    await callPi(this.#session, "followUp", input.text);
+  }
+
+  async abort(): Promise<void> {
+    await callPi(this.#session, "abort");
+    if (this.state === "running") this.state = "idle";
+  }
+
+  async info(): Promise<RuntimeInfoAck> {
+    return {
+      ...(this.#session.model ? { model: modelRef(this.#session.model) } : {}),
+      thinkingLevel: this.#session.thinkingLevel,
+      availableModels: this.#modelRegistry.getAvailable().map(modelRef),
+      availableThinkingLevels: this.#session.getAvailableThinkingLevels(),
+      slashCommands: this.#session.promptTemplates.map((p) => ({
+        name: p.name,
+        ...(p.description ? { description: p.description } : {}),
+      })),
+    };
+  }
+
+  async setModel(model: ModelRef): Promise<void> {
+    const resolved = this.#modelRegistry.find(model.provider, model.id);
+    if (!resolved) {
+      throw new Error(`unknown model "${model.provider}/${model.id}"`);
+    }
+    await callPi(this.#session, "setModel", resolved);
+  }
+
+  async setThinkingLevel(thinkingLevel: ThinkingLevel): Promise<void> {
+    await callPi(this.#session, "setThinkingLevel", thinkingLevel);
+  }
+
+  async compact(): Promise<{ summary: string }> {
+    const result = await callPi(this.#session, "compact");
+    return {
+      summary:
+        typeof result === "string"
+          ? result
+          : "Context compacted by the runtime.",
+    };
+  }
+
+  async respondToApproval(
+    approvalId: string,
+    response: ApprovalResponse,
+  ): Promise<void> {
+    await callPi(this.#session, "respondToApproval", approvalId, response);
   }
 
   getInFlightSnapshot(): RuntimeInFlightSnapshot | null {
@@ -329,11 +401,31 @@ class PiRuntimeSession implements RuntimeSession {
         return;
       }
       case "assistant-message-completed":
+      case "assistant-message-failed":
+      case "assistant-message-aborted":
         this.#message = null;
         return;
       case "run-completed":
+      case "run-failed":
+      case "run-aborted":
         this.#run = null;
         return;
     }
   }
+}
+
+function modelRef(model: Model<Api>): ModelRef {
+  return { provider: model.provider, id: model.id };
+}
+
+async function callPi(
+  session: AgentSession,
+  method: string,
+  ...args: unknown[]
+): Promise<unknown> {
+  const fn = (session as unknown as Record<string, unknown>)[method];
+  if (typeof fn !== "function") {
+    throw new Error(`Pi runtime does not expose ${method}()`);
+  }
+  return await Reflect.apply(fn, session, args);
 }

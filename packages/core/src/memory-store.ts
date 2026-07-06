@@ -1,15 +1,24 @@
 // InMemoryEventStore (§7.4, §3.2): the M1 production store AND the permanent
 // test double (P8/P16). Daemon-lifetime only — a restart loses history, by design.
 
-import type { AgenaEvent } from "@agena/protocol";
+import type {
+  AgenaEvent,
+  SessionStatus,
+  SnapshotSummary,
+} from "@agena/protocol";
 import { durableEventSchemas } from "@agena/protocol";
 import { ulid } from "ulid";
 import {
   type AppendEventsInput,
   type AppendEventsResult,
   type CreateSessionInput,
+  type CreateSnapshotRecordInput,
   type EventStore,
+  normalizeSessionScope,
+  type PendingApproval,
+  pendingApprovalsFromEvents,
   type ReadEventsPage,
+  type SessionFilter,
   type SessionRecord,
   StoreError,
 } from "./events/store.ts";
@@ -25,10 +34,12 @@ type CommitListener = (
 
 export class InMemoryEventStore implements EventStore {
   #sessions = new Map<string, SessionState>();
+  #snapshots = new Map<string, SnapshotSummary>();
   #listeners = new Set<CommitListener>();
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const now = new Date().toISOString();
+    const scope = normalizeSessionScope(input);
     const record: SessionRecord = {
       sessionId: ulid(),
       workspaceId: input.workspaceId,
@@ -37,6 +48,8 @@ export class InMemoryEventStore implements EventStore {
       lastSeq: 0,
       createdAt: now,
       updatedAt: now,
+      status: "active",
+      ...scope,
     };
     this.#sessions.set(record.sessionId, { record, events: [] });
     await this.appendEvents({
@@ -51,7 +64,8 @@ export class InMemoryEventStore implements EventStore {
             workspaceId: input.workspaceId,
             ...(input.title !== undefined ? { title: input.title } : {}),
             runtime: "pi",
-            origin: "native",
+            origin: scope.scope === "control" ? "control" : "native",
+            ...scope,
             rootBranchId: record.rootBranchId,
           },
         },
@@ -64,8 +78,78 @@ export class InMemoryEventStore implements EventStore {
     return this.#sessions.get(sessionId)?.record ?? null;
   }
 
-  async listSessions(): Promise<SessionRecord[]> {
-    return [...this.#sessions.values()].map((s) => s.record);
+  async listSessions(filter: SessionFilter = {}): Promise<SessionRecord[]> {
+    return [...this.#sessions.values()]
+      .map((s) => s.record)
+      .filter((s) => sessionMatches(s, filter));
+  }
+
+  async updateSessionStatus(
+    sessionId: string,
+    status: SessionStatus,
+  ): Promise<SessionRecord> {
+    const state = this.#sessions.get(sessionId);
+    if (!state) {
+      throw new StoreError("session_not_found", `unknown session ${sessionId}`);
+    }
+    state.record = {
+      ...state.record,
+      status,
+      updatedAt: new Date().toISOString(),
+    };
+    return state.record;
+  }
+
+  async updateRuntimeSessionRef(
+    sessionId: string,
+    runtimeSessionRef: string,
+  ): Promise<SessionRecord> {
+    const state = this.#sessions.get(sessionId);
+    if (!state) {
+      throw new StoreError("session_not_found", `unknown session ${sessionId}`);
+    }
+    state.record = { ...state.record, runtimeSessionRef };
+    return state.record;
+  }
+
+  async listPendingApprovals(
+    filter: SessionFilter = {},
+  ): Promise<PendingApproval[]> {
+    const events = [...this.#sessions.values()]
+      .filter((s) => sessionMatches(s.record, filter))
+      .flatMap((s) => s.events);
+    return pendingApprovalsFromEvents(events);
+  }
+
+  async createSnapshotRecord(
+    input: CreateSnapshotRecordInput,
+  ): Promise<SnapshotSummary> {
+    const snapshot: SnapshotSummary = {
+      snapshotId: input.snapshotId,
+      workspaceId: input.workspaceId,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.name ? { name: input.name } : {}),
+      kind: input.kind,
+      storagePath: input.storagePath,
+      sha256: input.sha256,
+      sizeBytes: input.sizeBytes,
+      status: "available",
+      createdAt: new Date().toISOString(),
+    };
+    this.#snapshots.set(snapshot.snapshotId, snapshot);
+    return snapshot;
+  }
+
+  async listSnapshots(): Promise<SnapshotSummary[]> {
+    return [...this.#snapshots.values()].sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    );
+  }
+
+  async markSnapshotDeleted(snapshotId: string): Promise<void> {
+    const snapshot = this.#snapshots.get(snapshotId);
+    if (snapshot)
+      this.#snapshots.set(snapshotId, { ...snapshot, status: "deleted" });
   }
 
   // Atomic: validates every event (P12 type check + protocol payload schema, §6.5)
@@ -149,4 +233,16 @@ export class InMemoryEventStore implements EventStore {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
+}
+
+function sessionMatches(s: SessionRecord, filter: SessionFilter): boolean {
+  if (!filter.includeControl && s.scope === "control") return false;
+  if (!filter.includeArchived && s.status === "archived") return false;
+  if (filter.status && s.status !== filter.status) return false;
+  if (filter.allProjects) return true;
+  if (filter.projectId) {
+    return s.scope === "project" && s.projectId === filter.projectId;
+  }
+  if (filter.scope) return s.scope === filter.scope;
+  return s.scope === "project";
 }

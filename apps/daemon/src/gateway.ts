@@ -5,12 +5,20 @@
 import type { EventStore, SessionOrchestrator } from "@agena/core";
 import { OrchestratorError } from "@agena/core";
 import type {
+  AbortCmd,
   AgenaError,
   AgenaEvent,
   AgenaFrame,
   CommandName,
+  CompactCmd,
   ErrorCode,
+  FollowUpCmd,
   PromptCmd,
+  RespondToApprovalCmd,
+  RuntimeInfoCmd,
+  SetModelCmd,
+  SetThinkingLevelCmd,
+  SteerCmd,
   SubscribeCmd,
   WireEnvelope,
 } from "@agena/protocol";
@@ -270,9 +278,9 @@ export class Gateway {
     }
     if (name === "subscribe") {
       void this.#subscribe(conn, requestId, p.data as SubscribeCmd);
-    } else {
-      void this.#prompt(conn, requestId, p.data as PromptCmd);
+      return;
     }
+    void this.#command(conn, requestId, name, p.data);
   }
 
   // §6.3 buffer-then-splice: ack → cold read (replayed:true) → drain buffer → sync → live.
@@ -375,20 +383,116 @@ export class Gateway {
 
   // §5.4 prompt: ack {messageId, seq} strictly after message.user.created commits.
   async #prompt(conn: Conn, requestId: string, cmd: PromptCmd): Promise<void> {
-    try {
-      const result = await this.#orchestrator.handlePrompt(
+    await this.#runCommand(conn, requestId, cmd.sessionId, () =>
+      this.#orchestrator.handlePrompt(
         cmd.sessionId,
         cmd.content,
         conn.clientId ?? undefined,
-      );
+      ),
+    );
+  }
+
+  async #command(
+    conn: Conn,
+    requestId: string,
+    name: Exclude<CommandName, "subscribe">,
+    cmd: unknown,
+  ): Promise<void> {
+    switch (name) {
+      case "prompt":
+        await this.#prompt(conn, requestId, cmd as PromptCmd);
+        return;
+      case "steer": {
+        const c = cmd as SteerCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleSteer(
+            c.sessionId,
+            c.content,
+            conn.clientId ?? undefined,
+          ),
+        );
+        return;
+      }
+      case "followUp": {
+        const c = cmd as FollowUpCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleFollowUp(
+            c.sessionId,
+            c.content,
+            conn.clientId ?? undefined,
+          ),
+        );
+        return;
+      }
+      case "abort": {
+        const c = cmd as AbortCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleAbort(c.sessionId),
+        );
+        return;
+      }
+      case "runtimeInfo": {
+        const c = cmd as RuntimeInfoCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleRuntimeInfo(c.sessionId),
+        );
+        return;
+      }
+      case "setModel": {
+        const c = cmd as SetModelCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleSetModel(c.sessionId, c.model),
+        );
+        return;
+      }
+      case "setThinkingLevel": {
+        const c = cmd as SetThinkingLevelCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleSetThinkingLevel(
+            c.sessionId,
+            c.thinkingLevel,
+          ),
+        );
+        return;
+      }
+      case "respondToApproval": {
+        const c = cmd as RespondToApprovalCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleRespondToApproval(
+            c.sessionId,
+            c.approvalId,
+            c.response,
+            conn.clientId ?? undefined,
+          ),
+        );
+        return;
+      }
+      case "compact": {
+        const c = cmd as CompactCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleCompact(c.sessionId),
+        );
+        return;
+      }
+    }
+  }
+
+  async #runCommand(
+    conn: Conn,
+    requestId: string,
+    sessionId: string,
+    run: () => Promise<unknown>,
+  ): Promise<void> {
+    try {
+      const result = await run();
       this.#sendAck(conn, requestId, { kind: "ack", result });
     } catch (err) {
       if (err instanceof OrchestratorError) {
         this.#sendError(conn, requestId, err.code, { message: err.message });
         return;
       }
-      log("error", "prompt failed", {
-        sessionId: cmd.sessionId,
+      log("error", "command failed", {
+        sessionId,
         err: String(err),
       });
       this.#sendError(conn, requestId, "INTERNAL", {

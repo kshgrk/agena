@@ -4,3 +4,4 @@ export * from "./events/store.ts";
 export { InMemoryEventStore } from "./memory-store.ts";
 export * from "./runtime/types.ts";
 export * from "./sessions/orchestrator.ts";
+export * from "./workspaces/resolve-path.ts";

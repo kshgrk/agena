@@ -11,6 +11,12 @@ const userMessage = (text: string): NewEvent => ({
   source: user,
   payload: { messageId: ulid(), content: [{ type: "text", text }] },
 });
+const approvalRequest = (approvalId = ulid()): NewEvent => ({
+  type: "approval.requested",
+  v: 1,
+  source: { kind: "runtime", runtime: "pi" },
+  payload: { approvalId, kind: "confirm", message: "Continue?" },
+});
 
 test("assigns contiguous per-session seqs and replay returns exactly what was appended", async () => {
   const store = new InMemoryEventStore();
@@ -104,3 +110,122 @@ test("rejects non-durable types and invalid payloads without mutating state (P12
   const { events } = await store.readEvents(session.sessionId, 0);
   expect(events.map((e) => e.type)).toEqual(["session.created"]); // batch was atomic
 });
+
+test("filters project and global sessions", async () => {
+  const store = new InMemoryEventStore();
+  const a = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+    projectRoot: "repo-a",
+    cwd: "repo-a/pkg",
+  });
+  const b = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-b",
+    projectRoot: "repo-b",
+    cwd: "repo-b",
+  });
+  const global = await store.createSession({
+    workspaceId: "ws-1",
+    scope: "global",
+  });
+
+  expect(
+    (await store.listSessions({ projectId: "project-a" })).map(id),
+  ).toEqual([a.sessionId]);
+  expect(
+    (
+      await store.listSessions({ scope: "project", projectId: "project-a" })
+    ).map(id),
+  ).toEqual([a.sessionId]);
+  expect((await store.listSessions()).map(id)).toEqual([
+    a.sessionId,
+    b.sessionId,
+  ]);
+  expect((await store.listSessions({ scope: "global" })).map(id)).toEqual([
+    global.sessionId,
+  ]);
+  expect(
+    (await store.listSessions({ allProjects: true })).map(id).sort(),
+  ).toEqual([a.sessionId, b.sessionId, global.sessionId].sort());
+
+  const replay = await store.readEvents(a.sessionId, 0);
+  expect(replay.events[0]?.payload).toMatchObject({
+    scope: "project",
+    projectId: "project-a",
+    projectRoot: "repo-a",
+    cwd: "repo-a/pkg",
+  });
+});
+
+test("lists pending approvals as requested minus terminal sibling", async () => {
+  const store = new InMemoryEventStore();
+  const a = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+  });
+  const b = await store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-b",
+  });
+  const pending = ulid();
+  const answered = ulid();
+
+  await store.appendEvents({
+    sessionId: a.sessionId,
+    branchId: a.rootBranchId,
+    events: [
+      approvalRequest(pending),
+      approvalRequest(answered),
+      {
+        type: "approval.responded",
+        v: 1,
+        source: user,
+        payload: {
+          approvalId: answered,
+          response: { kind: "confirm", accepted: true },
+          respondedBy: "client-1",
+        },
+      },
+      {
+        type: "model.changed",
+        v: 1,
+        source: user,
+        payload: { to: { provider: "fake", id: "fake-2" }, reason: "auto" },
+      },
+      {
+        type: "thinking.level.changed",
+        v: 1,
+        source: user,
+        payload: { from: "low", to: "high" },
+      },
+      {
+        type: "compaction.created",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: {
+          compactionId: ulid(),
+          summary: [{ type: "text", text: "summary" }],
+          replacesUpToSeq: 1,
+          trigger: "auto",
+        },
+      },
+    ],
+  });
+  await store.appendEvents({
+    sessionId: b.sessionId,
+    branchId: b.rootBranchId,
+    events: [approvalRequest(ulid())],
+  });
+
+  expect(await store.listPendingApprovals({ projectId: "project-a" })).toEqual([
+    expect.objectContaining({
+      sessionId: a.sessionId,
+      branchId: a.rootBranchId,
+      approvalId: pending,
+      payload: expect.objectContaining({ message: "Continue?" }),
+    }),
+  ]);
+});
+
+const id = (s: { sessionId: string }) => s.sessionId;

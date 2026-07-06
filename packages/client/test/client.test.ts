@@ -130,6 +130,134 @@ describe("AgenaClient", () => {
     await client.close();
   });
 
+  it("sends typed M4.5 command wrappers", async () => {
+    const { client, sock } = await connected();
+
+    const steer = client.steer("s1", "guide");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "steer",
+      payload: { sessionId: "s1", content: [{ type: "text", text: "guide" }] },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { messageId: "m1", seq: 1 },
+    });
+    await expect(steer).resolves.toEqual({ messageId: "m1", seq: 1 });
+
+    const followUp = client.followUp("s1", "next");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "followUp",
+      payload: { sessionId: "s1", content: [{ type: "text", text: "next" }] },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { messageId: "m2", seq: 2 },
+    });
+    await expect(followUp).resolves.toEqual({ messageId: "m2", seq: 2 });
+
+    const abort = client.abort("s1", "user");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "abort",
+      payload: { sessionId: "s1", reason: "user" },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: {},
+    });
+    await expect(abort).resolves.toEqual({});
+
+    const runtimeInfo = client.runtimeInfo("s1");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "runtimeInfo",
+      payload: { sessionId: "s1" },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: {
+        model: { provider: "openai", id: "gpt-5.5-pro" },
+        thinkingLevel: "high",
+        availableModels: [{ provider: "openai", id: "gpt-5.5-pro" }],
+        availableThinkingLevels: ["off", "high"],
+        slashCommands: [{ name: "deploy" }],
+      },
+    });
+    await expect(runtimeInfo).resolves.toEqual({
+      model: { provider: "openai", id: "gpt-5.5-pro" },
+      thinkingLevel: "high",
+      availableModels: [{ provider: "openai", id: "gpt-5.5-pro" }],
+      availableThinkingLevels: ["off", "high"],
+      slashCommands: [{ name: "deploy" }],
+    });
+
+    const setModel = client.setModel("s1", {
+      provider: "openai",
+      id: "gpt-5.5-pro",
+    });
+    expect(sock.lastCmd()).toMatchObject({
+      name: "setModel",
+      payload: {
+        sessionId: "s1",
+        model: { provider: "openai", id: "gpt-5.5-pro" },
+      },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { model: { provider: "openai", id: "gpt-5.5-pro" } },
+    });
+    await expect(setModel).resolves.toEqual({
+      model: { provider: "openai", id: "gpt-5.5-pro" },
+    });
+
+    const thinking = client.setThinkingLevel("s1", "high");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "setThinkingLevel",
+      payload: { sessionId: "s1", thinkingLevel: "high" },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { thinkingLevel: "high" },
+    });
+    await expect(thinking).resolves.toEqual({ thinkingLevel: "high" });
+
+    const approval = client.respondToApproval("s1", "a1", {
+      kind: "confirm",
+      accepted: true,
+    });
+    expect(sock.lastCmd()).toMatchObject({
+      name: "respondToApproval",
+      payload: {
+        sessionId: "s1",
+        approvalId: "a1",
+        response: { kind: "confirm", accepted: true },
+      },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { approvalId: "a1" },
+    });
+    await expect(approval).resolves.toEqual({ approvalId: "a1" });
+
+    const compact = client.compact("s1", "shorter");
+    expect(sock.lastCmd()).toMatchObject({
+      name: "compact",
+      payload: { sessionId: "s1", instructions: "shorter" },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { compactionSeq: 8 },
+    });
+    await expect(compact).resolves.toEqual({ compactionSeq: 8 });
+    await client.close();
+  });
+
   it("bumps the cursor, drops duplicates, and reconnects on a seq gap", async () => {
     const { client, sock } = await connected();
     const seen: number[] = [];
@@ -301,5 +429,179 @@ describe("AgenaClient", () => {
       url: "ws://127.0.0.1:7777/v1/ptys/pty_1/ws",
       init: { headers: { authorization: "Bearer secret" } },
     });
+  });
+
+  it("sends scoped create-session requests", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ sessionId: "s1" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(
+      client.createSession({
+        title: "task",
+        scope: "project",
+        projectId: "p1",
+        projectRoot: ".",
+        cwd: "apps/api",
+        hostCwdHint: "/repo/apps/api",
+      }),
+    ).resolves.toBe("s1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/v1/sessions",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "task",
+          scope: "project",
+          projectId: "p1",
+          projectRoot: ".",
+          cwd: "apps/api",
+          hostCwdHint: "/repo/apps/api",
+        }),
+      },
+    );
+  });
+
+  it("sends scoped list-session query params", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          sessions: [{ sessionId: "01" }, { sessionId: "02" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(
+      client.listSessions({
+        projectId: "p1",
+        scope: "project",
+        allProjects: true,
+      }),
+    ).resolves.toEqual(["02", "01"]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/v1/sessions?projectId=p1&scope=project&allProjects=1",
+      {
+        method: "GET",
+        headers: { authorization: "Bearer secret" },
+      },
+    );
+  });
+
+  it("sends scoped search query params", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          hits: [
+            {
+              sessionId: "s1",
+              messageId: "m1",
+              snippet: "[needle]",
+              rank: -1,
+              seq: 2,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(
+      client.search("needle words", {
+        projectId: "p1",
+        allProjects: true,
+        limit: 5,
+      }),
+    ).resolves.toEqual([
+      {
+        sessionId: "s1",
+        messageId: "m1",
+        snippet: "[needle]",
+        rank: -1,
+        seq: 2,
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/v1/search?q=needle+words&projectId=p1&allProjects=1&limit=5",
+      {
+        method: "GET",
+        headers: { authorization: "Bearer secret" },
+      },
+    );
+  });
+
+  it("wraps file list/read/archive HTTP routes", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/v1/files?")) {
+        return new Response(
+          JSON.stringify({
+            entries: [
+              {
+                name: "a.txt",
+                type: "file",
+                size: 2,
+                mtime: "2026-07-06T00:00:00.000Z",
+                mode: 33188,
+              },
+            ],
+            nextCursor: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("ok", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(client.listFiles({ path: "src dir" })).resolves.toEqual([
+      {
+        name: "a.txt",
+        type: "file",
+        size: 2,
+        mtime: "2026-07-06T00:00:00.000Z",
+        mode: 33188,
+      },
+    ]);
+    await expect(client.readFile("src dir/a.txt")).resolves.toEqual(
+      new TextEncoder().encode("ok"),
+    );
+    await expect(client.archiveFiles("src dir")).resolves.toEqual(
+      new TextEncoder().encode("ok"),
+    );
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:7777/v1/files?path=src+dir",
+      "http://127.0.0.1:7777/v1/files/content?path=src+dir%2Fa.txt",
+      "http://127.0.0.1:7777/v1/files/archive?path=src+dir",
+    ]);
   });
 });

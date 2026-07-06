@@ -3,7 +3,13 @@
 // Exported via the @agena/core/testing subpath.
 // ponytail: §8.8's scriptSession/step builders, failNextPrompt and crashMidMessage
 // arrive with the M2+ features that assert those paths (dispatch failure, boot sweep).
-import type { ModelRef } from "@agena/protocol";
+import type {
+  ApprovalRequested,
+  ApprovalResponse,
+  ModelRef,
+  RuntimeInfoAck,
+  ThinkingLevel,
+} from "@agena/protocol";
 import { ulid } from "ulid";
 import type {
   CreateRuntimeSessionInput,
@@ -27,6 +33,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export class FakeRuntimeAdapter implements RuntimeAdapter {
   readonly id = "fake" as const;
   readonly version = "0.0.0";
+  readonly createInputs: CreateRuntimeSessionInput[] = [];
   #options: FakeRuntimeOptions;
 
   constructor(options: FakeRuntimeOptions = {}) {
@@ -36,6 +43,7 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
   async createSession(
     input: CreateRuntimeSessionInput,
   ): Promise<RuntimeSession> {
+    this.createInputs.push(input);
     return new FakeRuntimeSession(input.sessionId, this.#options);
   }
 
@@ -52,11 +60,18 @@ class FakeRuntimeSession implements RuntimeSession {
   #wake: (() => void) | null = null;
   #consuming = false;
   #snapshot: RuntimeInFlightSnapshot | null = null;
+  #model: ModelRef;
+  #thinkingLevel: ThinkingLevel = "off";
+  #pendingApproval: {
+    approvalId: string;
+    resolve: (response: ApprovalResponse) => void;
+  } | null = null;
 
   constructor(sessionId: string, options: FakeRuntimeOptions) {
     this.sessionId = sessionId;
     this.runtimeSessionRef = `fake:${sessionId}`;
     this.#options = options;
+    this.#model = options.model ?? DEFAULT_MODEL;
   }
 
   events(): AsyncIterable<RuntimeEvent> {
@@ -70,12 +85,69 @@ class FakeRuntimeSession implements RuntimeSession {
   }
 
   async prompt(input: { messageId: string; text: string }): Promise<void> {
+    await this.#accept("prompt", input);
+  }
+
+  async steer(_input: { messageId: string; text: string }): Promise<void> {
+    if (this.state !== "running") {
+      throw new Error(`fake runtime: steer while ${this.state}`);
+    }
+  }
+
+  async followUp(_input: { messageId: string; text: string }): Promise<void> {
+    if (this.state !== "running") {
+      throw new Error(`fake runtime: followUp while ${this.state}`);
+    }
+  }
+
+  async abort(): Promise<void> {
+    this.state = "idle";
+    this.#snapshot = null;
+    this.#resolvePendingApproval({ kind: "deny" });
+  }
+
+  async info(): Promise<RuntimeInfoAck> {
+    return {
+      model: this.#model,
+      thinkingLevel: this.#thinkingLevel,
+      availableModels: [this.#model],
+      availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+      slashCommands: [],
+    };
+  }
+
+  async setModel(model: ModelRef): Promise<void> {
+    this.#model = model;
+  }
+
+  async setThinkingLevel(thinkingLevel: ThinkingLevel): Promise<void> {
+    this.#thinkingLevel = thinkingLevel;
+  }
+
+  async compact(): Promise<{ summary: string }> {
+    return {
+      summary: `Fake runtime compacted context at thinking=${this.#thinkingLevel}.`,
+    };
+  }
+
+  async respondToApproval(
+    approvalId: string,
+    response: ApprovalResponse,
+  ): Promise<void> {
+    if (this.#pendingApproval?.approvalId !== approvalId) return;
+    this.#resolvePendingApproval(response);
+  }
+
+  async #accept(
+    trigger: "prompt" | "steer" | "followUp",
+    input: { messageId: string; text: string },
+  ): Promise<void> {
     if (this.state !== "idle") {
-      throw new Error(`fake runtime: prompt while ${this.state}`);
+      throw new Error(`fake runtime: ${trigger} while ${this.state}`);
     }
     this.state = "running";
     // resolves on ACCEPT; the scripted run streams via events()
-    void this.#run(input.messageId, input.text).catch((err) => {
+    void this.#run(trigger, input.messageId, input.text).catch((err) => {
       this.state = "errored";
       console.error("[agena-core] fake runtime run failed:", err);
     });
@@ -87,6 +159,7 @@ class FakeRuntimeSession implements RuntimeSession {
 
   async dispose(): Promise<void> {
     this.state = "disposed";
+    this.#resolvePendingApproval({ kind: "deny" });
     this.#wake?.();
     this.#wake = null;
   }
@@ -110,9 +183,14 @@ class FakeRuntimeSession implements RuntimeSession {
     this.#wake = null;
   }
 
-  async #run(triggerMessageId: string, text: string): Promise<void> {
-    const { script, delayMs = 0, model = DEFAULT_MODEL } = this.#options;
-    const deltas = script ? script(text) : ["echo: ", text];
+  async #run(
+    trigger: "prompt" | "steer" | "followUp",
+    triggerMessageId: string,
+    text: string,
+  ): Promise<void> {
+    const { script, delayMs = 0 } = this.#options;
+    const model = this.#model;
+    let deltas = script ? script(text) : ["echo: ", text];
     const emit = async (ev: RuntimeEvent) => {
       if (delayMs > 0) await sleep(delayMs);
       this.#push(ev);
@@ -124,15 +202,25 @@ class FakeRuntimeSession implements RuntimeSession {
     const block = { index: 0, type: "text" as const, text: "" };
     this.#snapshot = {
       sessionId: this.sessionId,
-      run: { runId, startedAt: new Date().toISOString(), trigger: "prompt" },
+      run: { runId, startedAt: new Date().toISOString(), trigger },
       assistantMessage: null,
     };
     await emit({
       type: "run-started",
       runId,
-      trigger: "prompt",
+      trigger,
       triggerMessageId,
     });
+    if (this.state !== "running") return;
+
+    const approval = manualApproval(text);
+    if (approval) {
+      const response = this.#waitForApproval(approval.approvalId);
+      await emit({ type: "approval-requested", approval });
+      if (this.state !== "running") return;
+      deltas = [`approval response: ${approvalResponseText(await response)}`];
+      if (this.state !== "running") return;
+    }
 
     this.#snapshot.assistantMessage = { messageId, model, blocks: [block] };
     await emit({
@@ -142,7 +230,9 @@ class FakeRuntimeSession implements RuntimeSession {
       turnId,
       model,
     });
+    if (this.state !== "running") return;
     for (const delta of deltas) {
+      if (this.state !== "running") return;
       block.text += delta;
       await emit({
         type: "assistant-text-delta",
@@ -151,6 +241,7 @@ class FakeRuntimeSession implements RuntimeSession {
         delta,
       });
     }
+    if (this.state !== "running") return;
     const usage = { inputTokens: text.length, outputTokens: block.text.length };
     await emit({
       type: "assistant-message-completed",
@@ -166,5 +257,65 @@ class FakeRuntimeSession implements RuntimeSession {
     this.#snapshot = null;
     await emit({ type: "run-completed", runId, usage });
     if (this.state === "running") this.state = "idle";
+  }
+
+  #waitForApproval(approvalId: string): Promise<ApprovalResponse> {
+    return new Promise((resolve) => {
+      this.#pendingApproval = { approvalId, resolve };
+    });
+  }
+
+  #resolvePendingApproval(response: ApprovalResponse): void {
+    const pending = this.#pendingApproval;
+    this.#pendingApproval = null;
+    pending?.resolve(response);
+  }
+}
+
+function manualApproval(text: string): ApprovalRequested | null {
+  const [command, kind = "confirm"] = text.trim().toLowerCase().split(/\s+/);
+  if (command !== "approval") return null;
+  const approvalId = ulid();
+  if (kind === "select") {
+    return {
+      approvalId,
+      kind,
+      title: "Manual approval test",
+      message: "Choose one option to continue the fake runtime turn.",
+      options: [
+        { id: "one", label: "Option one" },
+        { id: "two", label: "Option two" },
+        { id: "three", label: "Option three" },
+      ],
+    };
+  }
+  if (kind === "input" || kind === "editor") {
+    return {
+      approvalId,
+      kind,
+      title: "Manual approval test",
+      message: `Enter ${kind} text to continue the fake runtime turn.`,
+      defaultValue: kind === "input" ? "approved" : undefined,
+    };
+  }
+  return {
+    approvalId,
+    kind: "confirm",
+    title: "Manual approval test",
+    message: "Approve or deny to continue the fake runtime turn.",
+  };
+}
+
+function approvalResponseText(response: ApprovalResponse): string {
+  switch (response.kind) {
+    case "confirm":
+      return response.accepted ? "confirmed" : "rejected";
+    case "select":
+      return `selected ${response.optionId}`;
+    case "input":
+    case "editor":
+      return response.text;
+    case "deny":
+      return "denied";
   }
 }

@@ -1,9 +1,18 @@
 // Suites 6 & 7, M1 subset (§13.5): real WS against an ephemeral port with the
 // FakeRuntimeAdapter — zero model calls (P16).
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { RuntimeAdapter } from "@agena/core";
 import { FakeRuntimeAdapter } from "@agena/core/testing";
 import type { WireEnvelope } from "@agena/protocol";
 import {
@@ -43,7 +52,7 @@ afterEach(async () => {
 });
 
 async function boot(
-  adapter = new FakeRuntimeAdapter(),
+  adapter: RuntimeAdapter = new FakeRuntimeAdapter(),
   config: Partial<DaemonConfig> = {},
 ): Promise<Daemon> {
   const daemon = await startDaemon(
@@ -61,6 +70,48 @@ async function boot(
   );
   daemons.push(daemon);
   return daemon;
+}
+
+function compactErrorAdapter(errorMessage: string): RuntimeAdapter {
+  return {
+    id: "fake",
+    version: "0.0.0",
+    async createSession(input) {
+      return {
+        sessionId: input.sessionId,
+        runtimeSessionRef: `fake:${input.sessionId}`,
+        state: "idle",
+        async *events() {
+          await new Promise<never>(() => {});
+        },
+        async prompt() {},
+        async steer() {},
+        async followUp() {},
+        async abort() {},
+        async info() {
+          const model = { provider: "fake", id: "fake-1" };
+          return {
+            model,
+            thinkingLevel: "off",
+            availableModels: [model],
+            availableThinkingLevels: ["off"],
+            slashCommands: [],
+          };
+        },
+        async setModel() {},
+        async setThinkingLevel() {},
+        async compact() {
+          throw new Error(errorMessage);
+        },
+        async respondToApproval() {},
+        getInFlightSnapshot() {
+          return null;
+        },
+        async dispose() {},
+      };
+    },
+    async dispose() {},
+  };
 }
 
 function stateDir(): string {
@@ -249,17 +300,309 @@ test("POST/GET /v1/sessions: bearer-gated create + list (the `agena` boot path)"
   const created = await fetch(base, {
     method: "POST",
     headers: { ...auth, "content-type": "application/json" },
-    body: JSON.stringify({ title: "hi" }),
+    body: JSON.stringify({
+      title: "hi",
+      scope: "project",
+      projectId: "project-a",
+      projectRoot: ".",
+      cwd: ".",
+    }),
   });
   expect(created.status).toBe(201);
   const { sessionId } = (await created.json()) as { sessionId: string };
   expect(typeof sessionId).toBe("string");
 
-  const listed = await fetch(base, { headers: auth });
+  await fetch(base, {
+    method: "POST",
+    headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({
+      title: "other",
+      scope: "project",
+      projectId: "project-b",
+      projectRoot: ".",
+      cwd: ".",
+    }),
+  });
+  const global = await fetch(base, {
+    method: "POST",
+    headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ title: "global", scope: "global" }),
+  });
+  expect(global.status).toBe(201);
+
+  const listed = await fetch(`${base}?projectId=project-a`, { headers: auth });
   const { sessions } = (await listed.json()) as {
-    sessions: Array<{ sessionId: string; title?: string }>;
+    sessions: Array<{
+      sessionId: string;
+      title?: string;
+      scope: string;
+      projectId?: string;
+      cwd: string;
+    }>;
   };
-  expect(sessions).toMatchObject([{ sessionId, title: "hi" }]);
+  expect(sessions).toMatchObject([
+    {
+      sessionId,
+      title: "hi",
+      scope: "project",
+      projectId: "project-a",
+      cwd: ".",
+    },
+  ]);
+
+  const globals = await fetch(`${base}?scope=global`, { headers: auth });
+  expect(
+    ((await globals.json()) as { sessions: unknown[] }).sessions,
+  ).toHaveLength(1);
+});
+
+test("GET /v1/search returns project-filtered sqlite FTS hits", async () => {
+  const dir = stateDir();
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    stateDir: dir,
+    storage: "sqlite",
+  });
+  const a = await daemon.store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+  });
+  const b = await daemon.store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-b",
+  });
+  await daemon.store.appendEvents({
+    sessionId: a.sessionId,
+    branchId: a.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: {
+          messageId: "message-a",
+          content: [{ type: "text", text: "needle alpha" }],
+        },
+      },
+    ],
+  });
+  await daemon.store.appendEvents({
+    sessionId: b.sessionId,
+    branchId: b.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: {
+          messageId: "message-b",
+          content: [{ type: "text", text: "needle beta" }],
+        },
+      },
+    ],
+  });
+
+  const res = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/search?q=needle&projectId=project-a`,
+    { headers: { authorization: `Bearer ${TOKEN}` } },
+  );
+  expect(res.status).toBe(200);
+  expect(await res.json()).toMatchObject({
+    hits: [
+      {
+        sessionId: a.sessionId,
+        messageId: "message-a",
+        seq: 2,
+      },
+    ],
+  });
+});
+
+test("POST /v1/sessions rejects cwd escapes through symlinks", async () => {
+  const workspace = stateDir();
+  mkdirSync(join(workspace, "repo"), { recursive: true });
+  const outside = stateDir();
+  symlinkSync(outside, join(workspace, "repo", "escape"));
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const res = await fetch(`http://127.0.0.1:${daemon.port}/v1/sessions`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      scope: "project",
+      projectId: "project-a",
+      projectRoot: "repo",
+      cwd: "repo/escape",
+    }),
+  });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({ code: "INVALID_PAYLOAD" });
+});
+
+test("GET /v1/files lists and reads workspace files, rejecting escapes", async () => {
+  const workspace = stateDir();
+  mkdirSync(join(workspace, "repo"), { recursive: true });
+  writeFileSync(join(workspace, "repo", "a.txt"), "hello");
+  const outside = stateDir();
+  symlinkSync(outside, join(workspace, "repo", "escape"));
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const headers = { authorization: `Bearer ${TOKEN}` };
+
+  const listed = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/files?path=repo`,
+    { headers },
+  );
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({
+    entries: [
+      { name: "a.txt", type: "file", size: 5 },
+      { name: "escape", type: "symlink" },
+    ],
+    nextCursor: null,
+  });
+
+  const content = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/files/content?path=repo/a.txt`,
+    { headers },
+  );
+  expect(content.status).toBe(200);
+  expect(await content.text()).toBe("hello");
+
+  const escaped = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/files/content?path=repo/escape/a.txt`,
+    { headers },
+  );
+  expect(escaped.status).toBe(403);
+  expect(await escaped.json()).toMatchObject({
+    code: "PATH_ESCAPES_WORKSPACE",
+  });
+});
+
+test("GET /v1/diagnostics reports invalid .agena tools without executing them", async () => {
+  const workspace = stateDir();
+  mkdirSync(join(workspace, ".agena", "tools"), { recursive: true });
+  writeFileSync(
+    join(workspace, ".agena", "tools", "broken.ts"),
+    'throw new Error("should not execute");\nexport default defineTool({\n',
+  );
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const res = await fetch(`http://127.0.0.1:${daemon.port}/v1/diagnostics`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toMatchObject({
+    workspace: { path: workspace },
+    discovery: {
+      entries: [
+        {
+          kind: "tool",
+          name: "broken",
+          file: ".agena/tools/broken.ts",
+          status: "invalid",
+          reason: "unbalanced delimiters",
+        },
+      ],
+    },
+  });
+});
+
+test("PATCH /v1/sessions/:id archives sessions out of default lists", async () => {
+  const daemon = await boot();
+  const base = `http://127.0.0.1:${daemon.port}/v1/sessions`;
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+  const created = await fetch(base, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      title: "archive me",
+      scope: "project",
+      projectId: "project-a",
+      projectRoot: ".",
+      cwd: ".",
+    }),
+  });
+  const { sessionId } = (await created.json()) as { sessionId: string };
+
+  const archived = await fetch(`${base}/${sessionId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "archived" }),
+  });
+  expect(archived.status).toBe(204);
+
+  const listed = await fetch(`${base}?projectId=project-a`, { headers });
+  expect(((await listed.json()) as { sessions: unknown[] }).sessions).toEqual(
+    [],
+  );
+  const withArchived = await fetch(
+    `${base}?projectId=project-a&includeArchived=1`,
+    { headers },
+  );
+  expect(
+    ((await withArchived.json()) as { sessions: Array<{ status: string }> })
+      .sessions[0]?.status,
+  ).toBe("archived");
+});
+
+test("snapshots restore workspace files without deleting session history", async () => {
+  const workspace = stateDir();
+  const state = stateDir();
+  writeFileSync(join(workspace, "note.txt"), "before");
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+    stateDir: state,
+    storage: "sqlite",
+  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+  const session = await fetch(`http://127.0.0.1:${daemon.port}/v1/sessions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      scope: "project",
+      projectId: "project-a",
+      projectRoot: ".",
+      cwd: ".",
+    }),
+  });
+  const { sessionId } = (await session.json()) as { sessionId: string };
+  const created = await fetch(`http://127.0.0.1:${daemon.port}/v1/snapshots`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: "before", sessionId }),
+  });
+  expect(created.status).toBe(201);
+  const { snapshot } = (await created.json()) as {
+    snapshot: { snapshotId: string };
+  };
+
+  writeFileSync(join(workspace, "note.txt"), "after");
+  const restored = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/snapshots/${snapshot.snapshotId}/restore`,
+    { method: "POST", headers, body: JSON.stringify({ sessionId }) },
+  );
+  expect(restored.status).toBe(200);
+  expect(readFileSync(join(workspace, "note.txt"), "utf8")).toBe("before");
+
+  const events = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/sessions/${sessionId}/events?fromSeq=0`,
+    { headers },
+  );
+  expect(((await events.json()) as { events: unknown[] }).events).toHaveLength(
+    1,
+  );
 });
 
 test("subscribe → prompt: requestId acks and an ordered, gap-free stream", async () => {
@@ -561,6 +904,31 @@ test("malformed input ⇒ error envelopes: no requestId for garbage, requestId f
   expect(missing).toMatchObject({ error: { code: "SESSION_NOT_FOUND" } });
 });
 
+test("compact command surfaces runtime user-facing errors", async () => {
+  const daemon = await boot(
+    compactErrorAdapter("Nothing to compact (session too small)"),
+  );
+  const session = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const c = await TestClient.connect(daemon.port);
+
+  c.send({
+    kind: "cmd",
+    requestId: "r-compact",
+    name: "compact",
+    payload: { sessionId: session.sessionId },
+  });
+
+  const failed = await c.waitFor(
+    (m) => m.kind === "error" && m.requestId === "r-compact",
+  );
+  expect(failed).toMatchObject({
+    error: {
+      code: "RUNTIME_UNAVAILABLE",
+      message: "Nothing to compact (session too small)",
+    },
+  });
+});
+
 test("graceful daemon close terminalizes an active assistant with partial content", async () => {
   const dir = stateDir();
   const daemon = await boot(
@@ -682,10 +1050,16 @@ test("backpressure decisions match the M2 thresholds", () => {
 
 test("PTY command shares workspace and emits terminal lifecycle events", async () => {
   const workspace = stateDir();
+  mkdirSync(join(workspace, "repo", "pkg"), { recursive: true });
   const daemon = await boot(new FakeRuntimeAdapter(), {
     workspaceDir: workspace,
   });
-  const session = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const session = await daemon.store.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+    projectRoot: "repo",
+    cwd: "repo/pkg",
+  });
   const c = await TestClient.connect(daemon.port);
   c.send({
     kind: "cmd",
@@ -700,14 +1074,15 @@ test("PTY command shares workspace and emits terminal lifecycle events", async (
     rows: 24,
     sessionId: session.sessionId,
     command: "/bin/sh",
-    args: ["-lc", "touch hello.txt; printf done"],
+    args: ["-lc", "pwd; touch hello.txt; printf done"],
   });
   const ws = await attachPty(daemon.port, wsPath);
   const result = await collectPty(ws);
 
   expect(result.output).toContain("done");
+  expect(result.output).toContain(join(workspace, "repo", "pkg"));
   expect(result.exitCode).toBe(0);
-  expect(existsSync(join(workspace, "hello.txt"))).toBe(true);
+  expect(existsSync(join(workspace, "repo", "pkg", "hello.txt"))).toBe(true);
   await c.waitFor(
     (m) => isEvent(m) && m.event.type === "terminal.session.ended",
   );

@@ -89,6 +89,7 @@ These are product acceptance requirements; milestone acceptance criteria (§14) 
 | `agena search "<query>"` | FTS5 search over titles + message text (`GET /v1/search?q=`). Default is current project/cwd scope; `--all-projects` searches the whole workspace. Prints session/message hits with seq anchors; `--json`. | HTTP |
 | `agena shell [-- <cmd>]` | Open a PTY in the session cwd when `--session <id>` is provided, otherwise in the current project/cwd scope (or workspace root for `--global`). Detach from the TUI with `Ctrl+J`; standalone shells propagate exit code. With `--session <id>`, appends `terminal.session.started/ended` durable events to that session; **without a session association no durable events are emitted** (no session context exists). | dedicated PTY WS |
 | `agena files ls [path]` / `cat <path>` / `get <path> [local]` / `put <local> <path>` | Browse, read, download, upload workspace files. `get -r <dir>` streams a tar.zst via `GET /v1/files/archive`. The container FS is the manifest in v1 — no file index table. There is **no separate `agena cp`**; `files get/put` (plus `get -r`) is the v1 file-movement surface. | HTTP |
+| `agena ports list` / `expose <port>` / `hide <port>` | Manage remote workspace preview URLs. `expose 3000` creates an authenticated browser URL for the service listening inside the workspace, e.g. `https://<workspace>-3000.preview.agena.dev`. This is **not** local port forwarding; it does not make laptop `localhost:3000` work. | HTTP + preview ingress |
 | `agena snapshot create <name>` / `list` / `restore <id>` | Tarball `/workspace` (mechanically excludes `/var/lib/agena`). Restore replaces files only and appends `snapshot.restored` to the workspace control session; it NEVER rolls back the event store (P1). | HTTP |
 | `agena approvals` | List pending approvals across sessions (`GET /v1/approvals?pending=1`, derived from durable events). | HTTP |
 | `agena approve <approvalId> [--option <id> \| --input <text> \| --input-file <path> \| --deny]` | Respond to an approval headlessly (same command path as the TUI modal; `--input-file` serves `editor`-kind approvals). | HTTP + main WS |
@@ -113,6 +114,25 @@ Rules:
 3. `scope="global"` is explicit (`--global`) and means "not tied to a project"; global sessions are hidden from project-local defaults.
 4. Host absolute paths are hints only (`hostCwdHint`) for diagnostics and local profile resolution. Cloud clients use the same `projectId` + workspace-relative cwd without host-path semantics.
 5. A session cwd must stay inside its project root unless the session is global/control. `..` traversal and symlink escapes are rejected at the daemon boundary.
+
+## 1.7 Remote development networking
+
+Remote Agena workspaces do **not** try to make remote ports appear as local machine `localhost` in v1. The workspace shell, agent runtime, Docker/Compose services, and dev servers all run inside the remote workspace/container; `localhost` there means the workspace, not the user's laptop.
+
+The v1 browser-access surface is **preview URLs**:
+
+```text
+workspace shell starts:  vite --host 0.0.0.0 --port 3000
+Agena exposes:          https://<workspace>-3000.preview.agena.dev
+```
+
+Rules:
+
+1. Preview URLs are authenticated/private by default and work from any browser, including phones.
+2. The user can always use `agena shell` or the TUI embedded shell for command-line work inside the workspace.
+3. Agena does not promise `http://localhost:3000` on the user's laptop unless a future local forwarding feature is explicitly added.
+4. Local VPN/DNS, SSH-style port forwarding, and callback-tunnel products (stable webhook URLs, request logs, replay) are post-v1 unless pulled forward by a concrete integration need.
+5. Docker/Compose services talk to each other inside the workspace network by normal service names (`api` → `db:5432`). Only user-facing web/API ports should get preview URLs.
 
 ---
 
@@ -1016,13 +1036,13 @@ Owner packages: `packages/storage-sqlite` (implementation), `packages/core` (the
 ## 7.2 SQLite configuration
 
 ```sql
-PRAGMA journal_mode = WAL;
+PRAGMA journal_mode = DELETE;
 PRAGMA synchronous = FULL;      -- commit == durable; required because fanout follows commit (P6)
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-`FULL` over `NORMAL`: with `NORMAL` a power loss can drop a committed tx; clients that received the fanout would hold seqs the store lost — protocol-level corruption. Durable-event volume is low (deltas excluded), so the fsync cost is irrelevant. Driver: **better-sqlite3** via Drizzle (synchronous transactions — no async interleaving inside the tx body). Graceful shutdown runs `PRAGMA wal_checkpoint(TRUNCATE)`.
+`DELETE` over `WAL`: Agena v1 has one daemon writer and clients read through the daemon API. WAL sidecar files are brittle for local live inspection on Docker bind mounts and add operational ambiguity for volume snapshots/backups. If read concurrency later becomes a real bottleneck, move the store behind the same `EventStore` port to Postgres or revisit WAL with a daemon-owned inspection/export path. `FULL` over `NORMAL`: with `NORMAL` a power loss can drop a committed tx; clients that received the fanout would hold seqs the store lost — protocol-level corruption. Durable-event volume is low (deltas excluded), so the fsync cost is irrelevant. Driver: **better-sqlite3** via Drizzle (synchronous transactions — no async interleaving inside the tx body). Graceful shutdown closes the SQLite handle after draining runtime work.
 
 ## 7.3 DDL ownership by milestone
 
@@ -1373,12 +1393,12 @@ Blob spill is not an M2 storage prerequisite. It lands with M7 tool execution be
   ```
 
   Open tool calls come straight from `tool_calls WHERE status = 'running'`. "Resume" after a crash = full durable history, interrupted turn visibly marked failed, user re-prompts. In-flight tokens are lost by design (P12); the capture tee, if on, has them for debugging only. The sweep is idempotent — against a clean store it appends nothing.
-- **Graceful shutdown:** the §5.6 SIGTERM column for every started/pending state implemented so far, with real partial content from the in-flight mirror where available; then drain queues, `wal_checkpoint(TRUNCATE)`, close.
+- **Graceful shutdown:** the §5.6 SIGTERM column for every started/pending state implemented so far, with real partial content from the in-flight mirror where available; then drain queues and close the SQLite handle.
 - **Power loss:** `synchronous=FULL` — anything fanned out was fsynced first.
 
 ## 7.9 Retention & compaction stance
 
-**v1: append-only, delete nothing.** Durable-only volume is small (thousands of rows per heavy session, not millions). Context compaction is an event, never log truncation. No TTL, no pruning. Operational hygiene: WAL auto-checkpointing, checkpoint-on-shutdown, optional `agena-daemon --vacuum`. Future retention (reserved design): archive whole sessions — export events + referenced blobs to a JSONL bundle, mark archived, delete rows; per-event redaction is intentionally unsupported (a tombstone event type if ever required).
+**v1: append-only, delete nothing.** Durable-only volume is small (thousands of rows per heavy session, not millions). Context compaction is an event, never log truncation. No TTL, no pruning. Operational hygiene: optional `agena-daemon --vacuum`. Future retention (reserved design): archive whole sessions — export events + referenced blobs to a JSONL bundle, mark archived, delete rows; per-event redaction is intentionally unsupported (a tombstone event type if ever required).
 
 ## 7.10 Drizzle usage & migrations
 
@@ -1786,6 +1806,9 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | POST | `/v1/files/move` | `{from, to}` | |
 | GET | `/v1/files/archive` | Directory download | `?path=` → tar.zst stream (backs `agena files get -r`) |
 | POST | `/v1/files/upload` | Upload | `?path=&format=tar\|raw` — tar.zst stream in (backs `agena files put -r` and workspace seeding); cap 512 MiB → `413` |
+| GET | `/v1/ports` | List workspace preview ports | Runtime registry: `{port, protocol, label?, state, previewUrl?, visibility}` |
+| POST | `/v1/ports/:port/expose` | Create/update preview URL | `{protocol?, label?, visibility?}`; v1 defaults to authenticated/private preview |
+| DELETE | `/v1/ports/:port` | Hide preview URL | Does not kill the listening process |
 | POST | `/v1/snapshots` | Create snapshot | `{name?, kind?, triggeredBySessionId?}`; §10.5 |
 | GET | `/v1/snapshots` | List | |
 | POST | `/v1/snapshots/:id/restore` | Restore `/workspace` only | `409 CONFLICT` with blocker list; `{force:true}` aborts turns/PTYs first (with P2 events). **Never touches the event store** |
@@ -2360,7 +2383,7 @@ Zero model calls anywhere in CI; real-Pi recording is manual/nightly.
 | 7 | Command correlation | daemon integration | exactly one ack/error per requestId; prompt during turn ⇒ `SESSION_BUSY`; **commit → drop-before-ack → retry with original requestId produces exactly one `message.user.created`** (dedupe map); two clients get own acks + identical streams | P13, concurrent clients |
 | 8 | Approval round-trip | integration + e2e | FakeRuntime approval ⇒ durable `approval.requested`; respond from a *different* client ⇒ runtime resumes; disconnect-while-pending ⇒ replay resurfaces it; no `extension_ui_*` shape ever on the wire (schema assertion); editor-kind round-trip | P14 |
 | 9 | PTY smoke | daemon integration (Linux) | echo round-trip; resize changes `stty size`; exit code propagates; **zero terminal bytes on the main WS during the session** | P5 |
-| 10 | Daemon restart | daemon e2e | SIGTERM mid-`hang` ⇒ `message.assistant.aborted` with partial content; SIGKILL ⇒ boot sweep appends `message.assistant.failed {daemon_restart}` + `tool.call.aborted {daemon_restart}` + `run.failed` + `terminal.session.ended`; post-restart replay shows nothing pending; store intact (WAL) | P2 |
+| 10 | Daemon restart | daemon e2e | SIGTERM mid-`hang` ⇒ `message.assistant.aborted` with partial content; SIGKILL ⇒ boot sweep appends `message.assistant.failed {daemon_restart}` + `tool.call.aborted {daemon_restart}` + `run.failed` + `terminal.session.ended`; post-restart replay shows nothing pending; store intact | P2 |
 | 11 | FakeRuntime E2E | daemon e2e | full loop via spawned daemon + client: prompt→stream→complete; abort; approval; dispatch-failure durable record; TUI reducers replay the same streams to stable snapshots | P16 |
 | 12 | Backpressure | daemon integration | slow reader: frames coalesce above **1 MiB** `bufferedAmount`, drop above **4 MiB**; durable events never dropped; backlog >16 MiB ⇒ close `4429` and client replays; fast producer cannot OOM the gateway | P12, backpressure |
 | 13 | Importer | daemon test (M6) | fixture Claude/Codex archives: raw bytes untouched; malformed lines skipped+counted; re-import idempotent by `source_ref`; imported events carry `source.kind:"importer"`; imported sessions reject prompts with `SESSION_READ_ONLY`; FTS finds imported text | P3 |
@@ -2463,6 +2486,19 @@ Acceptance:
 6. All durable states introduced through M5 (snapshot create/restore/delete, file operations that emit events, archive/status changes, control-session events) rebuild and recover from graceful shutdown and hard restart.
 
 Closes: P7 (fully), P10 (contract + tests), P20 (discovery + diagnostics).
+
+### M5.5 — Remote Preview URLs
+
+Deliverables: workspace port registry; manual `agena ports expose/list/hide`; authenticated preview ingress for HTTP services running inside the workspace; TUI/app ports panel; basic terminal-output detection for `localhost:<port>` as a hint only (user confirmation still required for exposure); private-by-default visibility. No laptop-local `localhost` mapping, VPN/DNS client, SSH port forwarding, callback tunnel logs/replay, or webhook-specific stable URLs in this milestone.
+
+Acceptance:
+1. Start a dev server in `agena shell` on `0.0.0.0:3000`; `agena ports expose 3000` returns a browser preview URL reachable from a laptop or phone.
+2. Hiding a preview URL stops external access but does not kill the process in the workspace.
+3. A service reachable only inside Docker/Compose (for example `db:5432`) is not exposed unless the user explicitly exposes a user-facing port.
+4. Preview URLs require auth by default; public/team visibility is only allowed through explicit policy.
+5. Focused daemon/client/TUI tests prove route validation, preview registry state, and private-by-default behavior.
+
+Closes: remote browser preview UX for cloud workspaces.
 
 ### M6 — Importers
 
@@ -2629,8 +2665,10 @@ Each is a decision, not an omission.
 10. **Branch management UX** — the data model and replay contract ship in the schema; fork UX is an M5 stretch, not required for v1 success.
 11. **Native (non-Pi) production runtime** — the fake runtime exists for tests; a native runtime is post-v1.
 12. **Multi-workspace daemons** — one daemon per workspace container (§3.4).
-13. **Rich process/port/background-job inspection** — consciously deferred; v1 ships the minimal processes/ports listing in `GET /v1/diagnostics` plus `agena shell` for everything else.
-14. **Per-event redaction / retention policies** — append-only, delete-nothing (§7.9); whole-session archive is the reserved future design.
+13. **Laptop-local port forwarding / VPN / local DNS** — preview URLs are the v1 remote-dev browser surface. Agena does not promise remote workspace ports on the user's local `localhost` unless a future local forwarding client is explicitly added.
+14. **Callback tunnel product** — stable webhook/OAuth callback URLs with request logs, redaction, and replay are deferred. Preview URLs may be used manually for simple HTTP testing, but they are not a webhook-debugging product.
+15. **Rich process/background-job inspection** — consciously deferred; v1 ships preview port listing, the minimal processes/ports listing in `GET /v1/diagnostics`, and `agena shell` for everything else.
+16. **Per-event redaction / retention policies** — append-only, delete-nothing (§7.9); whole-session archive is the reserved future design.
 
 ---
 

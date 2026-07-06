@@ -4,7 +4,15 @@
 // (openSession/capabilities, steer/followUp/abort/setModel/setThinkingLevel/compact/
 // respondToApproval, tools/capture, the tool/approval/compaction/retry RuntimeEvent
 // variants, toolCalls/retry/queue snapshot fields) lands with M3/M4.
-import type { ContentBlock, ModelRef, UsageTotals } from "@agena/protocol";
+import type {
+  ApprovalRequested,
+  ApprovalResponse,
+  ContentBlock,
+  ModelRef,
+  RuntimeInfoAck,
+  ThinkingLevel,
+  UsageTotals,
+} from "@agena/protocol";
 
 export type RuntimeId = "pi" | "fake";
 export type RunTrigger = "prompt" | "steer" | "followUp";
@@ -20,6 +28,8 @@ export interface RuntimeAdapter {
 export interface CreateRuntimeSessionInput {
   sessionId: string; // Agena session ULID
   workspaceDir: string; // '/workspace'
+  cwd: string; // absolute runtime cwd inside workspace/project scope
+  runtimeSessionRef?: string; // Pi JSONL path when rehydrating
   model?: ModelRef;
 }
 
@@ -35,6 +45,21 @@ export interface RuntimeSession {
   /** Resolves when the run is ACCEPTED, not when it finishes; completion arrives
       as run-completed RuntimeEvents. */
   prompt(input: { messageId: string; text: string }): Promise<void>;
+  steer(input: { messageId: string; text: string }): Promise<void>;
+  followUp(input: { messageId: string; text: string }): Promise<void>;
+  abort(): Promise<void>;
+  info(): Promise<RuntimeInfoAck>;
+  setModel(model: ModelRef): Promise<void>;
+  setThinkingLevel(thinkingLevel: ThinkingLevel): Promise<void>;
+  compact(): Promise<{
+    summary: string;
+    tokensBefore?: number;
+    tokensAfter?: number;
+  }>;
+  respondToApproval(
+    approvalId: string,
+    response: ApprovalResponse,
+  ): Promise<void>;
 
   /** Synchronous — served from adapter-local buffers, never awaits the runtime. */
   getInFlightSnapshot(): RuntimeInFlightSnapshot | null;
@@ -72,6 +97,34 @@ export type RuntimeEvent =
       blocks: ContentBlock[];
       usage?: UsageTotals;
       stopReason: AssistantStopReason;
+    }
+  | {
+      type: "assistant-message-aborted";
+      messageId: string;
+      partialContent: ContentBlock[];
+      reason: "user_abort" | "daemon_shutdown";
+    }
+  | {
+      type: "assistant-message-failed";
+      messageId: string;
+      partialContent: ContentBlock[];
+      error: { code: string; message: string };
+    }
+  | {
+      type: "run-aborted";
+      runId: string;
+      reason: "user_abort" | "daemon_shutdown";
+    }
+  | {
+      type: "run-failed";
+      runId: string;
+      error: { code: string; message: string };
+    }
+  | { type: "model-changed"; from?: ModelRef; to: ModelRef }
+  | { type: "thinking-level-changed"; from: string; to: string }
+  | {
+      type: "approval-requested";
+      approval: ApprovalRequested;
     };
 
 // Core-owned; distinct name from the wire InFlightSnapshot (§8.2).

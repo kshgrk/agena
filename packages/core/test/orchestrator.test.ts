@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { AgenaFrame } from "@agena/protocol";
 import { expect, test } from "vitest";
 import { InMemoryEventStore } from "../src/memory-store.ts";
@@ -12,6 +13,16 @@ const runCompleted = (store: InMemoryEventStore) =>
       if (batch.events.some((e) => e.type === "run.completed")) {
         off();
         setTimeout(resolve, 0);
+      }
+    });
+  });
+
+const approvalRequested = (store: InMemoryEventStore) =>
+  new Promise<void>((resolve) => {
+    const off = store.onCommitted((batch) => {
+      if (batch.events.some((e) => e.type === "approval.requested")) {
+        off();
+        resolve();
       }
     });
   });
@@ -110,4 +121,111 @@ test("prompt on an unknown session fails SESSION_NOT_FOUND", async () => {
   await expect(
     orch.handlePrompt("nope", [{ type: "text", text: "hi" }]),
   ).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+});
+
+test("runtime starts in the durable session cwd", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const orch = new SessionOrchestrator(store, adapter, {
+    workspaceDir: "/workspace",
+  });
+  const session = await orch.createSession({
+    workspaceId: "ws-1",
+    projectId: "project-a",
+    projectRoot: "repo",
+    cwd: "repo/pkg",
+  });
+
+  const done = runCompleted(store);
+  await orch.handlePrompt(session.sessionId, [{ type: "text", text: "hi" }]);
+  await done;
+
+  expect(adapter.createInputs[0]).toMatchObject({
+    sessionId: session.sessionId,
+    workspaceDir: "/workspace",
+    cwd: resolve("/workspace", "repo/pkg"),
+  });
+});
+
+test("runtime rehydrates with the persisted runtime session ref", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const first = new SessionOrchestrator(store, adapter);
+  const session = await first.createSession({ workspaceId: "ws-1" });
+
+  const firstDone = runCompleted(store);
+  await first.handlePrompt(session.sessionId, [{ type: "text", text: "one" }]);
+  await firstDone;
+
+  const second = new SessionOrchestrator(store, adapter);
+  const secondDone = runCompleted(store);
+  await second.handlePrompt(session.sessionId, [{ type: "text", text: "two" }]);
+  await secondDone;
+
+  expect(adapter.createInputs).toHaveLength(2);
+  expect(adapter.createInputs[1]).toMatchObject({
+    sessionId: session.sessionId,
+    runtimeSessionRef: `fake:${session.sessionId}`,
+  });
+});
+
+test("runtime info is served from the runtime session", async () => {
+  const orch = new SessionOrchestrator(
+    new InMemoryEventStore(),
+    new FakeRuntimeAdapter({
+      model: { provider: "fake-provider", id: "fake-model" },
+    }),
+  );
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+
+  await expect(
+    orch.handleRuntimeInfo(session.sessionId),
+  ).resolves.toMatchObject({
+    model: { provider: "fake-provider", id: "fake-model" },
+    thinkingLevel: "off",
+    availableModels: [{ provider: "fake-provider", id: "fake-model" }],
+  });
+});
+
+test("fake runtime manual approval blocks the turn until answered", async () => {
+  const store = new InMemoryEventStore();
+  const orch = new SessionOrchestrator(store, new FakeRuntimeAdapter());
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+
+  const requested = approvalRequested(store);
+  await orch.handlePrompt(session.sessionId, [
+    { type: "text", text: "approval select" },
+  ]);
+  await requested;
+
+  const pending = await store.listPendingApprovals({ allProjects: true });
+  expect(pending).toHaveLength(1);
+  expect(pending[0]?.payload).toMatchObject({
+    kind: "select",
+    title: "Manual approval test",
+  });
+
+  const done = runCompleted(store);
+  await orch.handleRespondToApproval(
+    session.sessionId,
+    pending[0]?.approvalId ?? "",
+    { kind: "select", optionId: "two" },
+    "client-1",
+  );
+  await done;
+
+  const { events } = await store.readEvents(session.sessionId, 0);
+  expect(events.map((e) => e.type)).toEqual([
+    "session.created",
+    "message.user.created",
+    "run.started",
+    "approval.requested",
+    "approval.responded",
+    "message.assistant.started",
+    "message.assistant.completed",
+    "run.completed",
+  ]);
+  expect(events[6]?.payload).toMatchObject({
+    content: [{ type: "text", text: "approval response: selected two" }],
+  });
 });

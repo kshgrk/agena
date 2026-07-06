@@ -80,7 +80,8 @@ export function mapPiEvent(
     }
     case "agent_end": {
       if (ev.willRetry) return []; // Pi retries this run after backoff — not terminal
-      const runId = state.runId ?? "";
+      if (!state.runId) return [];
+      const runId = state.runId;
       state.runId = null;
       state.triggerMessageId = null;
       return [{ type: "run-completed", runId }];
@@ -124,13 +125,37 @@ export function mapPiEvent(
       if (ev.message.role !== "assistant") return [];
       const m = ev.message;
       const messageId = state.messageId ?? state.mintId();
+      const runId = state.runId ?? "";
+      const turnId = state.turnId ?? "";
       state.messageId = null;
+      if (m.stopReason === "error" || m.stopReason === "aborted") {
+        state.runId = null;
+        state.triggerMessageId = null;
+        const message = m.errorMessage ?? `Pi stopped with ${m.stopReason}`;
+        return [
+          {
+            type: "assistant-message-failed",
+            messageId,
+            partialContent: m.content.flatMap((b) =>
+              b.type === "text"
+                ? [{ type: "text" as const, text: b.text }]
+                : [],
+            ),
+            error: { code: m.stopReason, message },
+          },
+          {
+            type: "run-failed",
+            runId,
+            error: { code: m.stopReason, message },
+          },
+        ];
+      }
       return [
         {
           type: "assistant-message-completed",
           messageId,
-          runId: state.runId ?? "",
-          turnId: state.turnId ?? "",
+          runId,
+          turnId,
           model: { provider: m.provider, id: m.model },
           blocks: m.content.flatMap((b) =>
             b.type === "text" ? [{ type: "text" as const, text: b.text }] : [],

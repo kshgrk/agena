@@ -4,10 +4,13 @@ import {
   commandSchemas,
   createPtyRequestSchema,
   createPtyResponseSchema,
+  createSessionRequestSchema,
   DEFAULT_WIRE_LIMITS,
+  diagnosticsResponseSchema,
   durableEventSchemas,
   knownAgenaEventSchema,
   knownAgenaFrameSchema,
+  listSessionsQuerySchema,
   PROTOCOL_VERSION,
   PTY_HTTP_ROUTES,
   PTY_IDLE_TIMEOUT_MS,
@@ -35,6 +38,10 @@ const validEvent: AgenaEvent = {
     workspaceId: "01WS",
     runtime: "pi",
     origin: "native",
+    scope: "project",
+    projectId: "project-a",
+    projectRoot: ".",
+    cwd: ".",
     rootBranchId: "01BRANCH",
   },
 };
@@ -133,9 +140,9 @@ describe("envelope round-trip and discrimination", () => {
         kind: "cmd",
         requestId: "r",
         name: "abort",
-        payload: {},
+        payload: { sessionId: "s" },
       }).success,
-    ).toBe(false); // abort is not an M1 command
+    ).toBe(true);
     expect(
       wireEnvelopeSchema.safeParse({
         kind: "error",
@@ -146,7 +153,7 @@ describe("envelope round-trip and discrimination", () => {
 });
 
 describe("command payloads", () => {
-  it("validates subscribe and prompt, rejects invalid payloads", () => {
+  it("validates subscribe, prompt, and M4.5 controls", () => {
     expect(
       commandSchemas.subscribe.payload.safeParse({ sessionId: "s", fromSeq: 0 })
         .success,
@@ -177,6 +184,177 @@ describe("command payloads", () => {
         replayCount: 3,
       }),
     ).toBeTruthy();
+    for (const name of ["steer", "followUp"] as const) {
+      expect(
+        commandSchemas[name].payload.safeParse({
+          sessionId: "s",
+          content: [{ type: "text", text: "hi" }],
+        }).success,
+      ).toBe(true);
+      expect(
+        commandSchemas[name].payload.safeParse({
+          sessionId: "s",
+          content: [{ type: "thinking", text: "nope" }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      commandSchemas.abort.payload.parse({
+        sessionId: "s",
+        reason: "changed my mind",
+      }),
+    ).toEqual({ sessionId: "s", reason: "changed my mind" });
+    expect(
+      commandSchemas.runtimeInfo.ack.parse({
+        model: { provider: "openai", id: "gpt-5.5-pro" },
+        thinkingLevel: "medium",
+        availableModels: [{ provider: "openai", id: "gpt-5.5-pro" }],
+        availableThinkingLevels: ["off", "medium", "high"],
+        slashCommands: [{ name: "deploy", description: "Deploy" }],
+      }),
+    ).toEqual({
+      model: { provider: "openai", id: "gpt-5.5-pro" },
+      thinkingLevel: "medium",
+      availableModels: [{ provider: "openai", id: "gpt-5.5-pro" }],
+      availableThinkingLevels: ["off", "medium", "high"],
+      slashCommands: [{ name: "deploy", description: "Deploy" }],
+    });
+    expect(
+      commandSchemas.setModel.ack.parse({
+        model: { provider: "openai", id: "gpt-5.5-pro" },
+      }),
+    ).toEqual({ model: { provider: "openai", id: "gpt-5.5-pro" } });
+    expect(
+      commandSchemas.setThinkingLevel.payload.parse({
+        sessionId: "s",
+        thinkingLevel: "high",
+      }),
+    ).toEqual({ sessionId: "s", thinkingLevel: "high" });
+    expect(
+      commandSchemas.respondToApproval.payload.parse({
+        sessionId: "s",
+        approvalId: "a",
+        response: { kind: "editor", text: "multi\nline" },
+      }),
+    ).toEqual({
+      sessionId: "s",
+      approvalId: "a",
+      response: { kind: "editor", text: "multi\nline" },
+    });
+    expect(commandSchemas.compact.ack.parse({ compactionSeq: 12 })).toEqual({
+      compactionSeq: 12,
+    });
+  });
+});
+
+describe("M4.5 durable event payloads", () => {
+  it("validates model, thinking, compaction, and approval events", () => {
+    expect(
+      durableEventSchemas["model.changed"].parse({
+        to: { provider: "openai", id: "gpt-5.5-pro" },
+        reason: "user_selected",
+      }),
+    ).toEqual({
+      to: { provider: "openai", id: "gpt-5.5-pro" },
+      reason: "user_selected",
+    });
+    expect(
+      durableEventSchemas["thinking.level.changed"].parse({
+        from: "medium",
+        to: "high",
+      }),
+    ).toEqual({ from: "medium", to: "high" });
+    expect(
+      durableEventSchemas["compaction.created"].parse({
+        compactionId: "c",
+        summary: [{ type: "text", text: "summary" }],
+        replacesUpToSeq: 10,
+        trigger: "user",
+      }),
+    ).toEqual({
+      compactionId: "c",
+      summary: [{ type: "text", text: "summary" }],
+      replacesUpToSeq: 10,
+      trigger: "user",
+    });
+    const approvalEvent = {
+      ...validEvent,
+      type: "approval.responded",
+      payload: {
+        approvalId: "a",
+        response: { kind: "confirm", accepted: true },
+        respondedBy: "01CLIENT",
+      },
+    };
+    expect(knownAgenaEventSchema.safeParse(approvalEvent).success).toBe(true);
+    expect(
+      durableEventSchemas["approval.requested"].safeParse({
+        approvalId: "a",
+        kind: "select",
+        message: "Pick one",
+        options: [{ id: "yes", label: "Yes" }],
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("M4 session HTTP scope schemas", () => {
+  it("validates project create and list filters", () => {
+    expect(
+      createSessionRequestSchema.parse({
+        title: "work",
+        scope: "project",
+        projectId: "project-a",
+        projectRoot: ".",
+        cwd: "packages/core",
+        hostCwdHint: "/host/repo/packages/core",
+      }),
+    ).toEqual({
+      title: "work",
+      scope: "project",
+      projectId: "project-a",
+      projectRoot: ".",
+      cwd: "packages/core",
+      hostCwdHint: "/host/repo/packages/core",
+    });
+    expect(
+      createSessionRequestSchema.safeParse({
+        scope: "project",
+        projectRoot: ".",
+      }).success,
+    ).toBe(false);
+    expect(createSessionRequestSchema.parse({ scope: "global" })).toEqual({
+      scope: "global",
+    });
+    expect(listSessionsQuerySchema.parse({ projectId: "project-a" })).toEqual({
+      projectId: "project-a",
+    });
+    expect(listSessionsQuerySchema.parse({ allProjects: "true" })).toEqual({
+      allProjects: true,
+    });
+  });
+});
+
+describe("M5 diagnostics HTTP schema", () => {
+  it("validates .agena discovery entries", () => {
+    expect(
+      diagnosticsResponseSchema.parse({
+        daemon: { version: "0.0.0", uptimeMs: 1 },
+        protocol: { version: 1 },
+        workspace: { path: "/workspace" },
+        discovery: {
+          entries: [
+            {
+              kind: "tool",
+              name: "bad",
+              file: ".agena/tools/bad.ts",
+              status: "invalid",
+              reason: "missing default export defineTool(...)",
+            },
+          ],
+        },
+      }).discovery.entries[0]?.status,
+    ).toBe("invalid");
   });
 });
 
