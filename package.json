@@ -1,0 +1,31 @@
+{
+  "name": "agena",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "lint": "biome ci .",
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "test": "vitest run",
+    "boundary": "node scripts/check-boundaries.mjs",
+    "ci": "pnpm lint && pnpm boundary && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.2",
+    "@types/node": "26.1.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "@earendil-works/pi-agent-core": "0.80.3",
+      "@earendil-works/pi-ai": "0.80.3",
+      "@earendil-works/pi-coding-agent": "0.80.3",
+      "@earendil-works/pi-tui": "0.80.3"
+    }
+  }
+}

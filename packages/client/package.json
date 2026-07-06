@@ -1,0 +1,14 @@
+{
+  "name": "@agena/client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/client.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@agena/protocol": "workspace:*",
+    "ulid": "3.0.2"
+  }
+}

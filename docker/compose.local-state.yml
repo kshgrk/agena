@@ -1,0 +1,8 @@
+# Local-only override for inspecting SQLite live from macOS tools like Beekeeper.
+# REMOVE / DO NOT USE this override for cloud deploys: cloud/runtime deployments
+# must keep daemon state on the managed persistent volume, not a host bind mount.
+services:
+  daemon:
+    volumes:
+      - ../.local-state:/var/lib/agena
+      - workspace:/workspace

@@ -1,21 +1,21 @@
-# Cloud CLI Harness — Final Understanding and Product Direction
+# Agena — Final Understanding and Product Direction
 
 ## 1. Final Product Goal
 
-Build a **personal-first cloud CLI harness** for AI coding and real-world work.
+Build **Agena**, a personal-first cloud CLI harness for AI coding and real-world work.
 
 The product should feel like using a local terminal and local filesystem, but the actual runtime, files, sessions, tools, plugins, and agent state live in a persistent cloud workspace.
 
 The main user flow should be:
 
 ```bash
-luf open <repo-or-workspace>
-luf new "task description"
-luf resume
-luf attach
-luf files
-luf share <path>
-luf sync
+agena open <repo-or-workspace>
+agena new "task description"
+agena resume
+agena attach
+agena files
+agena share <path>
+agena sync
 ```
 
 The goal is **not** to build a cloud clone of every existing AI coding tool. The goal is to build one reliable cloud-native harness that the user can live inside every day, while importing old context from existing tools and optionally adapting other runtimes later.
@@ -151,8 +151,8 @@ Claude and Codex should be treated as **legacy session sources**, not runtime de
 The user mostly uses Claude and Codex today, so the first migration step should be a one-time backfill:
 
 ```bash
-luf import claude
-luf import codex
+agena import claude
+agena import codex
 ```
 
 After import, old Claude/Codex sessions become searchable, resumable historical context inside the new harness.
@@ -339,7 +339,7 @@ Recommended layout:
 ```text
 /workspaces/<user>/<workspace>
   ├─ repo/
-  ├─ .luf/
+  ├─ .agena/
   │   ├─ sessions/
   │   ├─ plugins/
   │   ├─ snapshots/
@@ -351,12 +351,12 @@ Recommended layout:
 CLI commands should make file movement simple:
 
 ```bash
-luf cp ./local-file.ts workspace:/repo/src/file.ts
-luf cp workspace:/repo/output.zip .
-luf sync ./local-folder workspace:/repo
-luf share workspace:/repo/report.md
-luf snapshot create "before refactor"
-luf snapshot restore <snapshot-id>
+agena cp ./local-file.ts workspace:/repo/src/file.ts
+agena cp workspace:/repo/output.zip .
+agena sync ./local-folder workspace:/repo
+agena share workspace:/repo/report.md
+agena snapshot create "before refactor"
+agena snapshot restore <snapshot-id>
 ```
 
 For v1, simple copy/sync/share is enough.
@@ -380,23 +380,23 @@ The CLI should hide cloud complexity. The user should not feel like they are man
 Important commands:
 
 ```bash
-luf login
-luf init
-luf open <repo>
-luf new "task"
-luf resume
-luf sessions
-luf search "query"
-luf attach
-luf files
-luf cp <src> <dest>
-luf sync
-luf share <path>
-luf snapshot create <name>
-luf import claude
-luf import codex
-luf plugins list
-luf plugins install <plugin>
+agena login
+agena init
+agena open <repo>
+agena new "task"
+agena resume
+agena sessions
+agena search "query"
+agena attach
+agena files
+agena cp <src> <dest>
+agena sync
+agena share <path>
+agena snapshot create <name>
+agena import claude
+agena import codex
+agena plugins list
+agena plugins install <plugin>
 ```
 
 The core experience should be:
@@ -539,13 +539,13 @@ Device switching should work because the cloud workspace and session store are c
 From laptop:
 
 ```bash
-luf new "fix Slack feedback modal"
+agena new "fix Slack feedback modal"
 ```
 
 From another laptop or phone later:
 
 ```bash
-luf resume
+agena resume
 ```
 
 The second device should reconnect to:
@@ -593,17 +593,17 @@ workspace snapshots
 ### MVP Commands
 
 ```bash
-luf import claude
-luf import codex
-luf sessions
-luf search "query"
-luf open <repo>
-luf new "task"
-luf resume <session>
-luf attach
-luf files
-luf cp
-luf share
+agena import claude
+agena import codex
+agena sessions
+agena search "query"
+agena open <repo>
+agena new "task"
+agena resume <session>
+agena attach
+agena files
+agena cp
+agena share
 ```
 
 ### MVP Non-Goals
@@ -651,10 +651,10 @@ The app should not introduce a separate session model. It should only be another
 
 ## 19. Final Recommended Positioning
 
-The final product direction is:
+The final Agena product direction is:
 
 ```text
-A local-feeling cloud CLI harness for AI coding and work.
+Agena is a local-feeling cloud CLI harness for AI coding and work.
 It imports your Claude/Codex history once, then becomes your daily source of truth.
 It uses Pi-style sessions and plugins, OpenCode-style server ideas later, and your own cloud workspace as the foundation.
 ```
@@ -673,4 +673,4 @@ Inspect everything the agent does inside the sandbox.
 
 ## 20. One-Line Summary
 
-Build a **CLI-first personal cloud AI harness** with a Pi-style session/plugin core, one-time Claude/Codex backfill, local-like cloud filesystem UX, and OpenCode as a later runtime/API adapter — not as the source of truth.
+Build **Agena** as a CLI-first personal cloud AI harness with a Pi-style session/plugin core, one-time Claude/Codex backfill, local-like cloud filesystem UX, and OpenCode as a later runtime/API adapter — not as the source of truth.

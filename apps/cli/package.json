@@ -1,0 +1,16 @@
+{
+  "name": "@agena/cli",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "bin": {
+    "agena": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@agena/client": "workspace:*",
+    "@agena/tui": "workspace:*"
+  }
+}

@@ -1,0 +1,13 @@
+// @agena/runtime-pi — the ONLY package importing the Pi SDK (P16, §8).
+export {
+  containedResourceLoader,
+  PI_SDK_VERSION,
+  PiRuntimeAdapter,
+  type PiRuntimeOptions,
+} from "./adapter.ts";
+export { captureEnabled, createCaptureTee } from "./capture.ts";
+export {
+  createMapperState,
+  type MapperState,
+  mapPiEvent,
+} from "./event-map.ts";

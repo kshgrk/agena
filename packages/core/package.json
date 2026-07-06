@@ -1,0 +1,15 @@
+{
+  "name": "@agena/core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@agena/protocol": "workspace:*",
+    "ulid": "3.0.2"
+  }
+}

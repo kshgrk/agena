@@ -1,0 +1,16 @@
+{
+  "name": "@agena/runtime-pi",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@agena/core": "workspace:*",
+    "@agena/protocol": "workspace:*",
+    "@earendil-works/pi-ai": "0.80.3",
+    "@earendil-works/pi-coding-agent": "0.80.3"
+  }
+}

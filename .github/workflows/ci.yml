@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm boundary
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  # Non-gating Bun compile signal (§11.6 / P18): standing spike until the M3 gate.
+  bun-compile-signal:
+    continue-on-error: true
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+      - run: pnpm install --frozen-lockfile
+      - run: bun build --compile apps/cli/src/main.ts --outfile dist/agena

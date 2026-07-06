@@ -1,0 +1,37 @@
+# docker/compose.yml — Agena M1: hand-run via `docker compose -f docker/compose.yml up`.
+# ponytail: per-workspace rendering, provider.env, mem/pids limits (§10.3) arrive
+# with `agena workspace init` in a later milestone.
+name: agena
+services:
+  daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: agena-daemon:dev
+    init: true # PID-1 signal forwarding without baking tini into the image
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AGENA_HOST_PORT:-7700}:7777" # loopback-only publish, always (§3.2)
+    environment:
+      # Daemon reads AGENA_AUTH_TOKEN (§3.2); host supplies AGENA_TOKEN.
+      AGENA_AUTH_TOKEN: ${AGENA_TOKEN:?set AGENA_TOKEN (daemon bearer token) in the host environment}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENA_RUNTIME: ${AGENA_RUNTIME:-pi}
+    volumes: # two named volumes, separate roots, never mixed (§3.3 / P1)
+      - workspace:/workspace
+      - state:/var/lib/agena
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:7777/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+    stop_grace_period: 30s # SIGTERM budget (§3.2)
+volumes:
+  workspace:
+  state:

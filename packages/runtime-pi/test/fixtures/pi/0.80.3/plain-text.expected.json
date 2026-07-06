@@ -1,0 +1,56 @@
+[
+  {
+    "type": "run-started",
+    "runId": "id-1",
+    "trigger": "prompt",
+    "triggerMessageId": "m-user"
+  },
+  {
+    "type": "assistant-message-started",
+    "messageId": "id-3",
+    "runId": "id-1",
+    "turnId": "id-2",
+    "model": {
+      "provider": "anthropic",
+      "id": "claude-test-1"
+    }
+  },
+  {
+    "type": "assistant-text-delta",
+    "messageId": "id-3",
+    "blockIndex": 0,
+    "delta": "Hel"
+  },
+  {
+    "type": "assistant-text-delta",
+    "messageId": "id-3",
+    "blockIndex": 0,
+    "delta": "lo"
+  },
+  {
+    "type": "assistant-message-completed",
+    "messageId": "id-3",
+    "runId": "id-1",
+    "turnId": "id-2",
+    "model": {
+      "provider": "anthropic",
+      "id": "claude-test-1"
+    },
+    "blocks": [
+      {
+        "type": "text",
+        "text": "Hello"
+      }
+    ],
+    "usage": {
+      "inputTokens": 10,
+      "outputTokens": 5,
+      "costUsd": 0.001
+    },
+    "stopReason": "end_turn"
+  },
+  {
+    "type": "run-completed",
+    "runId": "id-1"
+  }
+]
