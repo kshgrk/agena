@@ -13,6 +13,7 @@
     "@agena/storage-sqlite": "workspace:*",
     "@hono/node-server": "2.0.8",
     "hono": "4.12.27",
+    "node-pty": "1.0.0",
     "ws": "8.21.0"
   },
   "devDependencies": {

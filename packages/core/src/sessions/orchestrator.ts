@@ -110,9 +110,11 @@ export class SessionOrchestrator {
 
   async shutdown(): Promise<void> {
     await Promise.all(
-      [...this.#sessions.values()].map((s) =>
-        s.busy ? this.#terminalize(s, "daemon_shutdown") : Promise.resolve(),
-      ),
+      [...this.#sessions.values()].map(async (s) => {
+        if (s.busy) await this.#terminalize(s, "daemon_shutdown");
+        await s.runtime?.dispose();
+        s.runtime = null;
+      }),
     );
   }
 

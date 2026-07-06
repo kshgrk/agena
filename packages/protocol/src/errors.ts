@@ -28,12 +28,14 @@ export const agenaErrorSchema = z.object({
 export type AgenaError = z.infer<typeof agenaErrorSchema>;
 
 // WS close codes (§5.9). Upgrade-time auth failure is a raw HTTP 401,
-// never a close code. ponytail: 4409 (PTY, M3) lands with PTY attach.
+// never a close code; authInvalidated is reserved for future post-handshake auth.
 export const WS_CLOSE_CODES = {
   normal: 1000,
   goingAway: 1001, // daemon shutdown / missed heartbeats
   protocolViolation: 4400, // repeated malformed input or version mismatch
+  authInvalidated: 4401,
   handshakeTimeout: 4408, // no hello within HELLO_TIMEOUT_MS
+  ptyAlreadyAttached: 4409,
   messageTooLarge: 4413, // repeated envelopes over MAX_ENVELOPE_BYTES
   slowConsumer: 4429, // backpressure disconnect
 } as const;

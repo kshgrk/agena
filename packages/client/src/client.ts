@@ -20,6 +20,8 @@ import {
 } from "@agena/protocol";
 import { ulid } from "ulid";
 
+// §9.5 PTY WS helpers shared by `agena shell` and the TUI's embedded split.
+export { isTerminalPtyClose, parsePtyExit, ptyDataToBytes } from "./pty.ts";
 // Client-minted ULIDs per §4.3; re-exported for the CLI's persisted clientId.
 export { ulid };
 
@@ -42,6 +44,16 @@ export class AgenaClientError extends Error {
 /** Structural subset of WebSocket satisfied by Node 22 / Bun natives and test fakes. */
 export type WsLike = {
   send(data: string): void;
+  close(code?: number, reason?: string): void;
+  onopen: (() => void) | null;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  onclose: ((ev: { code: number; reason: string }) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+};
+
+export type PtyWsLike = {
+  binaryType?: string;
+  send(data: string | Uint8Array): void;
   close(code?: number, reason?: string): void;
   onopen: (() => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
@@ -72,6 +84,22 @@ export type AgenaClientOptions = {
   clientName?: string;
   clientVersion?: string;
   createSocket?: (url: string, init: WsInit) => WsLike; // test seam
+  createPtySocket?: (url: string, init: WsInit) => PtyWsLike;
+};
+
+export type OpenPtyOptions = {
+  cols: number;
+  rows: number;
+  cwd?: string;
+  sessionId?: string;
+  command?: string;
+  args?: string[];
+};
+
+export type PtyAttachment = {
+  ptyId: string;
+  wsPath: string;
+  socket: PtyWsLike;
 };
 
 type Pending = {
@@ -104,6 +132,7 @@ export class AgenaClient {
   private readonly clientName: string;
   private readonly clientVersion: string;
   private readonly createSocket: (url: string, init: WsInit) => WsLike;
+  private readonly createPtySocket: (url: string, init: WsInit) => PtyWsLike;
 
   private sock: WsLike | null = null;
   private ready = false; // welcome received on the current socket
@@ -129,6 +158,9 @@ export class AgenaClient {
     this.clientVersion = opts.clientVersion ?? "0.0.0";
     this.createSocket =
       opts.createSocket ?? ((url, init) => new NativeWebSocket(url, init));
+    this.createPtySocket =
+      opts.createPtySocket ??
+      ((url, init) => new NativeWebSocket(url, init) as PtyWsLike);
   }
 
   /** Open the WS, send hello, await welcome (incl. protocol-version check). */
@@ -215,6 +247,21 @@ export class AgenaClient {
     return this.fetchJson("POST", "/v1/admin/rebuild", { sessionId });
   }
 
+  async openPty(opts: OpenPtyOptions): Promise<PtyAttachment> {
+    const body = await this.fetchJson("POST", "/v1/ptys", opts);
+    const ptyId = stringField(body, "ptyId");
+    const wsPath = stringField(body, "wsPath");
+    return { ptyId, wsPath, socket: this.connectPty(wsPath) };
+  }
+
+  connectPty(wsPath: string): PtyWsLike {
+    const socket = this.createPtySocket(this.ptyWsUrl(wsPath), {
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+    socket.binaryType = "arraybuffer";
+    return socket;
+  }
+
   private async fetchJson(
     method: string,
     path: string,
@@ -251,6 +298,11 @@ export class AgenaClient {
       );
     }
     return res.json();
+  }
+
+  private ptyWsUrl(wsPath: string): string {
+    const url = new URL(wsPath, this.httpBase).toString();
+    return url.replace(/^http(s?):/, "ws$1:");
   }
 
   // ---- connection machinery -------------------------------------------------
@@ -500,4 +552,18 @@ function sessionIdFrom(payload: unknown): string {
   return payload && typeof payload === "object"
     ? String((payload as { sessionId?: unknown }).sessionId ?? "")
     : "";
+}
+
+function stringField(body: unknown, key: string): string {
+  const value =
+    body && typeof body === "object"
+      ? (body as Record<string, unknown>)[key]
+      : undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new AgenaClientError(
+      "INVALID_PAYLOAD",
+      `POST /v1/ptys response missing ${key}`,
+    );
+  }
+  return value;
 }

@@ -2,12 +2,22 @@ import { describe, expect, it } from "vitest";
 import {
   type AgenaEvent,
   commandSchemas,
+  createPtyRequestSchema,
+  createPtyResponseSchema,
   DEFAULT_WIRE_LIMITS,
   durableEventSchemas,
   knownAgenaEventSchema,
   knownAgenaFrameSchema,
   PROTOCOL_VERSION,
+  PTY_HTTP_ROUTES,
+  PTY_IDLE_TIMEOUT_MS,
+  PTY_PAUSE_BUFFERED_BYTES,
+  PTY_RESUME_BUFFERED_BYTES,
+  PTY_SCROLLBACK_BYTES,
+  ptyClientControlFrameSchema,
+  ptyDaemonControlFrameSchema,
   type WireEnvelope,
+  WS_CLOSE_CODES,
   wireEnvelopeSchema,
 } from "../src/index.ts";
 
@@ -167,6 +177,59 @@ describe("command payloads", () => {
         replayCount: 3,
       }),
     ).toBeTruthy();
+  });
+});
+
+describe("M3 PTY protocol surface", () => {
+  it("validates dedicated PTY WS text controls only", () => {
+    expect(
+      ptyClientControlFrameSchema.parse({
+        type: "resize",
+        cols: 211,
+        rows: 52,
+      }),
+    ).toEqual({ type: "resize", cols: 211, rows: 52 });
+    expect(
+      ptyClientControlFrameSchema.safeParse({
+        type: "resize",
+        cols: 0,
+        rows: 52,
+      }).success,
+    ).toBe(false);
+    expect(
+      ptyDaemonControlFrameSchema.parse({
+        type: "exit",
+        exitCode: 0,
+        signal: null,
+      }),
+    ).toEqual({ type: "exit", exitCode: 0, signal: null });
+    expect(
+      ptyDaemonControlFrameSchema.safeParse({
+        type: "exit",
+        exitCode: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("exports PTY routes and close codes", () => {
+    expect(createPtyRequestSchema.parse({ cols: 80, rows: 24 })).toEqual({
+      cols: 80,
+      rows: 24,
+    });
+    expect(
+      createPtyResponseSchema.parse({
+        ptyId: "01PTY",
+        wsPath: "/v1/ptys/01PTY/ws",
+      }),
+    ).toEqual({ ptyId: "01PTY", wsPath: "/v1/ptys/01PTY/ws" });
+    expect(PTY_HTTP_ROUTES.createPty.path).toBe("/v1/ptys");
+    expect(PTY_HTTP_ROUTES.attachPty.path).toBe("/v1/ptys/:id/ws");
+    expect(WS_CLOSE_CODES.ptyAlreadyAttached).toBe(4409);
+    expect(WS_CLOSE_CODES.authInvalidated).toBe(4401);
+    expect(PTY_IDLE_TIMEOUT_MS).toBe(900_000);
+    expect(PTY_SCROLLBACK_BYTES).toBe(262_144);
+    expect(PTY_PAUSE_BUFFERED_BYTES).toBe(1_048_576);
+    expect(PTY_RESUME_BUFFERED_BYTES).toBe(262_144);
   });
 });
 

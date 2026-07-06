@@ -6,6 +6,8 @@ export * from "./envelope.ts";
 export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./frames.ts";
+export * from "./http.ts";
 export * from "./limits.ts";
+export * from "./pty.ts";
 export * from "./snapshot.ts";
 export * from "./version.ts";

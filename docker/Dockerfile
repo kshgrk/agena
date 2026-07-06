@@ -7,7 +7,18 @@ ENV NODE_ENV=production \
     AGENA_WORKSPACE_DIR=/workspace \
     AGENA_PORT=7777
 
-RUN corepack enable
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      bash \
+      g++ \
+      git \
+      less \
+      make \
+      procps \
+      python3 \
+      ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
 WORKDIR /app
 
 # Manifests first → install → source, so the dependency layer only rebuilds when

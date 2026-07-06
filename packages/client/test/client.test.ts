@@ -1,6 +1,11 @@
 import type { AgenaEvent } from "@agena/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgenaClient, AgenaClientError, type WsLike } from "../src/client.ts";
+import {
+  AgenaClient,
+  AgenaClientError,
+  type PtyWsLike,
+  type WsLike,
+} from "../src/client.ts";
 
 class FakeSocket implements WsLike {
   sent: string[] = [];
@@ -32,6 +37,19 @@ class FakeSocket implements WsLike {
       payload: unknown;
     };
   }
+}
+
+class FakePtySocket implements PtyWsLike {
+  binaryType?: string;
+  sent: Array<string | Uint8Array> = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((ev: { data: unknown }) => void) | null = null;
+  onclose: ((ev: { code: number; reason: string }) => void) | null = null;
+  onerror: ((ev: unknown) => void) | null = null;
+  send(data: string | Uint8Array): void {
+    this.sent.push(data);
+  }
+  close(): void {}
 }
 
 const welcome = {
@@ -78,6 +96,7 @@ async function connected(): Promise<{ client: AgenaClient; sock: FakeSocket }> {
 describe("AgenaClient", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -217,5 +236,70 @@ describe("AgenaClient", () => {
     expect(statuses.at(-1)).toBe("connected");
     expect(sockets).toHaveLength(2);
     await client.close();
+  });
+
+  it("creates a PTY and opens the dedicated WS with bearer auth", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({ ptyId: "pty_1", wsPath: "/v1/ptys/pty_1/ws" }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ptySockets: FakePtySocket[] = [];
+    const ptySocketCalls: unknown[] = [];
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+      createPtySocket: (url, init) => {
+        ptySocketCalls.push({ url, init });
+        const s = new FakePtySocket();
+        ptySockets.push(s);
+        return s;
+      },
+    });
+
+    const attachment = await client.openPty({
+      cols: 120,
+      rows: 40,
+      cwd: "/workspace",
+      sessionId: "s1",
+      command: "bash",
+      args: ["-lc", "echo hi"],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:7777/v1/ptys", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        cols: 120,
+        rows: 40,
+        cwd: "/workspace",
+        sessionId: "s1",
+        command: "bash",
+        args: ["-lc", "echo hi"],
+      }),
+    });
+    expect(attachment.ptyId).toBe("pty_1");
+    expect(attachment.wsPath).toBe("/v1/ptys/pty_1/ws");
+    expect(attachment.socket.binaryType).toBe("arraybuffer");
+    expect(ptySockets).toHaveLength(1);
+    expect(ptySocketCalls).toEqual([
+      {
+        url: "ws://127.0.0.1:7777/v1/ptys/pty_1/ws",
+        init: { headers: { authorization: "Bearer secret" } },
+      },
+    ]);
+
+    const reattached = client.connectPty("/v1/ptys/pty_1/ws");
+    expect(reattached.binaryType).toBe("arraybuffer");
+    expect(ptySockets).toHaveLength(2);
+    expect(ptySocketCalls.at(-1)).toEqual({
+      url: "ws://127.0.0.1:7777/v1/ptys/pty_1/ws",
+      init: { headers: { authorization: "Bearer secret" } },
+    });
   });
 });

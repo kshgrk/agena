@@ -14,6 +14,10 @@ export const FRAME_COALESCE_BUFFERED_BYTES = 1_048_576;
 export const FRAME_DROP_BUFFERED_BYTES = 4_194_304;
 export const DURABLE_BACKLOG_LIMIT_BYTES = 16_777_216;
 export const SOCKET_STALL_TIMEOUT_MS = 15_000;
+export const PTY_IDLE_TIMEOUT_MS = 15 * 60_000;
+export const PTY_SCROLLBACK_BYTES = 262_144;
+export const PTY_PAUSE_BUFFERED_BYTES = 1_048_576;
+export const PTY_RESUME_BUFFERED_BYTES = 262_144;
 
 export const wireLimitsSchema = z.object({
   maxEnvelopeBytes: z.number().int().positive(),

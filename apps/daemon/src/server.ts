@@ -7,13 +7,18 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 import type { EventStore, RuntimeAdapter } from "@agena/core";
 import { InMemoryEventStore, SessionOrchestrator } from "@agena/core";
-import { PROTOCOL_VERSION, WS_PATH } from "@agena/protocol";
+import {
+  createPtyRequestSchema,
+  PROTOCOL_VERSION,
+  WS_PATH,
+} from "@agena/protocol";
 import { SqliteEventStore } from "@agena/storage-sqlite";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { DaemonConfig } from "./config.ts";
 import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
+import { PtyManager } from "./pty-manager.ts";
 
 export interface Daemon {
   port: number;
@@ -45,6 +50,7 @@ export async function startDaemon(
     publishFrame: (frame) => gateway.publishFrame(frame),
   });
   const gateway = new Gateway(store, orchestrator);
+  const ptys = new PtyManager(store, config.workspaceDir);
   if (store.reconcileOpenWork) {
     const report = await store.reconcileOpenWork();
     if (report.appended > 0) {
@@ -155,6 +161,66 @@ export async function startDaemon(
     }
     return c.json(await store.rebuildProjections(body.sessionId));
   });
+  app.post("/v1/ptys", async (c) => {
+    const parsed = createPtyRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid PTY create request",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      return c.json(await ptys.create(parsed.data), 201);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === "SESSION_NOT_FOUND") {
+        return c.json(
+          {
+            code: "SESSION_NOT_FOUND",
+            message: `unknown session ${parsed.data.sessionId}`,
+            retryable: false,
+          },
+          404,
+        );
+      }
+      if (message === "INVALID_CWD") {
+        return c.json(
+          {
+            code: "INVALID_PAYLOAD",
+            message: "cwd must exist under /workspace",
+            retryable: false,
+          },
+          400,
+        );
+      }
+      log("error", "pty create failed", { err: message });
+      return c.json(
+        { code: "INTERNAL", message: "pty create failed", retryable: false },
+        500,
+      );
+    }
+  });
+  app.get("/v1/ptys", (c) => c.json(ptys.list()));
+  app.delete("/v1/ptys/:id", async (c) => {
+    if (!(await ptys.kill(c.req.param("id")))) {
+      return c.json(
+        {
+          code: "SESSION_NOT_FOUND",
+          message: `unknown pty ${c.req.param("id")}`,
+          retryable: false,
+        },
+        404,
+      );
+    }
+    return c.body(null, 204);
+  });
 
   const { server, port } = await new Promise<{ server: Server; port: number }>(
     (resolve) => {
@@ -173,7 +239,14 @@ export async function startDaemon(
       socket.destroy();
       return;
     }
-    if ((req.url ?? "").split("?")[0] !== WS_PATH) {
+    const path = (req.url ?? "").split("?")[0] ?? "";
+    const ptyMatch = /^\/v1\/ptys\/([^/]+)\/ws$/.exec(path);
+    const ptyId = ptyMatch?.[1];
+    if (ptyId) {
+      ptys.handleUpgrade(req, socket, head, decodeURIComponent(ptyId));
+      return;
+    }
+    if (path !== WS_PATH) {
       socket.write(
         "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
       );
@@ -187,9 +260,10 @@ export async function startDaemon(
     port,
     store,
     orchestrator,
-    // ponytail: the §9.7 drain sequence is M2; M1 tears down hard
+    // ponytail: compact shutdown path; full §9.7 drain metrics/counters land later.
     close: async () => {
       await orchestrator.shutdown();
+      await ptys.close();
       gateway.close();
       server.closeIdleConnections(); // don't hang on kept-alive HTTP sockets
       await new Promise<void>((resolve) => server.close(() => resolve()));

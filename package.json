@@ -12,7 +12,8 @@
     "typecheck": "pnpm -r exec tsc --noEmit",
     "test": "vitest run",
     "boundary": "node scripts/check-boundaries.mjs",
-    "ci": "pnpm lint && pnpm boundary && pnpm typecheck && pnpm test"
+    "bun-gate": "node scripts/check-bun-cli.mjs",
+    "ci": "pnpm lint && pnpm boundary && pnpm typecheck && pnpm test && pnpm bun-gate"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.2",

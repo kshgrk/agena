@@ -1,25 +1,28 @@
 // Suites 6 & 7, M1 subset (§13.5): real WS against an ephemeral port with the
 // FakeRuntimeAdapter — zero model calls (P16).
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeRuntimeAdapter } from "@agena/core/testing";
 import type { WireEnvelope } from "@agena/protocol";
 import {
   assistantTextDeltaSchema,
+  createPtyResponseSchema,
   DURABLE_BACKLOG_LIMIT_BYTES,
   FRAME_COALESCE_BUFFERED_BYTES,
   FRAME_DROP_BUFFERED_BYTES,
   PROTOCOL_VERSION,
   promptAckSchema,
+  ptyDaemonControlFrameSchema,
   subscribeAckSchema,
+  WS_CLOSE_CODES,
   WS_SUBPROTOCOL,
   wireEnvelopeSchema,
 } from "@agena/protocol";
 import { SqliteEventStore } from "@agena/storage-sqlite";
 import { afterEach, expect, test } from "vitest";
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 import { type DaemonConfig, loadConfig } from "../src/config.ts";
 import { backpressureAction } from "../src/gateway.ts";
 import { type Daemon, startDaemon } from "../src/server.ts";
@@ -160,6 +163,65 @@ function rejectedUpgradeStatus(
     ws.on("open", () => reject(new Error("upgrade unexpectedly completed")));
     ws.on("error", () => {}); // follows unexpected-response; swallow
   });
+}
+
+async function createPty(
+  port: number,
+  body: Record<string, unknown>,
+): Promise<{ ptyId: string; wsPath: string }> {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/ptys`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  expect(res.status).toBe(201);
+  return createPtyResponseSchema.parse(await res.json());
+}
+
+function attachPty(port: number, wsPath: string): Promise<WebSocket> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  return new Promise((resolve, reject) => {
+    ws.on("open", () => resolve(ws));
+    ws.on("error", reject);
+  });
+}
+
+function collectPty(
+  ws: WebSocket,
+): Promise<{ output: string; exitCode: number | null }> {
+  let output = "";
+  let exitCode: number | null = null;
+  return new Promise((resolve, reject) => {
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        output += rawPty(data);
+        return;
+      }
+      const exit = ptyDaemonControlFrameSchema.safeParse(
+        JSON.parse(String(data)),
+      );
+      if (exit.success) exitCode = exit.data.exitCode;
+    });
+    ws.on("close", () => resolve({ output, exitCode }));
+    ws.on("error", reject);
+  });
+}
+
+function closeCode(ws: WebSocket): Promise<number> {
+  return new Promise((resolve) => ws.on("close", (code) => resolve(code)));
+}
+
+function rawPty(data: RawData): string {
+  return Buffer.isBuffer(data)
+    ? data.toString("utf8")
+    : Array.isArray(data)
+      ? Buffer.concat(data).toString("utf8")
+      : Buffer.from(data).toString("utf8");
 }
 
 test("bad or missing token ⇒ raw HTTP 401 upgrade rejection; /health stays open", async () => {
@@ -616,6 +678,67 @@ test("backpressure decisions match the M2 thresholds", () => {
   expect(backpressureAction("frame", FRAME_DROP_BUFFERED_BYTES + 1)).toBe(
     "drop",
   );
+});
+
+test("PTY command shares workspace and emits terminal lifecycle events", async () => {
+  const workspace = stateDir();
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const session = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const c = await TestClient.connect(daemon.port);
+  c.send({
+    kind: "cmd",
+    requestId: "r-sub",
+    name: "subscribe",
+    payload: { sessionId: session.sessionId, fromSeq: 0 },
+  });
+  await c.waitFor((m) => m.kind === "sync");
+
+  const { wsPath } = await createPty(daemon.port, {
+    cols: 80,
+    rows: 24,
+    sessionId: session.sessionId,
+    command: "/bin/sh",
+    args: ["-lc", "touch hello.txt; printf done"],
+  });
+  const ws = await attachPty(daemon.port, wsPath);
+  const result = await collectPty(ws);
+
+  expect(result.output).toContain("done");
+  expect(result.exitCode).toBe(0);
+  expect(existsSync(join(workspace, "hello.txt"))).toBe(true);
+  await c.waitFor(
+    (m) => isEvent(m) && m.event.type === "terminal.session.ended",
+  );
+  expect(c.events(session.sessionId).map((m) => m.event.type)).toContain(
+    "terminal.session.started",
+  );
+  expect(c.msgs.filter((m) => m.kind === "frame")).toHaveLength(0);
+});
+
+test("PTY websocket resize works and a second live attachment closes 4409", async () => {
+  const workspace = stateDir();
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const { wsPath } = await createPty(daemon.port, {
+    cols: 80,
+    rows: 24,
+    command: "/bin/sh",
+    args: [],
+  });
+  const ws1 = await attachPty(daemon.port, wsPath);
+  const ws2 = await attachPty(daemon.port, wsPath);
+  await expect(closeCode(ws2)).resolves.toBe(WS_CLOSE_CODES.ptyAlreadyAttached);
+
+  ws1.send(JSON.stringify({ type: "resize", cols: 101, rows: 33 }));
+  await new Promise((r) => setTimeout(r, 30));
+  ws1.send(Buffer.from("stty size\nexit\n"));
+  const result = await collectPty(ws1);
+
+  expect(result.output).toMatch(/33 101/);
+  expect(result.exitCode).toBe(0);
 });
 
 test("config: token is mandatory, defaults follow §3.2/§9.9", () => {

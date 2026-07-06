@@ -82,12 +82,12 @@ These are product acceptance requirements; milestone acceptance criteria (§14) 
 
 | Command | What it does | Transport |
 |---|---|---|
-| `agena` | Open the TUI. Resumes the most recent session, or shows the session picker if none. Flags: `--profile <name>`, `--session <id>`. | HTTP list + main WS |
-| `agena new "<task>"` | Create a session (`POST /v1/sessions`), attach the TUI, send the task as the first prompt. Flags: `--model`, `--detach`, `--no-tui` (print id, stream plain output). | HTTP + main WS |
-| `agena resume [id \| --last]` | Attach to an existing session: fetch projections over HTTP, then `subscribe {sessionId, fromSeq}` on the main WS. No arg ⇒ interactive picker. ULID prefix match accepted. | HTTP + main WS |
-| `agena sessions` | List sessions (`GET /v1/sessions`). Flags: `--all` (archived + imported), `--source native\|claude\|codex`, `--json`. | HTTP |
-| `agena search "<query>"` | FTS5 search over titles + message text (`GET /v1/search?q=`). Prints session/message hits with seq anchors; `--json`. | HTTP |
-| `agena shell [-- <cmd>]` | Open a PTY in `/workspace` (or run `<cmd>` non-interactively; exit code propagated). Detach with SSH-style `~.` at line start. With `--session <id>`, appends `terminal.session.started/ended` durable events to that session; **without a session association no durable events are emitted** (no session context exists). | dedicated PTY WS |
+| `agena` | Open the TUI. Resumes the most recent session for the current project/cwd scope, or shows that scoped picker if none. Flags: `--profile <name>`, `--session <id>`, `--global`, `--all-projects`. | HTTP list + main WS |
+| `agena new "<task>"` | Create a session (`POST /v1/sessions`) in the current project/cwd scope, attach the TUI, send the task as the first prompt. Flags: `--model`, `--detach`, `--no-tui` (print id, stream plain output), `--global`, `--cwd <path>`. | HTTP + main WS |
+| `agena resume [id \| --last]` | Attach to an existing session: fetch projections over HTTP, then `subscribe {sessionId, fromSeq}` on the main WS. No arg ⇒ current-project picker; `--all-projects` broadens it. ULID prefix match accepted. | HTTP + main WS |
+| `agena sessions` | List sessions (`GET /v1/sessions`). Default is current project/cwd scope. Flags: `--all-projects`, `--global`, `--archived`, `--source native\|claude\|codex`, `--json`. | HTTP |
+| `agena search "<query>"` | FTS5 search over titles + message text (`GET /v1/search?q=`). Default is current project/cwd scope; `--all-projects` searches the whole workspace. Prints session/message hits with seq anchors; `--json`. | HTTP |
+| `agena shell [-- <cmd>]` | Open a PTY in the session cwd when `--session <id>` is provided, otherwise in the current project/cwd scope (or workspace root for `--global`). Detach from the TUI with `Ctrl+J`; standalone shells propagate exit code. With `--session <id>`, appends `terminal.session.started/ended` durable events to that session; **without a session association no durable events are emitted** (no session context exists). | dedicated PTY WS |
 | `agena files ls [path]` / `cat <path>` / `get <path> [local]` / `put <local> <path>` | Browse, read, download, upload workspace files. `get -r <dir>` streams a tar.zst via `GET /v1/files/archive`. The container FS is the manifest in v1 — no file index table. There is **no separate `agena cp`**; `files get/put` (plus `get -r`) is the v1 file-movement surface. | HTTP |
 | `agena snapshot create <name>` / `list` / `restore <id>` | Tarball `/workspace` (mechanically excludes `/var/lib/agena`). Restore replaces files only and appends `snapshot.restored` to the workspace control session; it NEVER rolls back the event store (P1). | HTTP |
 | `agena approvals` | List pending approvals across sessions (`GET /v1/approvals?pending=1`, derived from durable events). | HTTP |
@@ -100,7 +100,19 @@ These are product acceptance requirements; milestone acceptance criteria (§14) 
 
 Deliberately **absent** from v1 (each is a decision, see §17): `agena share` (parked, P9 — the verb is **not registered**; no stub), `agena cp`/`agena sync` (`files get/put` covers v1), `agena plugins install` (v1 plugins are authored in `.agena/`).
 
-Global flags: `--profile <name>`, `--url <daemonUrl>` (override), `--json`, `--no-color`, `--log-level`, `--config <path>`. Stable exit codes: `0` ok · `1` failure · `2` usage · `3` feature deferred · `4` connection failure · `5` auth failure · `6` not found · `7` protocol version mismatch. Non-TTY: the TUI never starts; `agena new "task" --no-tui | tee log` must work.
+Global flags: `--profile <name>`, `--url <daemonUrl>` (override), `--project <id-or-name>`, `--cwd <path>`, `--global`, `--all-projects`, `--json`, `--no-color`, `--log-level`, `--config <path>`. Stable exit codes: `0` ok · `1` failure · `2` usage · `3` feature deferred · `4` connection failure · `5` auth failure · `6` not found · `7` protocol version mismatch. Non-TTY: the TUI never starts; `agena new "task" --no-tui | tee log` must work.
+
+## 1.6 Project/cwd session scoping
+
+Default session selection is local-folder aware. The CLI resolves the host cwd through the active profile to a workspace-relative cwd and project root, then sends that scope in `POST /v1/sessions` and list/search filters. A plain `agena` from `/repo-a` must not resume a `/repo-b` session unless the user passes `--all-projects`, a direct `--session`, or chooses from the all-project picker.
+
+Rules:
+
+1. The daemon stores `projectId`, `scope`, and workspace-relative `cwd` on the session. Runtime sessions and PTYs start from that durable cwd; they never trust the client's current host cwd after creation.
+2. `scope="project"` is the default. The project root is the nearest registered root for the current cwd; if none exists, the CLI registers one lazily using the detected git root or the cwd itself.
+3. `scope="global"` is explicit (`--global`) and means "not tied to a project"; global sessions are hidden from project-local defaults.
+4. Host absolute paths are hints only (`hostCwdHint`) for diagnostics and local profile resolution. Cloud clients use the same `projectId` + workspace-relative cwd without host-path semantics.
+5. A session cwd must stay inside its project root unless the session is global/control. `..` traversal and symlink escapes are rejected at the daemon boundary.
 
 ---
 
@@ -278,15 +290,19 @@ Consequences, all load-bearing:
 | **Secrets / provider keys** | §3.3 secrets stance. PTY shells do not inherit provider keys unless `pty.exposeProviderKeys: true`. |
 | **Pi version churn** | Exact-version pin; recorded JSONL fixtures replayed through the `runtime-pi` mapper in CI; nightly canary vs `@latest`; upgrade playbook. (P16) |
 | **Multi-workspace** | v1: one container = one workspace = one daemon = one event store. CLI profiles (`agena --profile <name>` → URL + token in `~/.config/agena/`) select daemons client-side. Boot-fatal `workspaceId` mismatch check catches mis-wired volumes. |
+| **Project/cwd scope** | Within one workspace, sessions are scoped by project and cwd. The CLI derives the default scope from the host cwd mapped into `/workspace`; `--global` creates/list sessions not tied to a project; `--all-projects` is an explicit broad query. Runtime and PTY sessions start from the durable session cwd, never from a client-local guess. |
 
 ## 3.5 Glossary (normative)
 
 - **Session** — the durable unit of agent work. ULID-identified, owned by the single workspace, independent of any client/process lifetime. Ordered event log (`seq` from 1), one or more branches; `status: active | idle | archived`; `source: native | claude | codex`.
+- **Project** — a stable scope inside one workspace, normally a repo or folder. A project has a daemon-owned `projectId`, a display name, a workspace-relative root, and optional host-path hints used only by local CLI profile resolution. Project identity is durable; host absolute paths are not product truth.
+- **Session cwd** — the workspace-relative directory where a session's runtime and PTYs start. It is stored on the session at creation and must stay inside the project root unless the session is explicitly global. A client may open from any host path, but commands execute from the durable session cwd.
 - **Branch** — a line of history within a session: a column on every event plus a `branches` row with `parent_branch_id` and `forked_from_seq`. Every session has a root branch (`forked_from_seq` NULL).
 - **Durable event** — an `AgenaEvent`: persisted, `seq`-numbered, versioned, provenance-attributed record of a semantic state change. Sufficient alone to rebuild correct UI state.
 - **Ephemeral frame** — an `AgenaFrame`: live, non-persisted delta carrying `afterSeq`. Droppable and coalescible; never required for correctness.
 - **Projection** — a derived read model (messages, tool_calls, FTS5) maintained inside the append transaction and rebuildable via `agena rebuild`. Dropped and rebuilt, never migrated.
 - **Workspace** — `/workspace` inside the container: the filesystem the runtime, `agena shell`, and file APIs all share. What a snapshot captures and what later moves to the cloud.
+- **Global session** — a native session with no project binding. It is hidden from project-local default listings and appears only under `--global`, `--all-projects`, or a direct `--session`.
 - **Control session** — the singleton hidden session per workspace (created at first boot, excluded from default listings) that carries workspace-scoped durable events (`snapshot.*`, `workspace.initialized`) through the normal `appendEvents` path.
 - **Snapshot** — a point-in-time `tar --zstd` capture of `/workspace` only. Restoring replaces workspace files and appends a durable event; it never modifies the event store.
 - **Runtime adapter** — an implementation of core's `RuntimeAdapter`/`RuntimeSession` ports driving a concrete agent runtime. `runtime-pi` is the v1 adapter; `FakeRuntimeAdapter` is its test twin.
@@ -418,7 +434,7 @@ agena/
 │   │       └── errors.ts
 │   └── tui/                        # @agena/tui — pi-tui frontend (P17); depends on client + protocol
 │       └── src/
-│           ├── app.ts              # composition root, focus, suspend/resume for shell attach
+│           ├── app.ts              # composition root, focus, embedded shell split wiring
 │           ├── store/              # PURE reducers: AgenaEvent/AgenaFrame → view state
 │           ├── views/              # SessionView, SessionPicker, ApprovalModal, Palette, StatusBar
 │           ├── components/         # MessageBlock, ToolCallBlock, InProgressTail, Toast
@@ -625,6 +641,11 @@ type SessionCreated = {
   title?: string;
   runtime: "pi";
   origin: "native" | "import.claude" | "import.codex" | "control";
+  scope: "project" | "global" | "control";
+  projectId?: string;          // required when scope === "project"
+  projectRoot?: string;        // workspace-relative, e.g. "." or "apps/api"
+  cwd?: string;                // workspace-relative runtime cwd
+  hostCwdHint?: string;        // diagnostics only; never used by daemon execution
   rootBranchId: string;
 };
 type SessionTitleChanged  = { title: string; previousTitle?: string };
@@ -1009,6 +1030,7 @@ STRICT everywhere; enums as CHECKs; timestamps ISO-8601 UTC TEXT; ids ULIDs. DB 
 
 Schema lands with the feature that first needs it. M2 owns only the durable replay core: `sessions`, `branches`, `events`, `messages`, and `tool_calls` projections. Later milestones extend the same database in place:
 
+- **M4 project/cwd scope:** `projects`, `sessions.scope`, `sessions.project_id`, `sessions.cwd`, `sessions.host_cwd_hint`, and project-scoped list/search filters.
 - **M5 search/snapshots/session management:** `messages_fts`, `snapshots`, control-session metadata (`meta.control_session_id`, `sessions.is_control`), and session status/archive fields.
 - **M6 importers:** `imports`, `imported_sessions`, importer source fields, imported-session read-only metadata, and `pi_session_path`/raw archive pointers where needed.
 - **M7 tool execution/blob spill:** `blobs` metadata plus the blob file layout and `GET /v1/blobs/:hash`. The `BlobRef` wire shape exists earlier as protocol vocabulary, but no milestone must implement blob storage until a feature can actually emit oversized tool output.
@@ -1026,9 +1048,26 @@ CREATE TABLE meta (
 -- columns below future-proof multi-workspace without schema change.
 
 -- ── source of truth ─────────────────────────────────────────────
+CREATE TABLE projects (
+  id                  TEXT PRIMARY KEY,
+  workspace_id        TEXT NOT NULL,
+  name                TEXT NOT NULL,
+  root                TEXT NOT NULL,                         -- workspace-relative, "." allowed
+  host_path_hint      TEXT,                                  -- diagnostics/profile resolution only
+  fingerprint         TEXT,                                  -- git remote/root hash when available
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  UNIQUE (workspace_id, root)
+) STRICT;
+
 CREATE TABLE sessions (
   id               TEXT PRIMARY KEY,
   workspace_id     TEXT NOT NULL,
+  scope            TEXT NOT NULL DEFAULT 'project'
+                     CHECK (scope IN ('project','global','control')),
+  project_id       TEXT REFERENCES projects(id),             -- NULL for global/control sessions
+  cwd              TEXT NOT NULL DEFAULT '.',                -- workspace-relative runtime cwd
+  host_cwd_hint    TEXT,                                     -- diagnostics only; not execution truth
   title            TEXT,
   status           TEXT NOT NULL DEFAULT 'active'          -- M5 session archive/list filters
                      CHECK (status IN ('active','idle','archived')),
@@ -1042,8 +1081,11 @@ CREATE TABLE sessions (
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL
 ) STRICT;
+CREATE INDEX idx_sessions_scope
+  ON sessions(workspace_id, scope, project_id, updated_at DESC);
 -- session.created.origin 'import.claude'|'import.codex' maps to source 'claude'|'codex';
 -- 'native' and 'control' map to source 'native' (control rows also set is_control = 1).
+-- project_id is required when scope='project'; cwd must stay under the project root in code.
 
 CREATE TABLE branches (
   id               TEXT PRIMARY KEY,
@@ -1184,6 +1226,26 @@ export interface AppendEventsResult { events: AgenaEvent[]; lastSeq: number; }
 export interface ReadEventsPage { events: AgenaEvent[]; nextFromSeq: number | null; }
 export interface BranchSegment { branchId: string; uptoSeq: number | null }   // null = unbounded (tip)
 
+export type SessionScope =
+  | { kind: "project"; projectId: string; projectRoot: string; cwd: string; hostCwdHint?: string }
+  | { kind: "global"; cwd?: string; hostCwdHint?: string }
+  | { kind: "control"; cwd?: string };
+
+export interface CreateSessionInput {
+  workspaceId: string;
+  title?: string;
+  source?: EventSource;
+  scope: SessionScope;
+}
+
+export interface SessionFilter {
+  workspaceId?: string;
+  projectId?: string;
+  scope?: "project" | "global" | "control";
+  allProjects?: boolean;
+  includeArchived?: boolean;
+}
+
 export interface EventStore {
   createSession(input: CreateSessionInput): Promise<SessionRecord>;   // row + root branch + session.created, one tx
   createBranch(input: CreateBranchInput): Promise<BranchRecord>;      // row + branch.created
@@ -1200,7 +1262,7 @@ export interface EventStore {
   onCommitted(listener: (batch: AppendEventsResult & { sessionId: string }) => void): () => void;
 
   readBlob(hash: string): Promise<Uint8Array | null>;
-  search(query: string, opts?: { sessionId?: string; limit?: number }): Promise<SearchHit[]>;
+  search(query: string, opts?: { sessionId?: string; projectId?: string; allProjects?: boolean; limit?: number }): Promise<SearchHit[]>;
 
   rebuildProjections(sessionId?: string): Promise<RebuildReport>;
   reconcileOpenWork(): Promise<ReconcileReport>;          // boot sweep (P2, §7.8)
@@ -1297,7 +1359,7 @@ Blob spill is not an M2 storage prerequisite. It lands with M7 tool execution be
 
 - **Dies between commit and fanout:** event is durable; clients heal via `subscribe {fromSeq}` replay — the store is the retry mechanism.
 - **Dies mid-transaction:** WAL rolls back; no partial events, no seq consumed.
-- **Dies mid-generation:** `reconcileOpenWork()` runs at boot before the WS gateway accepts subscriptions. It handles the durable started/pending states introduced up to the current milestone. M2 requires assistant-message and run recovery; M3 adds terminal sessions; M4 adds approvals and user abort/control states; M7 adds tool execution outputs and hook denials. For every dangling start (no terminal sibling at higher seq on the same branch) it appends the §5.6 **hard-crash column** payloads with `source {kind:"daemon"}`, via the normal `appendEvents` path: `message.assistant.failed {partialContent: [], error:{code:"daemon_restart"}, recovered:true}`, `tool.call.aborted {partialOutput: [], reason:"daemon_restart"}`, `run.failed {error:{code:"daemon_restart"}}`, `approval.cancelled {reason:"daemon_restart"}`, and — for every `terminal.session.started` without an end — `terminal.session.ended {exitCode: null, reason:"daemon_restart"}` once those event families exist. The dangling-message detection SQL (same pattern for runs/tools/approvals/terminals as they land):
+- **Dies mid-generation:** `reconcileOpenWork()` runs at boot before the WS gateway accepts subscriptions. It handles the durable started/pending states introduced up to the current milestone. M2 requires assistant-message and run recovery; M3 adds terminal sessions; M4 adds project/cwd session metadata but no new started states; M4.5 adds approvals and user abort/control states; M7 adds tool execution outputs and hook denials. For every dangling start (no terminal sibling at higher seq on the same branch) it appends the §5.6 **hard-crash column** payloads with `source {kind:"daemon"}`, via the normal `appendEvents` path: `message.assistant.failed {partialContent: [], error:{code:"daemon_restart"}, recovered:true}`, `tool.call.aborted {partialOutput: [], reason:"daemon_restart"}`, `run.failed {error:{code:"daemon_restart"}}`, `approval.cancelled {reason:"daemon_restart"}`, and — for every `terminal.session.started` without an end — `terminal.session.ended {exitCode: null, reason:"daemon_restart"}` once those event families exist. The dangling-message detection SQL (same pattern for runs/tools/approvals/terminals as they land):
 
   ```sql
   SELECT e.session_id, e.branch_id, json_extract(e.payload,'$.messageId') AS message_id
@@ -1372,6 +1434,7 @@ export interface RuntimeAdapter {
 export interface CreateRuntimeSessionInput {
   sessionId: string;                 // Agena session ULID
   workspaceDir: string;              // '/workspace'
+  cwd: string;                       // absolute path inside workspace, derived from durable session cwd
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
   tools: AgenaToolDescriptor[];      // bridged Agena tools (.agena/tools + builtins)
@@ -1495,11 +1558,12 @@ export interface RuntimeErrorInfo { message: string; code?: string; retryable?: 
 import { createAgentSession, SessionManager, DefaultResourceLoader,
          AuthStorage, ModelRegistry, defineTool, getAgentDir } from '@earendil-works/pi-coding-agent';
 
-const manager = SessionManager.create(input.workspaceDir);          // new session (persistent JSONL)
+const manager = SessionManager.create(input.cwd);                   // new session (persistent JSONL)
 const managerResume = SessionManager.open(input.runtimeSessionRef); // resume exact JSONL file
 
 const { session, extensionsResult, modelFallbackMessage } = await createAgentSession({
   sessionManager: manager,
+  cwd: input.cwd,
   model: resolvedModel,               // resolved via ModelRegistry from the Agena ModelRef
   thinkingLevel: input.thinkingLevel ?? 'off',
   authStorage,                        // /var/lib/agena/pi/auth.json, 0600, materialized from env
@@ -1706,9 +1770,9 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | Method | Path | Purpose | Notes |
 |---|---|---|---|
 | GET | `/health` | Liveness | Unauthenticated. `{status:"ok"\|"starting"\|"draining"\|"restore_incomplete", version, protocolVersion, uptimeMs}` |
-| POST | `/v1/sessions` | Create session | `{title?, model?, thinkingLevel?}`; appends `session.created` |
-| GET | `/v1/sessions` | List | `?status=&source=&limit=&cursor=` (ULID keyset). Control session excluded by default (`?includeControl=1`) |
-| GET | `/v1/sessions/:id` | Read one | Includes `lastSeq`, `status`, `activeBranchId`, `source` |
+| POST | `/v1/sessions` | Create session | `{title?, model?, thinkingLevel?, scope:{kind, projectId?, projectRoot?, cwd?, hostCwdHint?}}`; appends `session.created` |
+| GET | `/v1/sessions` | List | `?projectId=&scope=project\|global&allProjects=0|1&status=&source=&limit=&cursor=` (ULID keyset). Control session excluded by default (`?includeControl=1`) |
+| GET | `/v1/sessions/:id` | Read one | Includes `lastSeq`, `status`, `activeBranchId`, `source`, `scope`, `projectId`, `cwd` |
 | PATCH | `/v1/sessions/:id` | Rename/archive | Appends `session.title.changed` / `session.status.changed` |
 | GET | `/v1/sessions/:id/events` | **Cold read with fromSeq** | `?fromSeq=0&limit=500&branchId=` → `{events, nextFromSeq}`; `limit` max 2000; branch reads follow INV-11; identical `AgenaEvent` shape to WS replay |
 | POST | `/v1/sessions/:id/fork` | Create branch | `{fromSeq, name?}`; appends `branch.created` (+`branch.switched`) |
@@ -1726,7 +1790,7 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/snapshots` | List | |
 | POST | `/v1/snapshots/:id/restore` | Restore `/workspace` only | `409 CONFLICT` with blocker list; `{force:true}` aborts turns/PTYs first (with P2 events). **Never touches the event store** |
 | DELETE | `/v1/snapshots/:id` | Delete artifact + append `snapshot.deleted` | |
-| POST | `/v1/ptys` | Create PTY | `{cols, rows, cwd?, sessionId?, command?, args?}` → `{ptyId, wsPath}` |
+| POST | `/v1/ptys` | Create PTY | `{cols, rows, cwd?, sessionId?, command?, args?}` → `{ptyId, wsPath}`; `sessionId` defaults cwd from the session record |
 | GET | `/v1/ptys` | List live PTYs | |
 | DELETE | `/v1/ptys/:id` | Kill PTY | SIGHUP, SIGKILL after 5 s |
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
@@ -1756,7 +1820,7 @@ The gateway implements §5 exactly (envelope, handshake, command catalog, error 
 
 Terminal bytes flow **only** here. No terminal frames on the main channel in v1 (`terminal.output.chunk` reserved future/optional).
 
-- `POST /v1/ptys` spawns via node-pty: `pty.shell` (default `/bin/bash -l`), cwd `/workspace`, `TERM=xterm-256color`, env sanitized (provider keys stripped unless `pty.exposeProviderKeys: true`).
+- `POST /v1/ptys` spawns via node-pty: `pty.shell` (default `/bin/bash -l`), cwd = the session's durable cwd when `sessionId` is present, otherwise the validated request cwd/current project scope, falling back to `/workspace` only for global/unscoped shells. `TERM=xterm-256color`, env sanitized (provider keys stripped unless `pty.exposeProviderKeys: true`).
 - With `sessionId`: append `terminal.session.started` / `terminal.session.ended` (§5.5 payloads, `source {kind:"terminal"}`) — metadata only, never bytes. Without: no durable events (matches §1.5).
 - One interactive attachment at a time; second upgrade → close `4409`.
 - **Detach ≠ death**: PTY survives WS disconnect; 256 KiB scrollback ring replayed on reattach; unattached PTYs reaped after 15 min; `DELETE /v1/ptys/:id` kills immediately.
@@ -2121,7 +2185,7 @@ applyFrame(vm, frame): void;   // touches inFlight ONLY; never finalized
 
 **Scrollback & large payloads:** ≤500 finalized blocks in memory; scrolling past the top pages `GET /v1/sessions/:id/events` through the same reducer. Blocks >64 KB rendered text truncate with `[… truncated, o to open]` (fetches the blob into a pager). Tool output collapsed by default.
 
-**Keymap (defaults):** `Enter` submit / steer-chooser when turn active · `Alt+Enter` newline · `Esc Esc` abort · `Ctrl+P` palette · `Ctrl+S` session picker · `Ctrl+T` shell · `Ctrl+C ×2` quit · `Ctrl+Z` suspend (full repaint on `fg`). Palette actions include: new/resume session, switch model, thinking level, **compact context** (`compact` command), abort, open shell, toggle tool output, respond to approval, copy session id, load earlier history, diagnostics, quit.
+**Keymap (defaults):** `Enter` submit / steer-chooser when turn active · `Alt+Enter` newline · `Esc Esc` abort · `Ctrl+P` palette · `Ctrl+S` session picker · `Ctrl+T` show/hide shell split · `Ctrl+J` focus/unfocus a visible shell split · `Ctrl+Shift+Up`/`Ctrl+Shift+Down` resize shell split · `Ctrl+C ×2` quit **from chat focus; with the shell pane focused every key except the bindings above — `Ctrl+C` included — passes to the PTY** · `Ctrl+Z` suspend (full repaint on `fg`). Palette actions include: new/resume session, switch model, thinking level, **compact context** (`compact` command), abort, open shell, toggle tool output, respond to approval, copy session id, load earlier history, diagnostics, quit.
 
 **Concurrent clients:** prompts from other devices arrive as `message.user.created` with `source.clientId` and render an origin hint; `SESSION_BUSY` becomes the inline `[s]teer · [f]ollow-up · [Esc]` chooser; approvals resolved elsewhere close the modal via the `approval.responded` event.
 
@@ -2150,16 +2214,17 @@ ws drop → REATTACHING (backoff; same ptyId; daemon replays 256 KiB ring, then 
 ```
 
 - **Standalone:** no TUI — raw mode, attach, restore terminal on exit, propagate remote exit code.
-- **From the TUI:** `shell-bridge.ts` suspends pi-tui (leave alt-screen `CSI ?1049l`, show cursor, disable mouse/bracketed-paste, flush), runs the same state machine, and keeps the **main WS connected in the background** accumulating events with rendering suppressed. On exit: restore termios, re-enter alt-screen, force a full render — stream already up to date, including `terminal.session.*` markers. No resubscribe needed.
-- **Detach:** SSH-style `Enter ~ .` (a 3-state filter withholds a post-newline `~` until disambiguated); `Enter ~ ?` prints help. Detach leaves the remote shell alive.
+- **From the TUI:** `shell-pane.ts` opens an embedded bottom split backed by the same dedicated PTY WS. `Ctrl+T` shows/hides the pane without killing the PTY; `Ctrl+J` toggles focus between chat and a visible shell; while the pane is focused every other key, `Ctrl+C` included, passes to the PTY; `Ctrl+Shift+Up`/`Ctrl+Shift+Down` resizes the split and immediately sends a resize control frame. When the shell exits the split hides and a transcript marker records the exit code. The main WS stays connected and renders normally; no TUI suspend/resume is involved.
+- **Detach/focus:** TUI focus switching does not kill the remote shell. If the pane socket drops, it reattaches to the same PTY while it remains within the idle reap window. Standalone `agena shell` exits only when the shell exits or the process is interrupted.
+- **Embedded terminal scope:** M3 embeds normal shell I/O in the split, not full VT100/alternate-screen emulation. Full-screen terminal apps are served by standalone `agena shell` until a real terminal emulator component is explicitly pulled in.
 - **Terminal-state safety:** one idempotent `restoreTerminal()` registered on `exit`, `SIGTERM`, `SIGHUP`, `uncaughtException` — whatever kills the process, the terminal comes back usable.
 - **Resize correctness:** initial size sent before any keystroke; SIGWINCH forwarded; on reattach the size is re-sent before ring replay, and the daemon's double-resize nudge forces full-screen apps to repaint (§9.5).
 
 ## 11.6 Packaging (P18)
 
-**Bun is the compiled-CLI runtime, PROVISIONAL until the validation gate passes; Node remains the daemon runtime regardless.** The CLI is written runtime-neutral: Bun-only APIs confined to `packages/client/src/transport/ws.ts` and build scripts.
+**Bun is the compiled-CLI runtime, PROVISIONAL until the validation gate passes; Node remains the daemon runtime regardless.** The CLI is written runtime-neutral: Bun-only APIs confined to build scripts and the SDK's runtime-neutral WebSocket construction.
 
-**One merged validation checklist** (ADR-0002; spike in M1 — CI compiles `bun build --compile` on macOS+Linux every push as a standing signal — **gate closes end of M3**, since shell attach is the riskiest consumer). Run on macOS arm64 + Linux x64 (glibc+musl), in iTerm2 / Terminal.app / tmux / stock Linux terminal:
+**One merged validation checklist** (ADR-0002; spike in M1 — CI compiles `bun build --compile` as a standing signal — **local M3 gate closes with `pnpm bun-gate`**, since shell attach is the riskiest consumer). Full release validation still runs on macOS arm64 + Linux x64 (glibc+musl), in iTerm2 / Terminal.app / tmux / stock Linux terminal:
 
 1. **Raw mode:** `setRawMode` round-trips in a compiled binary; Ctrl+C/Ctrl+Z/SIGWINCH behave; termios restored on abnormal exit.
 2. **WS client:** `Authorization` header on upgrade; binary frames both directions; ping/pong; ≥1 MB frames; sane `bufferedAmount`; stable under reconnect storms.
@@ -2168,7 +2233,7 @@ ws drop → REATTACHING (backoff; same ptyId; daemon replays 256 KiB ring, then 
 5. **Signals & job control:** SIGTSTP suspend + `fg` repaint; clean SIGTERM.
 6. **Non-TTY:** piped stdin/stdout, `--json`, exit codes (`agena sessions --json | jq` works).
 
-Any red item unfixable in ≤2 days of spike work triggers the fallback: npm distribution (`npm i -g agena`, Node ≥22, `ws` transport — already the Node path in `transport/ws.ts`), optionally Node SEA later. A distribution change, not a rewrite.
+Any red release-matrix item unfixable in ≤2 days of spike work triggers the fallback: npm distribution (`npm i -g agena`, Node ≥22, native WebSocket where available with `ws` fallback if needed), optionally Node SEA later. A distribution change, not a rewrite.
 
 ## 11.7 Client failure-mode summary
 
@@ -2287,7 +2352,7 @@ Zero model calls anywhere in CI; real-Pi recording is manual/nightly.
 | # | Suite | Location | What it proves | IDs |
 |---|---|---|---|---|
 | 1 | Protocol schema | `packages/protocol/test` | §5.11 conformance tests 1–7 (registries, round-trips, upcasts, size caps, replay-order property, recovery payloads, mapping-table names) | P2, P13 |
-| 2 | Mapper fixtures | `packages/runtime-pi/test` | Recorded Pi JSONL replayed through `event-map.ts` → byte-stable RuntimeEvents. **M2 baseline:** plain text, abort/error terminal, retry-success if available from Pi. Later milestones extend the same suite with approvals/controls (M4), tool calls and tool failures (M7), and compaction/model cases as their commands land. | P15, P2 |
+| 2 | Mapper fixtures | `packages/runtime-pi/test` | Recorded Pi JSONL replayed through `event-map.ts` → byte-stable RuntimeEvents. **M2 baseline:** plain text, abort/error terminal, retry-success if available from Pi. Later milestones extend the same suite with approvals/controls (M4.5), tool calls and tool failures (M7), and compaction/model cases as their commands land. | P15, P2 |
 | 3 | appendEvents tx | `packages/storage-sqlite/test` | seq monotonic under 100 interleaved appends; projection-writer throw ⇒ zero rows (atomicity); `onCommitted` fires only after commit, in seq order; frame types rejected; malformed payloads rejected pre-insert. **M7 extension:** >64 KiB spills and replays identically; concurrent identical spills race-safe (unique tmp names, INSERT OR IGNORE). | P6, P12 |
 | 4 | Replay + branches | storage-sqlite + core/replay | `readEvents(fromSeq, limit)` paged, gapless, ordered; branch replay = ancestor chain up to each `forked_from_seq` + own events, on a 3-deep fork tree (storage-level; fork UX is M5-stretch) | P10 |
 | 5 | Projection + FTS rebuild | storage-sqlite | **M2:** events → message/tool projections → drop → `rebuild()` → identical projection rows; idempotent. **M5 extension:** add FTS results and identical search hits. | P7 |
@@ -2329,7 +2394,7 @@ Closes: P4, P8, P13 (baseline), P16 (FakeRuntime exists and gates the WS tests).
 
 Deliverables: `@agena/storage-sqlite` core DDL for durable replay (`sessions`, `branches`, `events`, `messages`, `tool_calls` projections), `appendEvents` tx, paged `readEvents`, message/tool projection rebuild; wire snapshot on subscribe (via `toWireSnapshot`); terminalization for every durable started state introduced through M2 (`message.assistant.started`, `run.started`, and already-modeled tool/terminal starts if present in the log); boot sweep + dispatch-failure records for those states; graceful shutdown for active assistant/run state with real partial content; `agena rebuild` for M2 projections (FTS coverage extends in M5); **backpressure policy live** (slow durable consumer closes `4429`, frame coalesce/drop thresholds enforced, bounded replay buffer during subscribe); requestId dedupe map; `/var/lib/agena` named volume + capture tee in its permanent home; first recorded text-flow Pi fixture set (suite 2 green).
 
-Out of M2 on purpose: blob spill (M7, when tool output can be large), FTS/search/snapshots/control-session schema (M5), importer schema/read-only sessions (M6), PTY shutdown semantics (M3), approvals/abort/model/compaction controls (M4), and extensibility tool execution (M7).
+Out of M2 on purpose: blob spill (M7, when tool output can be large), project/cwd session scope (M4), FTS/search/snapshots/control-session schema (M5), importer schema/read-only sessions (M6), PTY shutdown semantics (M3), approvals/abort/model/compaction controls (M4.5), and extensibility tool execution (M7).
 
 Acceptance:
 1. Kill the TUI mid-stream; reopen: durable history replays instantly, in-flight partial appears, live frames resume — the "feels local" moment. *(FL-3, FL-6, FL-9)*
@@ -2344,19 +2409,33 @@ Closes: P1 (placement + snapshot exclusion), P2, P6, P12; P7 mechanism.
 
 ### M3 — Shell Attach
 
-Deliverables: `agena shell` + TUI entry; PTY manager; dedicated binary WS; TUI suspend/restore; resize propagation + reattach double-resize nudge; `terminal.session.started/ended` for session-linked PTYs; PTY WS bearer auth; crash/shutdown handling for PTYs introduced here (`terminal.session.started` always gets `terminal.session.ended` on exit, daemon shutdown, or boot sweep); **Bun gate closes (ADR-0002)**.
+Deliverables: `agena shell` + TUI embedded shell split; PTY manager; dedicated binary WS; TUI focus toggle + split resize; resize propagation + reattach double-resize nudge; `terminal.session.started/ended` for session-linked PTYs; PTY WS bearer auth; crash/shutdown handling for PTYs introduced here (`terminal.session.started` always gets `terminal.session.ended` on exit, daemon shutdown, or boot sweep); **Bun gate closes (ADR-0002)**.
 
 Acceptance:
 1. `agena shell`, `touch /workspace/hello.txt`, exit; the agent sees the file. *(FL-4)*
 2. Resize the local terminal; `stty size` reflects it. *(FL-5)*
 3. Exit restores the TUI exactly (alt-screen, cursor, keymap). *(FL-5)*
 4. Instrumented: zero terminal bytes on the main WS during the session. *(P5)*
-5. Suite 9 green; Bun checklist fully executed and ADR-0002 recorded.
+5. Suite 9 green; `pnpm bun-gate` green; ADR-0002 recorded. The broader cross-platform terminal matrix remains a release-validation gate, not an M3 implementation blocker.
 6. All durable started states introduced through M3 are terminalized in normal exit, graceful daemon shutdown, hard restart, and replay.
 
 Closes: P5, P18 (decision recorded).
 
-### M4 — Approvals and Turn Controls
+### M4 — Project/CWD Session Scope
+
+Deliverables: project registry (`projects` table) and session scope columns; `session.created` scope/cwd payloads; CLI host-cwd resolver; `POST /v1/sessions` scope input; `GET /v1/sessions` project/global/all filters; TUI resume/session picker defaults to current project; runtime sessions start in the durable session cwd; `agena shell --session` opens in the session cwd; cwd validation rejects traversal/symlink escapes outside the project root. Global sessions are explicit and excluded from project-local defaults.
+
+Acceptance:
+1. From repo/folder A, `agena` resumes or lists only A sessions by default; repo/folder B does not see A sessions without `--all-projects` or direct `--session`.
+2. `agena new` records `scope="project"`, `projectId`, `projectRoot`, and workspace-relative `cwd` in `session.created` and the `sessions` row.
+3. The agent runtime and `agena shell --session <id>` both start in the recorded session cwd, even when the client reconnects from a different host cwd.
+4. `agena --global new` creates a global session; it appears under `--global`/`--all-projects`, not in project-local default listings.
+5. `GET /v1/sessions` and search filters are SDK-visible and do not depend on TUI-only state.
+6. Focused storage/client/daemon tests prove project filtering, global filtering, and cwd containment.
+
+Closes: project-local session UX; makes later session picker/search/import behavior folder-aware.
+
+### M4.5 — Approvals and Turn Controls
 
 Deliverables: `approval.*` durable events end-to-end; Pi `extension_ui_*` mapped and never leaked; `steer`/`followUp`/`abort`/`setModel`/`setThinkingLevel`/`compact` commands with the §5.4 legality matrix; `model.changed`/`thinking.level.changed`; per-session serialization with deterministic `SESSION_BUSY` semantics; shutdown/restart handling for all control states introduced here (pending approvals cancel/replay correctly, abort terminalizes active messages/runs with partial content, model/thinking/compaction events rebuild from the log).
 
@@ -2367,13 +2446,13 @@ Acceptance:
 4. Two clients prompt simultaneously: exactly one turn runs; the other gets `SESSION_BUSY`. *(FL-6)*
 5. `setModel` between turns appends exactly one `model.changed`; subsequent completions carry the new model.
 6. Suites 7, 8 green end-to-end.
-7. All durable started/pending states introduced through M4 are terminalized or replayed after reconnect, graceful shutdown, and hard restart.
+7. All durable started/pending states introduced through M4.5 are terminalized or replayed after reconnect, graceful shutdown, and hard restart.
 
 Closes: P13, P14, concurrent-clients problem.
 
 ### M5 — Multi-Session, Files, Search, Snapshots, Discovery
 
-Deliverables: session list/new/resume/archive (HTTP + picker) plus the session-status/source DDL those APIs need; `/v1/files` API + `agena files` (incl. `get -r` archive); FTS5 table + explicit projection writes + `agena search` + rebuild-covers-FTS (P7 complete); snapshots schema/table plus create/restore with control-session events, safety snapshot, restore journal; control-session metadata (`meta.control_session_id`, `sessions.is_control`) and boot creation; `.agena/` **discovery** + `agena info` (scan phase, no execution). **Stretch (not required for M5 exit):** `POST /v1/sessions/:id/fork` UX — the schema and replay contract already ship (INV-11); suite 4 covers replay at storage level.
+Deliverables: project-aware session list/new/resume/archive (HTTP + picker) plus the session-status/source DDL those APIs need; `/v1/files` API + `agena files` (incl. `get -r` archive); FTS5 table + explicit projection writes + project-filtered `agena search` + rebuild-covers-FTS (P7 complete); snapshots schema/table plus create/restore with control-session events, safety snapshot, restore journal; control-session metadata (`meta.control_session_id`, `sessions.is_control`) and boot creation; `.agena/` **discovery** + `agena info` (scan phase, no execution). **Stretch (not required for M5 exit):** `POST /v1/sessions/:id/fork` UX — the schema and replay contract already ship (INV-11); suite 4 covers replay at storage level.
 
 Acceptance:
 1. Three concurrent sessions stream independently over one socket; the picker switches instantly. *(FL-1, FL-6)*
@@ -2483,7 +2562,7 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 | F33 | Daemon writes under `/workspace` (scaffold, `.types/`) violated "user-authored only" (med/low, ×2) | **Fixed.** Explicit carve-out documented in §12 and honored by §3.3/§10.1: one-time scaffold + regenerated `.types/` (gitignored by scaffold, regenerated after restore). |
 | F34 | Validate-before-spill order rejected exactly the payloads spilling exists for (med) | **Fixed.** Spill-then-validate order (§7.5); schema size test rewritten to post-spill semantics (§5.11-4). |
 | F35 | Blob spill write race (deterministic tmp name) + blobs PK conflict (med) | **Fixed.** Unique `<hash>.<ulid>.tmp`, skip-rename-if-exists, `INSERT OR IGNORE`; suite 3 gains the concurrent-identical-spill test (§7.7). |
-| F36 | Concurrency/legality matrix conflicts per command (followUp idle, setModel mid-turn vs runtime M4) (med) | **Fixed.** §5.4 matrix is the one statement; runtime M4 criterion reworded to "between turns" (§14-M4). |
+| F36 | Concurrency/legality matrix conflicts per command (followUp idle, setModel mid-turn vs runtime M4.5) (med) | **Fixed.** §5.4 matrix is the one statement; runtime M4.5 criterion reworded to "between turns" (§14-M4.5). |
 | F37 | `compact` unreachable from any client (med) | **Fixed.** In the command union, daemon dispatch, and TUI palette (§5.4, §11.3). |
 | F38 | Workspace-scoped events had no home (control session unknown to protocol/store) (med, ×2) | **Fixed.** Control session adopted in protocol (§5.5), DDL (`is_control`, `meta.control_session_id`), routes (`includeControl`), glossary. |
 | F39 | Importer had no owning section (wire contract, mapping, read-only, idempotency unspecified) (med) | **Fixed.** Ownership assigned: §9.6 specifies the `POST /v1/imports` contract, per-source parsing, `SESSION_READ_ONLY` enforcement, and the one idempotency rule (`source_ref` identity, `content_hash` change detection). |
@@ -2519,7 +2598,7 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 |---|---|---|---|---|---|
 | R1 | **Pi churn** breaks mapping or SDK usage | H | H | Exact pin via `pnpm.overrides`; single mapper firewall (`event-map.ts`); versioned fixtures per pin; nightly canary; upgrade playbook (§8.9) | Canary red; oversized fixture diff on pin bump |
 | R2 | **TUI scope creep / pi-tui walls** | M | M | Pure store reducers make the renderer swappable; ADR-0001 fallback order; views capped per milestone | Renderer code in the store; frame-rate complaints in M1 |
-| R3 | **Terminal scope explodes** (embedded pane, VT100) | M | H | PTY passthrough only; embedded pane is a non-goal; observation frames explicitly future | Any PR adding VT parsing outside `apps/cli/src/shell` |
+| R3 | **Terminal scope explodes** (VT100/full-screen emulation) | M | H | M3 allows a lightweight embedded shell split for normal I/O; full terminal emulation and observation frames stay future/optional | Any PR adding VT parsing or terminal-emulator dependencies without pulling that scope forward |
 | R4 | **Bun CLI risk** (raw mode, WS, packaging) | M | M | Provisional (ADR-0002); CI compiles every push; gate M3-end; Node/npm fallback is build-script-only | Flaky compile step; raw-mode bugs in M3 |
 | R5 | **Schema hardens too early** | M | M | Events-are-truth; projections disposable; rebuild from M2; `v`+upcasts; storage behind the port | A "data migration" PR touching `events` |
 | R6 | **Plugin-layer confusion** (Agena vs Pi extensions) | M | M | `.agena/` Pi-independent; bridge marked temporary (ADR-0003); Pi auto-discovery disabled; `agena info` names the bridge | Docs/examples importing Pi types in `.agena/` |
