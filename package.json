@@ -9,24 +9,17 @@
   },
   "scripts": {
     "lint": "biome ci .",
+    "docs:links": "node scripts/check-doc-links.mjs",
     "typecheck": "pnpm -r exec tsc --noEmit",
     "test": "vitest run",
     "boundary": "node scripts/check-boundaries.mjs",
     "bun-gate": "node scripts/check-bun-cli.mjs",
-    "ci": "pnpm lint && pnpm boundary && pnpm typecheck && pnpm test && pnpm bun-gate"
+    "ci": "pnpm lint && pnpm docs:links && pnpm boundary && pnpm typecheck && pnpm test && pnpm bun-gate"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.2",
     "@types/node": "26.1.0",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
-  },
-  "pnpm": {
-    "overrides": {
-      "@earendil-works/pi-agent-core": "0.80.3",
-      "@earendil-works/pi-ai": "0.80.3",
-      "@earendil-works/pi-coding-agent": "0.80.3",
-      "@earendil-works/pi-tui": "0.80.3"
-    }
   }
 }

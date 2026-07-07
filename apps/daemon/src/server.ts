@@ -5,17 +5,23 @@
 
 import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
-import { createReadStream, realpathSync, statSync } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import type { Server } from "node:http";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import type {
+  ApprovalQueryStore,
+  ClosableStore,
   CreateSessionInput,
   EventStore,
+  ProjectionStore,
+  RecoveryStore,
   RuntimeAdapter,
+  SearchStore,
   SessionFilter,
   SessionRecord,
+  SessionStatusStore,
 } from "@agena/core";
 import {
   InMemoryEventStore,
@@ -66,37 +72,41 @@ function tokenOk(header: string | undefined, token: string): boolean {
   return given.length === want.length && timingSafeEqual(given, want);
 }
 
-function validateSessionScope(
+async function validateSessionScope(
   workspaceDir: string,
   input: CreateSessionRequest,
-): {
+): Promise<{
   scope: CreateSessionRequest["scope"];
   projectId?: string;
   projectRoot?: string;
   cwd: string;
   hostCwdHint?: string;
-} {
+}> {
   if (input.scope !== "project") {
     return {
       scope: input.scope,
-      cwd: workspaceRelative(workspaceDir, input.cwd ?? "."),
+      cwd: (await workspaceDirectory(workspaceDir, input.cwd ?? ".")).relative,
       ...(input.hostCwdHint ? { hostCwdHint: input.hostCwdHint } : {}),
     };
   }
   if (!input.projectId || !input.projectRoot) throw new Error("INVALID_CWD");
-  const projectRoot = workspaceRelative(workspaceDir, input.projectRoot);
-  const cwd = workspaceRelative(workspaceDir, input.cwd ?? projectRoot);
-  const workspaceRoot = realpathSync(workspaceDir);
-  const projectAbs = realpathSync(resolve(workspaceRoot, projectRoot));
-  const cwdAbs = realpathSync(resolve(workspaceRoot, cwd));
-  if (cwdAbs !== projectAbs && !cwdAbs.startsWith(`${projectAbs}/`)) {
+  const project = await workspaceDirectory(workspaceDir, input.projectRoot);
+  const cwdDir = await workspaceDirectory(
+    workspaceDir,
+    input.cwd ?? project.relative,
+  );
+  const projectRel = relative(project.absolute, cwdDir.absolute);
+  if (
+    projectRel !== "" &&
+    (projectRel.startsWith("..") || isAbsolute(projectRel))
+  ) {
     throw new Error("INVALID_CWD");
   }
   return {
     scope: "project",
     projectId: input.projectId,
-    projectRoot,
-    cwd,
+    projectRoot: project.relative,
+    cwd: cwdDir.relative,
     ...(input.hostCwdHint ? { hostCwdHint: input.hostCwdHint } : {}),
   };
 }
@@ -115,16 +125,16 @@ function sessionFilter(input: ListSessionsQuery): SessionFilter {
   };
 }
 
-function workspaceRelative(workspaceDir: string, path: string): string {
+async function workspaceDirectory(
+  workspaceDir: string,
+  path: string,
+): Promise<{ absolute: string; relative: string }> {
   try {
-    const root = realpathSync(workspaceDir);
-    const abs = realpathSync(resolve(root, path));
-    if (abs !== root && !abs.startsWith(`${root}/`)) {
-      throw new Error("INVALID_CWD");
-    }
-    if (!statSync(abs).isDirectory()) throw new Error("INVALID_CWD");
-    const rel = relative(root, abs);
-    return rel === "" ? "." : rel;
+    const root = await resolveWorkspacePath(workspaceDir, ".");
+    const absolute = await resolveWorkspacePath(workspaceDir, path);
+    if (!(await stat(absolute)).isDirectory()) throw new Error("INVALID_CWD");
+    const rel = relative(root, absolute);
+    return { absolute, relative: rel === "" ? "." : rel };
   } catch {
     throw new Error("INVALID_CWD");
   }
@@ -267,8 +277,9 @@ export async function startDaemon(
     controlSession,
   );
   await snapshots.recoverJournal();
-  if (store.reconcileOpenWork) {
-    const report = await store.reconcileOpenWork();
+  const recovery = recoveryStore(store);
+  if (recovery) {
+    const report = await recovery.reconcileOpenWork();
     if (report.appended > 0) {
       log("warn", "reconciled open work after restart", { ...report });
     }
@@ -320,7 +331,10 @@ export async function startDaemon(
       );
     }
     try {
-      const scope = validateSessionScope(config.workspaceDir, parsed.data);
+      const scope = await validateSessionScope(
+        config.workspaceDir,
+        parsed.data,
+      );
       const input: CreateSessionInput = {
         workspaceId: "default",
         ...(parsed.data.title === undefined
@@ -378,7 +392,8 @@ export async function startDaemon(
         400,
       );
     }
-    if (!store.search) {
+    const search = searchStore(store);
+    if (!search) {
       return c.json(
         {
           code: "INTERNAL",
@@ -389,7 +404,7 @@ export async function startDaemon(
       );
     }
     return c.json({
-      hits: await store.search(parsed.data.q, {
+      hits: await search.search(parsed.data.q, {
         limit: parsed.data.limit,
         ...(parsed.data.sessionId ? { sessionId: parsed.data.sessionId } : {}),
         ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}),
@@ -414,7 +429,8 @@ export async function startDaemon(
         400,
       );
     }
-    if (!store.updateSessionStatus) {
+    const statuses = sessionStatusStore(store);
+    if (!statuses) {
       return c.json(
         {
           code: "INTERNAL",
@@ -425,7 +441,7 @@ export async function startDaemon(
       );
     }
     try {
-      await store.updateSessionStatus(c.req.param("id"), parsed.data.status);
+      await statuses.updateSessionStatus(c.req.param("id"), parsed.data.status);
       return c.body(null, 204);
     } catch {
       return c.json(
@@ -451,11 +467,12 @@ export async function startDaemon(
         400,
       );
     }
-    if (!store.listPendingApprovals) {
+    const approvals = approvalQueryStore(store);
+    if (!approvals) {
       return c.json({ approvals: [] });
     }
     return c.json({
-      approvals: await store.listPendingApprovals({ allProjects: true }),
+      approvals: await approvals.listPendingApprovals({ allProjects: true }),
     });
   });
   app.get("/v1/files", async (c) => {
@@ -571,7 +588,8 @@ export async function startDaemon(
     }
   });
   app.post("/v1/admin/rebuild", async (c) => {
-    if (!store.rebuildProjections) {
+    const projections = projectionStore(store);
+    if (!projections) {
       return c.json(
         {
           code: "INTERNAL",
@@ -594,7 +612,7 @@ export async function startDaemon(
         400,
       );
     }
-    return c.json(await store.rebuildProjections(body.sessionId));
+    return c.json(await projections.rebuildProjections(body.sessionId));
   });
   app.get("/v1/snapshots", async (c) =>
     c.json({ snapshots: await snapshots.list() }),
@@ -803,7 +821,39 @@ export async function startDaemon(
 }
 
 async function closeStore(store: EventStore): Promise<void> {
-  if (store.close) await store.close();
+  await closableStore(store)?.close();
+}
+
+function sessionStatusStore(store: EventStore): SessionStatusStore | null {
+  return "updateSessionStatus" in store
+    ? (store as EventStore & SessionStatusStore)
+    : null;
+}
+
+function approvalQueryStore(store: EventStore): ApprovalQueryStore | null {
+  return "listPendingApprovals" in store
+    ? (store as EventStore & ApprovalQueryStore)
+    : null;
+}
+
+function searchStore(store: EventStore): SearchStore | null {
+  return "search" in store ? (store as EventStore & SearchStore) : null;
+}
+
+function projectionStore(store: EventStore): ProjectionStore | null {
+  return "rebuildProjections" in store
+    ? (store as EventStore & ProjectionStore)
+    : null;
+}
+
+function recoveryStore(store: EventStore): RecoveryStore | null {
+  return "reconcileOpenWork" in store
+    ? (store as EventStore & RecoveryStore)
+    : null;
+}
+
+function closableStore(store: EventStore): ClosableStore | null {
+  return "close" in store ? (store as EventStore & ClosableStore) : null;
 }
 
 async function listWorkspaceFiles(workspaceDir: string, requested: string) {

@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { EventStore, SessionRecord } from "@agena/core";
+import type { EventStore, SessionRecord, SnapshotStore } from "@agena/core";
 import type { SnapshotSummary } from "@agena/protocol";
 
 const execFile = promisify(execFileCb);
@@ -31,6 +31,7 @@ type RestoreJournal = {
 
 export class SnapshotManager {
   readonly #store: EventStore;
+  readonly #snapshots: SnapshotStore | null;
   readonly #workspaceDir: string;
   readonly #snapshotDir: string;
   readonly #journalPath: string;
@@ -43,6 +44,7 @@ export class SnapshotManager {
     controlSession: SessionRecord,
   ) {
     this.#store = store;
+    this.#snapshots = snapshotStore(store);
     this.#workspaceDir = workspaceDir;
     this.#snapshotDir = join(stateDir, "snapshots");
     this.#journalPath = join(this.#snapshotDir, "restore-journal.json");
@@ -51,7 +53,7 @@ export class SnapshotManager {
   }
 
   async list(): Promise<SnapshotSummary[]> {
-    return (await this.#store.listSnapshots?.()) ?? [];
+    return (await this.#snapshots?.listSnapshots()) ?? [];
   }
 
   async create(input: SnapshotInput = {}): Promise<SnapshotSummary> {
@@ -120,7 +122,7 @@ export class SnapshotManager {
   }
 
   async delete(snapshotId: string): Promise<void> {
-    await this.#store.markSnapshotDeleted?.(snapshotId);
+    await this.#snapshots?.markSnapshotDeleted(snapshotId);
     await this.#appendControl("snapshot.deleted", { snapshotId });
   }
 
@@ -147,13 +149,13 @@ export class SnapshotManager {
   }
 
   async #createRecord(input: SnapshotInput): Promise<SnapshotSummary> {
-    if (!this.#store.createSnapshotRecord) {
+    if (!this.#snapshots) {
       throw new Error("SNAPSHOTS_UNSUPPORTED");
     }
     const snapshotId = randomUUID();
     const storagePath = join(this.#snapshotDir, `${snapshotId}.tar.gz`);
     await execFile("tar", ["-czf", storagePath, "-C", this.#workspaceDir, "."]);
-    return this.#store.createSnapshotRecord({
+    return this.#snapshots.createSnapshotRecord({
       snapshotId,
       workspaceId: "default",
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -193,4 +195,12 @@ function sha256File(path: string): Promise<string> {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function snapshotStore(store: EventStore): SnapshotStore | null {
+  return "createSnapshotRecord" in store &&
+    "listSnapshots" in store &&
+    "markSnapshotDeleted" in store
+    ? (store as EventStore & SnapshotStore)
+    : null;
 }

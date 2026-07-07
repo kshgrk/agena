@@ -21,7 +21,7 @@ Approval for one change is not approval for the next. When in doubt, describe an
 - If a request conflicts with the plan, say so and surface the conflict before proceeding.
 - If the plan is genuinely silent or ambiguous, ask the user; do not invent a design and bury it in code.
 
-The plan supersedes `claude_plan.md` and `codex_plan.md` (kept only as history — do not follow them).
+The plan supersedes `docs/archive/claude_plan.md` and `docs/archive/codex_plan.md` (kept only as history — do not follow them).
 
 ## 2. Use the ponytail skill to review and write code
 

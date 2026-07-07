@@ -1,9 +1,6 @@
-// The EventStore port (§7.4) — M1 subset. SQLite (M2) implements this same
-// interface; nothing above the port changes (P8).
-// ponytail: §7.4's createBranch/resolveBranchChain (branches are future — only the
-// branchId column concept exists), readBlob/search/rebuildProjections/reconcileOpenWork/
-// close and NewEvent.id (importer dedupe) land with M2+; readEvents drops the branchId
-// arg until branching exists.
+// The EventStore port (§7.4) — durable session/event core only. Richer store
+// capabilities live in opt-in interfaces below so the M1 test double stays lean.
+// ponytail: branch APIs and NewEvent.id land when branching/importer dedupe do.
 import type {
   AgenaEvent,
   ApprovalRequested,
@@ -139,20 +136,6 @@ export interface EventStore {
   createSession(input: CreateSessionInput): Promise<SessionRecord>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
   listSessions(filter?: SessionFilter): Promise<SessionRecord[]>;
-  updateSessionStatus?(
-    sessionId: string,
-    status: SessionStatus,
-  ): Promise<SessionRecord>;
-  updateRuntimeSessionRef?(
-    sessionId: string,
-    runtimeSessionRef: string,
-  ): Promise<SessionRecord>;
-  listPendingApprovals?(filter?: SessionFilter): Promise<PendingApproval[]>;
-  createSnapshotRecord?(
-    input: CreateSnapshotRecordInput,
-  ): Promise<SnapshotSummary>;
-  listSnapshots?(): Promise<SnapshotSummary[]>;
-  markSnapshotDeleted?(snapshotId: string): Promise<void>;
 
   /** The ONLY durable write path; assigns per-session monotonic seq. */
   appendEvents(input: AppendEventsInput): Promise<AppendEventsResult>;
@@ -172,9 +155,36 @@ export interface EventStore {
   onCommitted(
     listener: (batch: AppendEventsResult & { sessionId: string }) => void,
   ): () => void;
+}
 
-  // M2 SQLite-only mechanics; optional keeps the in-memory test double lean.
-  search?(
+export interface SessionStatusStore {
+  updateSessionStatus(
+    sessionId: string,
+    status: SessionStatus,
+  ): Promise<SessionRecord>;
+}
+
+export interface RuntimeSessionRefStore {
+  updateRuntimeSessionRef(
+    sessionId: string,
+    runtimeSessionRef: string,
+  ): Promise<SessionRecord>;
+}
+
+export interface ApprovalQueryStore {
+  listPendingApprovals(filter?: SessionFilter): Promise<PendingApproval[]>;
+}
+
+export interface SnapshotStore {
+  createSnapshotRecord(
+    input: CreateSnapshotRecordInput,
+  ): Promise<SnapshotSummary>;
+  listSnapshots(): Promise<SnapshotSummary[]>;
+  markSnapshotDeleted(snapshotId: string): Promise<void>;
+}
+
+export interface SearchStore {
+  search(
     query: string,
     opts?: {
       sessionId?: string;
@@ -183,9 +193,18 @@ export interface EventStore {
       limit?: number;
     },
   ): Promise<SearchHit[]>;
-  rebuildProjections?(sessionId?: string): Promise<RebuildReport>;
-  reconcileOpenWork?(): Promise<ReconcileReport>;
-  close?(): void | Promise<void>;
+}
+
+export interface ProjectionStore {
+  rebuildProjections(sessionId?: string): Promise<RebuildReport>;
+}
+
+export interface RecoveryStore {
+  reconcileOpenWork(): Promise<ReconcileReport>;
+}
+
+export interface ClosableStore {
+  close(): void | Promise<void>;
 }
 
 export interface RebuildReport {

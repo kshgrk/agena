@@ -35,6 +35,7 @@ the daemon always listens on `7777`.
 
 ## Layout
 
+- `docs/` — desktop plan, ADRs, and archived research/planning notes
 - `apps/daemon` — Node daemon: HTTP + multiplexed WS, in-memory event store
 - `apps/cli` — the `agena` terminal client
 - `packages/{protocol,core,runtime-pi,client,tui}` — see final_plan.md §4.1

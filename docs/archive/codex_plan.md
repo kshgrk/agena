@@ -2,7 +2,7 @@
 
 ## Status
 
-This is the updated V1 plan after comparing the initial Codex plan with the newer architecture notes in `claude_plan.md`.
+This is the updated V1 plan after comparing the initial Codex plan with the newer architecture notes in `docs/archive/claude_plan.md`.
 
 The updated position is:
 

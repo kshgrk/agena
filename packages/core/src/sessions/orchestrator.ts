@@ -19,9 +19,11 @@ import type {
 } from "@agena/protocol";
 import { ulid } from "ulid";
 import type {
+  ApprovalQueryStore,
   CreateSessionInput,
   EventStore,
   NewEvent,
+  RuntimeSessionRefStore,
   SessionRecord,
 } from "../events/store.ts";
 import { pendingApprovalsFromEvents } from "../events/store.ts";
@@ -348,11 +350,12 @@ export class SessionOrchestrator {
         ? { runtimeSessionRef: s.record.runtimeSessionRef }
         : {}),
     });
+    const runtimeRefs = runtimeSessionRefs(this.#store);
     if (
       s.runtime.runtimeSessionRef !== s.record.runtimeSessionRef &&
-      this.#store.updateRuntimeSessionRef
+      runtimeRefs
     ) {
-      s.record = await this.#store.updateRuntimeSessionRef(
+      s.record = await runtimeRefs.updateRuntimeSessionRef(
         s.record.sessionId,
         s.runtime.runtimeSessionRef,
       );
@@ -679,9 +682,10 @@ export class SessionOrchestrator {
   }
 
   async #pendingApprovals(sessionId: string) {
-    if (this.#store.listPendingApprovals) {
+    const approvals = approvalQueries(this.#store);
+    if (approvals) {
       return (
-        await this.#store.listPendingApprovals({ allProjects: true })
+        await approvals.listPendingApprovals({ allProjects: true })
       ).filter((a) => a.sessionId === sessionId);
     }
     const { events } = await this.#store.readEvents(sessionId, 0);
@@ -695,4 +699,16 @@ function message(err: unknown): string {
 
 function textContent(content: ContentBlock[]): string {
   return content.map((b) => (b.type === "text" ? b.text : "")).join("");
+}
+
+function runtimeSessionRefs(store: EventStore): RuntimeSessionRefStore | null {
+  return "updateRuntimeSessionRef" in store
+    ? (store as EventStore & RuntimeSessionRefStore)
+    : null;
+}
+
+function approvalQueries(store: EventStore): ApprovalQueryStore | null {
+  return "listPendingApprovals" in store
+    ? (store as EventStore & ApprovalQueryStore)
+    : null;
 }

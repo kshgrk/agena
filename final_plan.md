@@ -1,6 +1,6 @@
 # Agena v1 — Final Architecture Plan
 
-> This document supersedes `claude_plan.md` and `codex_plan.md`; it is the single authoritative plan for Agena v1, synthesized from eight section drafts and four adversarial reviews. Every name, path, port, event type, and error code in this file is canonical; if code disagrees with this file, the code is wrong.
+> This document supersedes `docs/archive/claude_plan.md` and `docs/archive/codex_plan.md`; it is the single authoritative plan for Agena v1, synthesized from eight section drafts and four adversarial reviews. Every name, path, port, event type, and error code in this file is canonical; if code disagrees with this file, the code is wrong.
 
 ## Table of Contents
 
@@ -1717,7 +1717,7 @@ Deterministic, honors the same emit-once terminal-event guarantees, implements `
 
 ## 8.9 Pi version pinning and upgrade procedure
 
-- All `@earendil-works/*` packages pinned **exact** via root `pnpm.overrides` (runtime-pi and tui can never drift apart); the boundary check fails the build on Pi imports outside their sanctioned packages. `versions.ts` exports `PI_SDK_VERSION`, surfaced at `/v1/diagnostics`.
+- All `@earendil-works/*` packages pinned **exact** via `pnpm-workspace.yaml` `overrides` (runtime-pi and tui can never drift apart); the boundary check fails the build on Pi imports outside their sanctioned packages. `versions.ts` exports `PI_SDK_VERSION`, surfaced at `/v1/diagnostics`.
 - Upgrade playbook (`packages/runtime-pi/UPGRADING.md`): bump pin on a branch → run fixture replay suite → diff Pi's changelog for new/changed subscribe event types (unknown types are already non-fatal) → re-record fixtures into `fixtures/pi/<new-version>/` where shapes changed → verify `SessionManager.open` on an old JSONL (open succeeds, message count preserved) → run the walking-skeleton e2e.
 - Nightly `pi-canary.yml` replays fixtures against `@latest` (allowed to fail) so churn is detected before an upgrade is attempted.
 
@@ -2354,7 +2354,7 @@ export function defineSkill(d: Omit<SkillDescriptor, "kind">): SkillDescriptor; 
 
 ## 13.3 Dependency pinning
 
-`.npmrc` `save-exact=true`; frozen lockfile in CI. All `@earendil-works/*` pinned to one exact version via root `pnpm.overrides`; upgrades only through the Pi playbook (§8.9); nightly `pi-canary.yml` vs `@latest` (allowed to fail); Renovate groups Pi under manual approval.
+`.npmrc` `save-exact=true`; frozen lockfile in CI. All `@earendil-works/*` pinned to one exact version via `pnpm-workspace.yaml` `overrides`; upgrades only through the Pi playbook (§8.9); nightly `pi-canary.yml` vs `@latest` (allowed to fail); Renovate groups Pi under manual approval.
 
 ## 13.4 CI pipeline (`ci.yml`, every push/PR)
 
@@ -2632,7 +2632,7 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 
 | # | Risk | L | I | Mitigation | Early-warning signal |
 |---|---|---|---|---|---|
-| R1 | **Pi churn** breaks mapping or SDK usage | H | H | Exact pin via `pnpm.overrides`; single mapper firewall (`event-map.ts`); versioned fixtures per pin; nightly canary; upgrade playbook (§8.9) | Canary red; oversized fixture diff on pin bump |
+| R1 | **Pi churn** breaks mapping or SDK usage | H | H | Exact pin via `pnpm-workspace.yaml` `overrides`; single mapper firewall (`event-map.ts`); versioned fixtures per pin; nightly canary; upgrade playbook (§8.9) | Canary red; oversized fixture diff on pin bump |
 | R2 | **TUI scope creep / pi-tui walls** | M | M | Pure store reducers make the renderer swappable; ADR-0001 fallback order; views capped per milestone | Renderer code in the store; frame-rate complaints in M1 |
 | R3 | **Terminal scope explodes** (VT100/full-screen emulation) | M | H | M3 allows a lightweight embedded shell split for normal I/O; full terminal emulation and observation frames stay future/optional | Any PR adding VT parsing or terminal-emulator dependencies without pulling that scope forward |
 | R4 | **Bun CLI risk** (raw mode, WS, packaging) | M | M | Provisional (ADR-0002); CI compiles every push; gate M3-end; Node/npm fallback is build-script-only | Flaky compile step; raw-mode bugs in M3 |

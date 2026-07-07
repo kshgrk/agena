@@ -431,36 +431,7 @@ export class AgenaClient {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
-    let res: Response;
-    try {
-      res = await fetch(this.httpBase + path, {
-        method,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-    } catch (err) {
-      throw new AgenaClientError(
-        "CONNECTION_FAILED",
-        `cannot reach daemon at ${this.httpBase}: ${err instanceof Error ? err.message : String(err)}`,
-        true,
-      );
-    }
-    if (!res.ok) {
-      const fallback = res.status === 401 ? "UNAUTHORIZED" : "INTERNAL";
-      const parsed = (await res.json().catch(() => null)) as {
-        code?: string;
-        message?: string;
-        retryable?: boolean;
-      } | null;
-      throw new AgenaClientError(
-        parsed?.code ?? fallback,
-        parsed?.message ?? `${method} ${path} -> HTTP ${res.status}`,
-        parsed?.retryable ?? false,
-      );
-    }
+    const res = await this.fetchRaw(method, path, body);
     if (res.status === 204) return {};
     return res.json();
   }
@@ -470,12 +441,20 @@ export class AgenaClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  private async fetchRaw(method: string, path: string): Promise<Response> {
+  private async fetchRaw(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
     let res: Response;
     try {
       res = await fetch(this.httpBase + path, {
         method,
-        headers: { authorization: `Bearer ${this.token}` },
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch (err) {
       throw new AgenaClientError(

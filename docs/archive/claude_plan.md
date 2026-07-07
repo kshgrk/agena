@@ -1,6 +1,6 @@
 # Agena v1 — Architecture Plan and Research Findings
 
-> Status: discussion draft (2026-07-05). Captures the v1 direction, verified research on Pi and eve, architecture recommendations, database schema, and build order. Builds on `cloud-cli-harness-final-understanding.md` and `deep-research-report (1).md`.
+> Status: discussion draft (2026-07-05). Captures the v1 direction, verified research on Pi and eve, architecture recommendations, database schema, and build order. Builds on `docs/archive/cloud-cli-harness-final-understanding.md` and `docs/archive/deep-research-report (1).md`.
 
 ---
 
