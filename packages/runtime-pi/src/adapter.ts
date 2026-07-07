@@ -142,9 +142,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           ? SessionManager.open(input.runtimeSessionRef, undefined, input.cwd)
           : SessionManager.create(input.cwd),
         ...(!input.runtimeSessionRef ? { thinkingLevel: "off" as const } : {}),
-        // ponytail: M1 streams text only — no invisible built-in tool runs;
-        // the Agena tool bridge re-enables tools in M3/M4 (§8.3).
-        noTools: "all",
+        tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
         ...(model ? { model } : {}), // absent → Pi settings default (§8.3 fallback)
       });
     // M1: extension-failed / model-changed RuntimeEvents are M2+ — log only.

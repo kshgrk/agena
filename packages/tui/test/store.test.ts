@@ -26,6 +26,21 @@ function delta(messageId: string, text: string): AgenaFrame {
   };
 }
 
+function toolDelta(
+  toolCallId: string,
+  text: string,
+  reset?: boolean,
+): AgenaFrame {
+  return {
+    sessionId: "s1",
+    branchId: "b1",
+    afterSeq: 2,
+    emittedAt: "2026-07-06T00:00:00.000Z",
+    type: "tool.call.output.delta",
+    payload: { toolCallId, delta: text, ...(reset ? { reset } : {}) },
+  };
+}
+
 describe("transcript reducer", () => {
   it("streams deltas into the in-flight tail and finalizes from the event", () => {
     let s = initialState;
@@ -84,5 +99,46 @@ describe("transcript reducer", () => {
     ]);
     // unknown future types are ignored
     expect(applyEvent(s, ev(2, "wormhole.opened", {}))).toEqual(s);
+  });
+
+  it("renders tool lifecycle events as transcript tool rows", () => {
+    let s = applyEvent(
+      initialState,
+      ev(1, "tool.call.started", {
+        toolCallId: "tc",
+        messageId: "ma",
+        runId: "r",
+        turnId: "t",
+        name: "bash",
+        args: { command: "pwd" },
+      }),
+    );
+    s = applyFrame(s, toolDelta("tc", "/work"));
+    expect(s.blocks).toEqual([
+      { kind: "tool", toolCallId: "tc", text: "tool bash started\n/work" },
+    ]);
+    s = applyFrame(s, toolDelta("tc", "space"));
+    expect(s.blocks).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tc",
+        text: "tool bash started\n/workspace",
+      },
+    ]);
+    s = applyFrame(s, toolDelta("tc", "/tmp", true));
+    expect(s.blocks).toEqual([
+      { kind: "tool", toolCallId: "tc", text: "tool bash started\n/tmp" },
+    ]);
+    s = applyEvent(
+      s,
+      ev(2, "tool.call.completed", {
+        toolCallId: "tc",
+        result: [{ type: "text", text: "/workspace" }],
+        durationMs: 0,
+      }),
+    );
+    expect(s.blocks).toEqual([
+      { kind: "tool", toolCallId: "tc", text: "tool completed\n/workspace" },
+    ]);
   });
 });

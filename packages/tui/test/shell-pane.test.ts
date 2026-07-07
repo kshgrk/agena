@@ -152,6 +152,24 @@ describe("ShellPane", () => {
     ]);
   });
 
+  it("scrolls bounded chat history", () => {
+    const child = {
+      render: () => ["one", "two", "three", "four"],
+      invalidate: () => {},
+    };
+    const pane = new FixedHeightPane(child, () => 2);
+
+    expect(pane.render(12)).toEqual(["three       ", "four        "]);
+    pane.scroll(1);
+    expect(pane.render(12)).toEqual(["two         ", "three       "]);
+    pane.scroll(99);
+    expect(pane.render(12)).toEqual(["one         ", "two         "]);
+    pane.scroll(-1);
+    expect(pane.render(12)).toEqual(["two         ", "three       "]);
+    pane.scrollToBottom();
+    expect(pane.render(12)).toEqual(["three       ", "four        "]);
+  });
+
   it("draws a visible shell divider only while the pane is open", () => {
     const hidden = new ShellDivider(
       () => false,

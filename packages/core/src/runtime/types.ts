@@ -111,6 +111,35 @@ export type RuntimeEvent =
       error: { code: string; message: string };
     }
   | {
+      type: "tool-call-started";
+      toolCallId: string;
+      messageId: string;
+      runId: string;
+      turnId: string;
+      name: string;
+      args: unknown;
+      runtimeToolCallId?: string;
+    }
+  | {
+      type: "tool-output-delta";
+      toolCallId: string;
+      delta: string;
+      reset?: boolean;
+    }
+  | {
+      type: "tool-call-completed";
+      toolCallId: string;
+      result: ContentBlock[];
+      durationMs: number;
+    }
+  | {
+      type: "tool-call-failed";
+      toolCallId: string;
+      error: { code: string; message: string };
+      partialOutput?: ContentBlock[];
+      durationMs?: number;
+    }
+  | {
       type: "run-aborted";
       runId: string;
       reason: "user_abort" | "daemon_shutdown";

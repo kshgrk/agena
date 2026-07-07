@@ -208,6 +208,7 @@ export class FixedHeightPane implements Component {
   private readonly child: Component;
   private readonly getHeight: () => number;
   private readonly align: "start" | "end";
+  private scrollOffset = 0;
 
   constructor(
     child: Component,
@@ -219,14 +220,32 @@ export class FixedHeightPane implements Component {
     this.align = align;
   }
 
+  scroll(delta: number): void {
+    this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+    this.invalidate();
+  }
+
+  scrollToTop(): void {
+    this.scrollOffset = Number.MAX_SAFE_INTEGER;
+    this.invalidate();
+  }
+
+  scrollToBottom(): void {
+    this.scrollOffset = 0;
+    this.invalidate();
+  }
+
   render(width: number): string[] {
     const height = Math.max(0, this.getHeight());
     if (height === 0) return [];
     const rendered = this.child.render(width);
+    const maxOffset = Math.max(0, rendered.length - height);
+    this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
+    const end = Math.max(0, rendered.length - this.scrollOffset);
     const lines =
       this.align === "end"
-        ? rendered.slice(-height)
-        : rendered.slice(0, height);
+        ? rendered.slice(Math.max(0, end - height), end)
+        : rendered.slice(this.scrollOffset, this.scrollOffset + height);
     while (lines.length < height) {
       if (this.align === "end") lines.unshift("");
       else lines.push("");

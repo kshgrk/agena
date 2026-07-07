@@ -85,12 +85,6 @@ const fixture: AgentSessionEvent[] = [
     },
   },
   {
-    type: "tool_execution_start",
-    toolCallId: "t1",
-    toolName: "bash",
-    args: {},
-  }, // M1: log-and-drop
-  {
     type: "message_update",
     message: final,
     assistantMessageEvent: {
@@ -147,6 +141,128 @@ it("maps the M1 text-streaming fixture to the exact RuntimeEvent stream", () => 
       stopReason: "end_turn",
     },
     { type: "run-completed", runId: "id-1" },
+  ] satisfies RuntimeEvent[]);
+});
+
+it("maps Pi tool execution into runtime tool events", () => {
+  let n = 0;
+  const state = createMapperState(() => `id-${++n}`);
+  state.triggerMessageId = "m-user";
+  const out = [
+    { type: "agent_start" },
+    { type: "turn_start" },
+    { type: "message_start", message: assistant("") },
+    { type: "message_end", message: assistantWithStop("", "toolUse") },
+    {
+      type: "tool_execution_start",
+      toolCallId: "t1",
+      toolName: "bash",
+      args: { command: "pwd" },
+    },
+    {
+      type: "tool_execution_update",
+      toolCallId: "t1",
+      toolName: "bash",
+      args: { command: "pwd" },
+      partialResult: "o",
+    },
+    {
+      type: "tool_execution_update",
+      toolCallId: "t1",
+      toolName: "bash",
+      args: { command: "pwd" },
+      partialResult: "ok",
+    },
+    {
+      type: "tool_execution_end",
+      toolCallId: "t1",
+      toolName: "bash",
+      result: "ok",
+      isError: false,
+    },
+  ].flatMap((ev) => mapPiEvent(state, ev as AgentSessionEvent));
+
+  expect(out).toEqual([
+    {
+      type: "run-started",
+      runId: "id-1",
+      trigger: "prompt",
+      triggerMessageId: "m-user",
+    },
+    {
+      type: "assistant-message-started",
+      messageId: "id-3",
+      runId: "id-1",
+      turnId: "id-2",
+      model: { provider: "anthropic", id: "claude-test-1" },
+    },
+    {
+      type: "assistant-message-completed",
+      messageId: "id-3",
+      runId: "id-1",
+      turnId: "id-2",
+      model: { provider: "anthropic", id: "claude-test-1" },
+      blocks: [],
+      usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.001 },
+      stopReason: "tool_use",
+    },
+    {
+      type: "tool-call-started",
+      toolCallId: "t1",
+      runtimeToolCallId: "t1",
+      messageId: "id-3",
+      runId: "id-1",
+      turnId: "id-2",
+      name: "bash",
+      args: { command: "pwd" },
+    },
+    {
+      type: "tool-output-delta",
+      toolCallId: "t1",
+      delta: "o",
+    },
+    {
+      type: "tool-output-delta",
+      toolCallId: "t1",
+      delta: "k",
+    },
+    {
+      type: "tool-call-completed",
+      toolCallId: "t1",
+      result: [{ type: "text", text: "ok" }],
+      durationMs: 0,
+    },
+  ] satisfies RuntimeEvent[]);
+});
+
+it("maps rewritten Pi tool updates as reset deltas", () => {
+  const state = createMapperState(() => "id");
+  expect(
+    mapPiEvent(state, {
+      type: "tool_execution_update",
+      toolCallId: "t1",
+      toolName: "bash",
+      args: {},
+      partialResult: "abc",
+    }),
+  ).toEqual([
+    { type: "tool-output-delta", toolCallId: "t1", delta: "abc" },
+  ] satisfies RuntimeEvent[]);
+  expect(
+    mapPiEvent(state, {
+      type: "tool_execution_update",
+      toolCallId: "t1",
+      toolName: "bash",
+      args: {},
+      partialResult: "xy",
+    }),
+  ).toEqual([
+    {
+      type: "tool-output-delta",
+      toolCallId: "t1",
+      delta: "xy",
+      reset: true,
+    },
   ] satisfies RuntimeEvent[]);
 });
 

@@ -13,6 +13,7 @@ import {
 export type Block =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
+  | { kind: "tool"; text: string; toolCallId?: string }
   | { kind: "marker"; text: string };
 
 export type TranscriptState = {
@@ -84,6 +85,34 @@ export function applyEvent(s: TranscriptState, e: AgenaEvent): TranscriptState {
         s.inFlight?.messageId === ev.payload.messageId ? null : s.inFlight;
       return { blocks, inFlight };
     }
+    case "tool.call.started":
+      return {
+        ...s,
+        blocks: [
+          ...s.blocks,
+          {
+            kind: "tool",
+            toolCallId: ev.payload.toolCallId,
+            text: `tool ${ev.payload.name} started`,
+          },
+        ],
+      };
+    case "tool.call.completed":
+      return updateToolBlock(
+        s,
+        ev.payload.toolCallId,
+        `tool completed\n${joinText(ev.payload.result)}`,
+      );
+    case "tool.call.failed": {
+      const text = ev.payload.partialOutput
+        ? joinText(ev.payload.partialOutput)
+        : ev.payload.error.message;
+      return updateToolBlock(
+        s,
+        ev.payload.toolCallId,
+        `tool failed: ${ev.payload.error.code}\n${text}`,
+      );
+    }
     default:
       return s; // session.created / run.* have no transcript row in M1
   }
@@ -92,7 +121,16 @@ export function applyEvent(s: TranscriptState, e: AgenaEvent): TranscriptState {
 /** Frames touch inFlight ONLY; stale or mistargeted deltas are dropped. */
 export function applyFrame(s: TranscriptState, f: AgenaFrame): TranscriptState {
   const parsed = knownAgenaFrameSchema.safeParse(f);
-  if (!parsed.success || !s.inFlight) return s;
+  if (!parsed.success) return s;
+  if (parsed.data.type === "tool.call.output.delta") {
+    return updateToolBlockOutput(
+      s,
+      parsed.data.payload.toolCallId,
+      parsed.data.payload.delta,
+      parsed.data.payload.reset === true,
+    );
+  }
+  if (!s.inFlight) return s;
   const p = parsed.data.payload;
   if (s.inFlight.messageId !== p.messageId) return s;
   return { ...s, inFlight: { ...s.inFlight, text: s.inFlight.text + p.delta } };
@@ -117,4 +155,38 @@ function joinText(content: ContentBlock[]): string {
     .map((b) => (b.type === "text" || b.type === "thinking" ? b.text : ""))
     .filter(Boolean)
     .join("\n");
+}
+
+function updateToolBlock(
+  s: TranscriptState,
+  toolCallId: string,
+  text: string,
+): TranscriptState {
+  const idx = [...s.blocks]
+    .reverse()
+    .findIndex((b) => b.kind === "tool" && b.toolCallId === toolCallId);
+  if (idx === -1)
+    return { ...s, blocks: [...s.blocks, { kind: "tool", toolCallId, text }] };
+  const real = s.blocks.length - 1 - idx;
+  return {
+    ...s,
+    blocks: s.blocks.map((b, i) =>
+      i === real && b.kind === "tool" ? { ...b, text } : b,
+    ),
+  };
+}
+
+function updateToolBlockOutput(
+  s: TranscriptState,
+  toolCallId: string,
+  delta: string,
+  reset: boolean,
+): TranscriptState {
+  const block = [...s.blocks]
+    .reverse()
+    .find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
+  if (!block) return s;
+  const [head = "", ...tail] = block.text.split("\n");
+  const output = reset ? delta : `${tail.join("\n")}${delta}`;
+  return updateToolBlock(s, toolCallId, output ? `${head}\n${output}` : head);
 }

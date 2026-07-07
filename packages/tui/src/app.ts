@@ -23,6 +23,7 @@ import {
   Container,
   Editor,
   type EditorTheme,
+  matchesKey,
   ProcessTerminal,
   Spacer,
   Text,
@@ -51,7 +52,8 @@ const yellow = style("33");
 const red = style("31");
 const cyan = style("36");
 
-const QUIT_CONFIRM_MS = 1_500; // §11.3: Ctrl+C ×2 within this window quits
+const ENTER_ALT_SCREEN = "\x1b[?1049h\x1b[2J\x1b[H";
+const EXIT_ALT_SCREEN = "\x1b[?1049l";
 
 const editorTheme: EditorTheme = {
   borderColor: dim,
@@ -103,6 +105,7 @@ function blockText(b: Block): Text {
     return new Text(`${cyan(bold("you"))}\n${b.text}`, 1, 0);
   if (b.kind === "assistant")
     return new Text(`${green(bold("agena"))}\n${b.text}`, 1, 0);
+  if (b.kind === "tool") return new Text(dim(`tool\n${b.text}`), 1, 0);
   return new Text(dim(`— ${b.text} —`), 1, 0);
 }
 
@@ -131,9 +134,8 @@ export function runTui(
   let shellOpened = false;
   let shellReconnectAttempts = 0;
   let shellReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let quitArmedAt = 0;
-  let quitNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   let activePane: "chat" | "shell" = "chat";
+  let quitNow: (() => void) | null = null;
   const activeRuns = new Set<string>();
   const pendingApprovals = new Map<string, ApprovalRequested>();
   let controlModal: ControlModal | null = null;
@@ -166,10 +168,6 @@ export function runTui(
     tui.setFocus(pane === "shell" ? shellPane : editor);
   }
 
-  function quitArmed(): boolean {
-    return Date.now() - quitArmedAt < QUIT_CONFIRM_MS;
-  }
-
   function statusLine(): string {
     const dot =
       connState === "connected"
@@ -182,14 +180,13 @@ export function runTui(
         ? `${connState} (${connDetail})`
         : connState;
     const warn = notice ? `  ${yellow(`! ${notice}`)}` : "";
-    const quit = quitArmed() ? `  ${yellow("press Ctrl+C again to quit")}` : "";
     const turn = activeRuns.size > 0 ? `  ${yellow("turn active")}` : "";
     const approvals =
       pendingApprovals.size > 0
         ? `  ${yellow(`approvals ${pendingApprovals.size}`)}`
         : "";
     const hint = shellPane.visible ? "" : `  ${dim("Ctrl+T terminal")}`;
-    return `${dot} ${conn} · session ${short(currentSession)}${turn}${approvals}${warn}${quit}${hint}`;
+    return `${dot} ${conn} · session ${short(currentSession)}${turn}${approvals}${warn}${hint}`;
   }
 
   function chatHeight(): number {
@@ -435,6 +432,7 @@ export function runTui(
   editor.onSubmit = (text) => {
     const t = text.trim();
     if (!t) return;
+    transcriptPane.scrollToBottom();
     editor.addToHistory(t);
     const handled = handleSlash(t);
     if (handled) return;
@@ -460,6 +458,10 @@ export function runTui(
       promise.catch((err) => marker(`${label} failed: ${message(err)}`));
     };
     switch (raw) {
+      case "quit":
+      case "exit":
+        quitNow?.();
+        return true;
       case "abort":
         run("abort", client.abort(currentSession));
         return true;
@@ -831,6 +833,33 @@ export function runTui(
     scheduleRedraw();
   }
 
+  function scrollTranscript(data: string): boolean {
+    if (activePane === "shell" || controlModal) return false;
+    const page = Math.max(1, chatHeight() - 1);
+    if (matchesKey(data, "pageUp") || matchesKey(data, "alt+up")) {
+      transcriptPane.scroll(page);
+      scheduleRedraw();
+      return true;
+    }
+    if (matchesKey(data, "pageDown") || matchesKey(data, "alt+down")) {
+      transcriptPane.scroll(-page);
+      scheduleRedraw();
+      return true;
+    }
+    if (editor.getText().length > 0) return false;
+    if (matchesKey(data, "home")) {
+      transcriptPane.scrollToTop();
+      scheduleRedraw();
+      return true;
+    }
+    if (matchesKey(data, "end")) {
+      transcriptPane.scrollToBottom();
+      scheduleRedraw();
+      return true;
+    }
+    return false;
+  }
+
   return new Promise((resolve) => {
     async function showShell(): Promise<void> {
       if (shellSocket) {
@@ -1003,9 +1032,9 @@ export function runTui(
     }
 
     function quit(): void {
+      quitNow = null;
       if (redrawTimer) clearTimeout(redrawTimer);
       if (shellReconnectTimer) clearTimeout(shellReconnectTimer);
-      if (quitNoticeTimer) clearTimeout(quitNoticeTimer);
       try {
         shellSocket?.close(1000, "client quit");
       } catch {
@@ -1013,43 +1042,23 @@ export function runTui(
       }
       process.off("SIGWINCH", sendShellResize);
       tui.stop();
+      process.stdout.write(EXIT_ALT_SCREEN);
       void client.close();
       resolve();
     }
 
-    function armQuit(): void {
-      quitArmedAt = Date.now();
-      if (quitNoticeTimer) clearTimeout(quitNoticeTimer);
-      quitNoticeTimer = setTimeout(() => {
-        quitNoticeTimer = null;
-        redraw(); // the confirm hint expires with the window
-      }, QUIT_CONFIRM_MS);
-      redraw();
-    }
-
-    function disarmQuit(): void {
-      if (!quitArmedAt) return;
-      quitArmedAt = 0;
-      if (quitNoticeTimer) {
-        clearTimeout(quitNoticeTimer);
-        quitNoticeTimer = null;
-      }
-      scheduleRedraw();
-    }
-
     tui.addInputListener((data) => {
       if (handleApprovalInput(data)) return { consume: true };
+      if (scrollTranscript(data)) return { consume: true };
       const action = routeKey(data, {
         shellFocused: activePane === "shell",
         shellVisible: shellPane.visible,
         editorEmpty: editor.getText().length === 0,
       });
       if (action === "pass") {
-        disarmQuit();
         return undefined; // focused component owns the key (shell PTY or editor)
       }
       if (action === "shell-input") {
-        disarmQuit();
         shellPane.handleInput(data);
         return { consume: true };
       }
@@ -1068,12 +1077,13 @@ export function runTui(
           resizeShell(action);
           break;
         case "quit-key":
-          if (quitArmed()) quit();
-          else armQuit();
+          quit();
           break;
       }
       return { consume: true };
     });
+    quitNow = quit;
+    process.stdout.write(ENTER_ALT_SCREEN);
     tui.start();
     process.on("SIGWINCH", sendShellResize);
     client

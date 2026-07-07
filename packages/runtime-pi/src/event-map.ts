@@ -16,6 +16,8 @@ export interface MapperState {
   runId: string | null;
   turnId: string | null;
   messageId: string | null;
+  lastAssistantMessageId: string | null;
+  toolOutputs: Map<string, string>;
   warned: Set<string>;
 }
 
@@ -30,6 +32,8 @@ export function createMapperState(
     runId: null,
     turnId: null,
     messageId: null,
+    lastAssistantMessageId: null,
+    toolOutputs: new Map(),
     warned: new Set(),
   };
 }
@@ -97,6 +101,7 @@ export function mapPiEvent(
       // suppressed per the §8.4 mapping table.
       if (ev.message.role !== "assistant") return [];
       state.messageId = state.mintId();
+      state.lastAssistantMessageId = state.messageId;
       return [
         {
           type: "assistant-message-started",
@@ -128,6 +133,7 @@ export function mapPiEvent(
       const runId = state.runId ?? "";
       const turnId = state.turnId ?? "";
       state.messageId = null;
+      state.lastAssistantMessageId = messageId;
       if (m.stopReason === "error" || m.stopReason === "aborted") {
         state.runId = null;
         state.triggerMessageId = null;
@@ -158,7 +164,9 @@ export function mapPiEvent(
           turnId,
           model: { provider: m.provider, id: m.model },
           blocks: m.content.flatMap((b) =>
-            b.type === "text" ? [{ type: "text" as const, text: b.text }] : [],
+            b.type === "text" && b.text !== ""
+              ? [{ type: "text" as const, text: b.text }]
+              : [],
           ),
           usage: {
             inputTokens: m.usage.input,
@@ -169,7 +177,72 @@ export function mapPiEvent(
         },
       ];
     }
+    case "tool_execution_start":
+      return [
+        {
+          type: "tool-call-started",
+          toolCallId: ev.toolCallId,
+          runtimeToolCallId: ev.toolCallId,
+          messageId: state.lastAssistantMessageId ?? state.messageId ?? "",
+          runId: state.runId ?? "",
+          turnId: state.turnId ?? "",
+          name: ev.toolName,
+          args: ev.args,
+        },
+      ];
+    case "tool_execution_update":
+      return toolOutputDelta(state, ev.toolCallId, ev.partialResult);
+    case "tool_execution_end":
+      state.toolOutputs.delete(ev.toolCallId);
+      if (ev.isError) {
+        return [
+          {
+            type: "tool-call-failed",
+            toolCallId: ev.toolCallId,
+            error: {
+              code: "tool_error",
+              message: stringifyToolResult(ev.result),
+            },
+            partialOutput: toolResultBlocks(ev.result),
+            durationMs: 0,
+          },
+        ];
+      }
+      return [
+        {
+          type: "tool-call-completed",
+          toolCallId: ev.toolCallId,
+          result: toolResultBlocks(ev.result),
+          durationMs: 0,
+        },
+      ];
     default:
       return drop(state, ev.type);
   }
+}
+
+function toolResultBlocks(result: unknown): { type: "text"; text: string }[] {
+  return [{ type: "text", text: stringifyToolResult(result) }];
+}
+
+function stringifyToolResult(result: unknown): string {
+  if (typeof result === "string") return result;
+  return JSON.stringify(result, null, 2) ?? "";
+}
+
+function toolOutputDelta(
+  state: MapperState,
+  toolCallId: string,
+  partialResult: unknown,
+): RuntimeEvent[] {
+  const next = stringifyToolResult(partialResult);
+  const prev = state.toolOutputs.get(toolCallId) ?? "";
+  if (next === prev) return [];
+  state.toolOutputs.set(toolCallId, next);
+  if (next.startsWith(prev)) {
+    return [
+      { type: "tool-output-delta", toolCallId, delta: next.slice(prev.length) },
+    ];
+  }
+  return [{ type: "tool-output-delta", toolCallId, delta: next, reset: true }];
 }

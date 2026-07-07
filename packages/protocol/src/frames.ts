@@ -8,10 +8,18 @@ export const assistantTextDeltaSchema = z.object({
 });
 export type AssistantTextDelta = z.infer<typeof assistantTextDeltaSchema>;
 
+export const toolCallOutputDeltaSchema = z.object({
+  toolCallId: z.string().min(1),
+  delta: z.string(),
+  reset: z.boolean().optional(),
+});
+export type ToolCallOutputDelta = z.infer<typeof toolCallOutputDeltaSchema>;
+
 // Frame payload registry (§5 `events/index.ts` contract).
 // ponytail: remaining v1 frames land with the features that emit them (M2+)
 export const frameSchemas = {
   "message.assistant.text.delta": assistantTextDeltaSchema,
+  "tool.call.output.delta": toolCallOutputDeltaSchema,
 } as const;
 export type FrameType = keyof typeof frameSchemas;
 
@@ -36,6 +44,11 @@ export const knownAgenaFrameSchema = z.discriminatedUnion("type", [
     ...frameBase,
     type: z.literal("message.assistant.text.delta"),
     payload: assistantTextDeltaSchema,
+  }),
+  z.object({
+    ...frameBase,
+    type: z.literal("tool.call.output.delta"),
+    payload: toolCallOutputDeltaSchema,
   }),
 ]);
 export type KnownAgenaFrame = z.infer<typeof knownAgenaFrameSchema>;

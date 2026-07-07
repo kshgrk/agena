@@ -439,6 +439,48 @@ export class SessionOrchestrator {
           error: ev.error,
         });
         return;
+      case "tool-call-started":
+        await this.#appendRuntime(s, "tool.call.started", {
+          toolCallId: ev.toolCallId,
+          messageId: ev.messageId,
+          runId: ev.runId,
+          turnId: ev.turnId,
+          name: ev.name,
+          args: ev.args,
+          ...(ev.runtimeToolCallId
+            ? { runtimeToolCallId: ev.runtimeToolCallId }
+            : {}),
+        });
+        return;
+      case "tool-output-delta":
+        this.#publishFrame({
+          type: "tool.call.output.delta",
+          sessionId: s.record.sessionId,
+          branchId: s.record.rootBranchId,
+          afterSeq: s.lastSeq,
+          payload: {
+            toolCallId: ev.toolCallId,
+            delta: ev.delta,
+            ...(ev.reset ? { reset: ev.reset } : {}),
+          },
+          emittedAt: new Date().toISOString(),
+        });
+        return;
+      case "tool-call-completed":
+        await this.#appendRuntime(s, "tool.call.completed", {
+          toolCallId: ev.toolCallId,
+          result: ev.result,
+          durationMs: ev.durationMs,
+        });
+        return;
+      case "tool-call-failed":
+        await this.#appendRuntime(s, "tool.call.failed", {
+          toolCallId: ev.toolCallId,
+          error: ev.error,
+          ...(ev.partialOutput ? { partialOutput: ev.partialOutput } : {}),
+          ...(ev.durationMs !== undefined ? { durationMs: ev.durationMs } : {}),
+        });
+        return;
       case "run-completed":
         await this.#appendRuntime(s, "run.completed", {
           runId: ev.runId,
