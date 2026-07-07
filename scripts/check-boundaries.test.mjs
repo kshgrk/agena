@@ -26,3 +26,32 @@ test("passes allowed edges", () => {
   ]);
   expect(violations).toEqual([]);
 });
+
+test("allows desktop to depend only on client/protocol and import electron", () => {
+  const violations = check([
+    {
+      name: "@agena/desktop",
+      dir: "apps/desktop",
+      deps: ["@agena/client", "@agena/protocol"],
+      imports: [
+        { file: "apps/desktop/src/main/index.ts", spec: "electron" },
+        { file: "apps/desktop/src/main/client.ts", spec: "@agena/client" },
+      ],
+    },
+  ]);
+  expect(violations).toEqual([]);
+});
+
+test("flags electron imports outside desktop", () => {
+  const violations = check([
+    {
+      name: "@agena/cli",
+      dir: "apps/cli",
+      deps: [],
+      imports: [{ file: "apps/cli/src/main.ts", spec: "electron" }],
+    },
+  ]);
+  expect(violations).toEqual([
+    'apps/cli/src/main.ts: "electron" may only be imported by apps/desktop',
+  ]);
+});

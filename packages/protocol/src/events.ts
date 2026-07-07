@@ -232,6 +232,15 @@ export const compactionFailedSchema = z.object({
 });
 export type CompactionFailed = z.infer<typeof compactionFailedSchema>;
 
+export const approvalSubjectSchema = z.object({
+  toolName: z.string().min(1).optional(),
+  args: z.unknown().optional(),
+  cwd: z.string().min(1).optional(),
+  command: z.string().min(1).optional(),
+  action: z.string().min(1).optional(),
+});
+export type ApprovalSubject = z.infer<typeof approvalSubjectSchema>;
+
 export const approvalRequestedSchema = z.object({
   approvalId: z.string().min(1),
   kind: z.enum(["confirm", "select", "input", "editor"]),
@@ -247,6 +256,7 @@ export const approvalRequestedSchema = z.object({
     )
     .optional(),
   defaultValue: z.string().optional(),
+  subject: approvalSubjectSchema.optional(),
   toolCallId: z.string().min(1).optional(),
   expiresAt: z.string().optional(),
 });

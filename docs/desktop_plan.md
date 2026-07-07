@@ -37,11 +37,11 @@ Not a browser IDE, not a VS Code fork, not file-first. Files, editor, terminals,
 
 ## 1.3 Daily flow
 
-1. Launch → last-used profile connects → last session's transcript paints from the local cursor before the WS even opens (FN-1).
+1. Launch → last-used profile, cursor, drafts, and layout paint before the WS opens; transcript fills from daemon replay.
 2. New task: `⌘N` → prompt composer → live streaming transcript with tool calls unfolding.
 3. Agent requests approval → trusted modal renders the canonical payload → approve once / deny / switch stance.
 4. `⌘\`` drops into a real terminal in the session cwd (xterm.js over the dedicated PTY WS).
-5. `⌘K` palette does everything: resume, fork-later, search, snapshot, expose port, change model.
+5. `⌘K` palette does everything D1-D3 owns: resume, search, snapshot, terminal, change model. Ports/imports/fork appear only when their daemon surfaces land.
 6. Close the laptop. Open the TUI on the server. Same session. Nothing was lost because nothing lived in the client.
 
 ## 1.4 Feels-native requirements (FN-1 … FN-9)
@@ -50,7 +50,7 @@ Product acceptance requirements; milestone criteria (§13) cite them. They mirro
 
 | # | Requirement | Concrete target |
 |---|---|---|
-| FN-1 | Instant open | Window paints < 400 ms with cached session list + transcript from the local cursor; connection state lives in the status bar, never a blocking spinner. |
+| FN-1 | Instant open | Window chrome, last profile, session rail cache, cursor, drafts, and layout paint < 400 ms; connection state lives in the status bar, never a blocking spinner. Cached transcript pages are a later optimization, not a D1 requirement. |
 | FN-2 | Live streaming | Frames drive the in-flight tail with a 40 ms render throttle (§3.2 of final_plan: client render tick). No layout shift while streaming. |
 | FN-3 | Invisible reconnect | Quit mid-stream, relaunch: durable replay from cursor + `snapshot` envelope + live frames < 1 s. Never a forever-pending block (INV-4 makes this possible; the UI must not undo it). |
 | FN-4 | Real terminal | xterm.js over `GET /v1/ptys/:id/ws` is byte-for-byte the same experience as `agena shell`: same PTY, resize control frames, exit codes surfaced. |
@@ -97,7 +97,7 @@ Any framework that gives us a real Node main process satisfies both natively. An
 
 # 3. Non-Negotiable Invariants
 
-**D-INV-1 — Protocol client only.** `apps/desktop` depends on `@agena/client` and `@agena/protocol` and nothing else internal. It never imports core, storage-sqlite, runtime-pi, or tui. The §4.2 dependency table in `final_plan.md` gains the row; `scripts/check-boundaries.mjs` enforces it. Every feature maps to a protocol surface; missing data means a daemon/protocol PR first, never a client-side workaround (no scraping, no side channels).
+**D-INV-1 — Protocol client only.** `@agena/desktop` in `apps/desktop` depends on `@agena/client` and `@agena/protocol` and nothing else internal. It never imports core, storage-sqlite, runtime-pi, tui, or cli. `scripts/check-boundaries.mjs` enforces the future edge before the package exists. Every feature maps to a protocol surface; missing data means a daemon/protocol PR first, never a client-side workaround (no scraping, no side channels).
 
 **D-INV-2 — The token never enters the renderer.** All daemon traffic (HTTP, main WS, PTY WSs) originates in the Electron main process. The renderer receives events/frames/bytes over IPC and issues commands over IPC. `credentials.json` is read only in main. A compromised renderer (XSS via rendered markdown, a malicious preview page) must not be able to speak to the daemon directly.
 
@@ -151,7 +151,7 @@ Any framework that gives us a real Node main process satisfies both natively. An
 | `AgenaClient` (main WS, HTTP, reconnect, cursors-in-motion) | main | One instance per active profile. The SDK's auto-reconnect, requestId retry, and seq-gap healing are reused as-is. |
 | PTY sockets | main | Bytes forwarded to the renderer over a dedicated `MessagePort` per terminal (§5.3). |
 | Event/frame fan-in to UI | main → renderer | Batched per animation frame; frames coalesced per (sessionId, target) before crossing IPC (the SDK deliberately doesn't coalesce — the consumer does, per the `ponytail:` note in `client.ts`). |
-| Profiles & credentials | main | Reads the same `~/.config/agena/config.json` + `credentials.json` the CLI writes. Desktop never invents its own auth store. |
+| Profiles & credentials | main | Reads the same `~/.config/agena/config.json` + `credentials.json` the CLI writes. D1 needs either a read-only helper implemented in `apps/desktop` or a helper exposed from `@agena/client`; it must not import `apps/cli`. Desktop never invents its own auth store. |
 | Cursors, drafts, layout | renderer-owned, persisted via main | Stored in the Electron `userData` dir; cursors interoperable in shape with the CLI's `cursors.json` (`sessionId → {branchId, seq}`). |
 | Imports (M6) | main | Reads `~/.claude`/`~/.codex`, streams tar to `POST /v1/imports` — same code path shape as the CLI. |
 | Workspace provisioning (`docker compose`) | main (post-D5, OD-D7) | Until then, `agena workspace init` in a terminal is the documented path. |
@@ -265,9 +265,9 @@ apps/desktop/                       # the Agena Desktop app (Electron)
 
 | Package | May depend on (workspace) | External notes |
 |---|---|---|
-| `apps/desktop` | client, protocol | Electron, React, Dockview, xterm.js, Monaco live here. Never imports core, storage-sqlite, runtime-pi, or tui. |
+| `@agena/desktop` (`apps/desktop`) | client, protocol | Electron, React, Dockview, xterm.js, Monaco live here. Never imports core, storage-sqlite, runtime-pi, or tui. |
 
-`check-boundaries.mjs` additions: fail if `apps/desktop` imports any internal package outside `{client, protocol}`, and fail if `electron` appears outside `apps/desktop`.
+`check-boundaries.mjs` additions: `@agena/desktop` may depend only on `@agena/client` and `@agena/protocol`, and any `electron` import must live under `apps/desktop`.
 
 ## 6.3 Reducer reuse — the honest version
 
@@ -378,11 +378,11 @@ cmdk overlay; one command registry (id, title, scope, chord, enablement predicat
 
 ## 7.10 Status bar
 
-`connection state · workspace id · project/cwd · session status · model · thinking level · pending approvals (n) · daemon version`. Anything red is clickable to the relevant pane. No context-%/cost segments until the protocol carries usage (OD-D5).
+`connection state · workspace id · project/cwd · session status · model · thinking level · pending approvals (n) · daemon version`. Anything red is clickable to the relevant pane. No context-%/cost segments in D1-D3; optional raw usage exists on some events, but product meters wait for stable coverage and pricing semantics (OD-D5).
 
 ## 7.11 First-run & profiles
 
-First launch with no `~/.config/agena`: a setup screen that points at the CLI (`agena workspace init`) or accepts URL + token manually (`agena login` equivalent, written to the same config files so CLI and desktop stay interchangeable). Profile switcher in the title bar; switching profiles swaps the `AgenaClient` in main (one active profile per window in v1 — OD-D8 for multi-window).
+First launch with no `~/.config/agena`: a setup screen points at the CLI (`agena workspace init` / `agena login`). Manual URL+token entry is allowed only once the profile config helper can write the shared files safely; otherwise D1 stays read-only. Profile switcher in the title bar; switching profiles swaps the `AgenaClient` in main (one active profile per window in v1 — OD-D8 for multi-window).
 
 ---
 
@@ -390,35 +390,39 @@ First launch with no `~/.config/agena`: a setup screen that points at the CLI (`
 
 Zustand stores as thin containers; **all** mutation goes through the pure reducers (D-INV-5). Store slices: `connection` (status/welcome/profile), `sessions` (summaries + status frames), `transcript` (per-subscribed-session `TranscriptState`, LRU-bounded — unsubscribe evicts), `approvals` (pending map derived from events + the connect-time HTTP scan), `timeline` (per-session event index for the density bar), `layout` (Dockview serialized + persisted via main).
 
-Subscription flow on session open: read cursor → render cached page instantly (FN-1) → `subscribe {sessionId, fromSeq: cursor}` → replayed events apply (no animation) → `sync` marks live → `snapshot` seeds in-flight tail + pending approvals → frames animate. This is exactly the SDK's already-implemented contract; the renderer just draws it.
+Subscription flow on session open: read cursor → render the selected session shell immediately (FN-1) → `subscribe {sessionId, fromSeq: cursor}` → replayed events apply (no animation) → `sync` marks live → `snapshot` seeds in-flight tail + pending approvals → frames animate. Cached transcript pages can be added in D3+ after paging and eviction behavior are proven.
 
 ---
 
 # 9. Feature Inventory × Daemon Surface
 
-What the desktop can ship, keyed to what the daemon serves. ✅ = route/command exists in the working tree today; Mx = lands with that daemon milestone.
+What the desktop can ship, keyed to what the daemon serves. "Route/command exists" means the current codebase exposes the surface; "Desktop-ready" names the first desktop milestone that may build the UX.
 
-| Desktop feature | Daemon surface | Status |
-|---|---|---|
-| Connect/handshake/reconnect | `GET /v1/ws`, hello/welcome, subscribe/sync/snapshot | ✅ |
-| Session list/create/archive | `GET/POST /v1/sessions`, `PATCH /v1/sessions/:id` | ✅ |
-| Transcript live + replay + paging | events over WS, `GET /v1/sessions/:id/events` | ✅ |
-| Composer: prompt/steer/followUp/abort | commands | ✅ |
-| Model/thinking/compact controls | `setModel`/`setThinkingLevel`/`compact` | ✅ |
-| Approvals modal + pending chips | `approval.*` events, `respondToApproval`, `GET /v1/approvals` | ✅ |
-| Terminals | `POST /v1/ptys` + binary WS + control frames | ✅ |
-| Search + jump-to-seq | `GET /v1/search` (FTS) | ✅ |
-| File tree + Monaco **viewer** | `GET /v1/files`, `/content`, `/archive` | ✅ (read-only) |
-| File **editing** (save) | files write route | ❌ not served yet — M5's `POST /v1/files/upload`; viewer ships first |
-| Snapshots create/restore/delete | `/v1/snapshots*` | ✅ |
-| Diagnostics pane | `GET /v1/diagnostics` | ✅ |
-| Project-scoped rail grouping | M4 scope filters on sessions/search | partially ✅ (client sends filters; verify daemon coverage at D1) |
-| Ports drawer + preview pane | M5.5 registry + ingress | M5.5 |
-| Imports wizard | `POST /v1/imports` (M6) | M6 |
-| Blob lazy-fetch in inspector | `GET /v1/blobs/:hash` (M7) | M7 |
-| Fork session | `POST /v1/sessions/:id/fork` (M5 stretch) | stretch |
+| Desktop feature | Daemon/client surface | Route/command exists | Desktop-ready |
+|---|---|---:|---|
+| Connect/handshake/reconnect | `GET /v1/ws`, hello/welcome, subscribe/sync/snapshot | yes | D1 |
+| Profile selection | shared `~/.config/agena` files | files exist by CLI convention | D1 only after helper exists or is implemented locally |
+| Session list/create/archive | `GET/POST /v1/sessions`, `PATCH /v1/sessions/:id` | yes | D1 |
+| Transcript live + replay | events over WS, `GET /v1/sessions/:id/events` | yes | D1 |
+| Backward paging for long transcripts | `GET /v1/sessions/:id/events?fromSeq&limit` | yes | D3 |
+| Cached transcript pages | local desktop cache only | no daemon need | D3+ after paging works |
+| Composer: prompt/abort | `prompt`, `abort` | yes | D1 |
+| Composer: steer/followUp | `steer`, `followUp` | yes | D2 |
+| Model/thinking/compact controls | `runtimeInfo`, `setModel`, `setThinkingLevel`, `compact` | yes | D2 |
+| Approvals modal + pending chips | `approval.*`, `respondToApproval`, `GET /v1/approvals` | yes | D2 |
+| Terminals | `POST /v1/ptys`, `GET /v1/ptys/:id/ws`, control frames | yes | D2 |
+| Search + jump-to-seq | `GET /v1/search` | yes | D3 |
+| File tree + Monaco viewer | `GET /v1/files`, `/content`, `/archive` | yes | D3 read-only |
+| File editing/save | upload/write route | no | later; not D3 |
+| Snapshots create/restore/delete | `/v1/snapshots*` | yes | D3 |
+| Diagnostics pane | `GET /v1/diagnostics` | yes | D1 |
+| Ports drawer + preview pane | M5.5 registry + ingress | no current route | D4 |
+| Imports wizard | `POST /v1/imports` | no current route | D5 |
+| Blob lazy-fetch in inspector | `GET /v1/blobs/:hash` | no current route | later/M7 |
+| Fork session | `POST /v1/sessions/:id/fork` | no current route | later/stretch |
+| Usage meters | optional raw usage fields, no stable product meter contract | partial | later/OD-D5 |
 
-The striking consequence: **the daemon working tree already serves ~80% of the desktop v1 surface.** The "start after M5.5" decision buys stability (acceptance suites green, surfaces frozen), not existence.
+The consequence: the current daemon/client surfaces are enough for a useful D1-D3 desktop, but route existence is not the same as desktop readiness. The "start after M5.5" decision buys stability (acceptance suites green, surfaces frozen), not a need to change the daemon.
 
 ---
 
@@ -476,9 +480,11 @@ Throwaway: Electron window + `AgenaClient` in main with `ws` injected + xterm.js
 
 ### D1 — Cockpit Skeleton
 
-**Scope:** profiles reader; connect/handshake/status bar; session rail (list/create/archive); transcript with replay + live streaming + in-flight tail + unknown-event markers; composer (prompt/abort only); palette skeleton; cursor/draft/layout persistence; CI + boundary checks.
+**Prerequisite:** profile config access is solved without importing `apps/cli`: either a read-only helper exists in `@agena/client`, or `apps/desktop` implements the minimal XDG reader itself.
+
+**Scope:** profiles reader; connect/handshake/status bar; session rail (list/create/archive); diagnostics pane; transcript with replay + live streaming + in-flight tail + unknown-event markers; composer (prompt/abort only); palette skeleton; cursor/draft/layout persistence; CI + boundary checks. No cached transcript pages yet.
 **Acceptance:**
-1. Launch → last session paints from cache < 400 ms; WS connects after paint. *(FN-1)*
+1. Launch → window, last profile, rail shell, cursor, draft, and layout paint < 400 ms; WS connects after paint. *(FN-1)*
 2. Prompt → streamed tail → finalized block matches TUI rendering of the same session. *(FN-2, D-INV-7)*
 3. Quit mid-stream; relaunch: replay + snapshot + live frames < 1 s; no pending spinner. *(FN-3)*
 4. Desktop and TUI subscribed to the same session render identical seq streams. *(FL-6)*
@@ -497,12 +503,13 @@ Throwaway: Electron window + `AgenaClient` in main with `ws` injected + xterm.js
 
 ### D3 — Files, Search, Snapshots, Timeline
 
-**Scope:** file tree + Monaco viewer (read-only; save wires up when the files write route lands); search pane with jump-to-seq + flash; snapshot cards (create/restore with pre_restore confirm, delete); timeline strip + filters; backward paging for long transcripts.
+**Scope:** file tree + Monaco viewer (read-only); search pane with jump-to-seq + flash; snapshot cards (create/restore with pre_restore confirm, delete); timeline strip + filters; backward paging for long transcripts. Optional cached transcript pages may start here only after paging is stable; file editing waits for a write/upload route.
 **Acceptance:**
 1. Search hit in another session → opens it at that seq with highlight. *(FN-8 path)*
 2. Snapshot restore: files revert, transcript history visibly does not; the `snapshot.restored` marker renders. *(FL-9 / P1, D-INV-8)*
 3. A 10k-event session scrolls at 60 fps and pages backward without eviction glitches.
 4. Timeline filter to Approvals shows exactly the approval events; clicking one selects it in the inspector.
+5. File viewer opens a workspace file via the read route and offers no save action.
 
 ### D4 — Ports & Preview *(daemon ≥ M5.5)*
 
@@ -523,7 +530,7 @@ Each is a decision, not an omission — most inherit directly from final_plan §
 1. **Browser build** — blocked by header-only WS auth (F62); becomes a protocol conversation post-v1. The React renderer keeps the option cheap.
 2. **IDE ambitions** — no extension host, no LSP, no multi-file refactoring UI, no git pane (the terminal is the git UI in v1). Monaco stays a viewer/light editor.
 3. **Localhost forwarding, VPN, callback/webhook inbox** — daemon non-goals 13/14; the desktop must not fake them in UI copy.
-4. **Cost/token/context meters** — protocol payloads don't carry usage; OD-D5 first.
+4. **Cost/token/context meters** — some events may carry optional raw usage, but desktop product meters need stable coverage and pricing semantics; OD-D5 first.
 5. **Share links, multi-user presence** — parked with P9.
 6. **Approval allowlists / "always allow"** — needs daemon-side policy that doesn't exist; the modal ships allow-once/deny only.
 7. **Terminal-AI deep integration** (auto "fix this error", @-mention terminals) — one affordance ships (send selection to composer); the rest waits for real usage.
@@ -541,7 +548,7 @@ Each is a decision, not an omission — most inherit directly from final_plan §
 2. **OD-D2 — PTY transport fallback.** If MessagePort forwarding ever measurably lags: renderer-direct PTY WS with `session.webRequest.onBeforeSendHeaders` header injection (token stays out of renderer JS but is attached by the network layer). *Recommendation:* don't build until D0 measurements demand it.
 3. **OD-D3 — Auto-update.** electron-updater + a release bucket vs static-feed notice. *Recommendation:* static feed through D5; revisit at first public release feedback.
 4. **OD-D4 — Shared view-store package.** Extract `@agena/view-store` (reducers) for TUI + desktop convergence. *Recommendation:* only when the desktop reducers stabilize AND the TUI wants richer blocks; two consumers is the trigger (same rule as OD7 in final_plan).
-5. **OD-D5 — Usage/cost in events.** Status-bar meters need usage fields on `message.assistant.completed` (a `v`-bump + upcast; old events simply lack the field). *Recommendation:* propose the protocol change during D1; render meters whenever it lands. Client never estimates costs itself (D-INV-1 spirit).
+5. **OD-D5 — Usage/cost meters.** Optional usage fields exist on some completion/run events, but the desktop should not turn them into status-bar meters until coverage and pricing semantics are reliable. *Recommendation:* render raw usage in the inspector when present; add meters later. Client never estimates costs itself (D-INV-1 spirit).
 6. **OD-D6 — Tauri revisit trigger.** *Recommendation:* only if installed-size/RAM becomes a top-3 user complaint post-release; the renderer ports, the bridge rewrites.
 7. **OD-D7 — Workspace provisioning in-app** (`docker compose` from main). *Recommendation:* post-D5; the setup screen's "point me at a workspace" copy covers v1.
 8. **OD-D8 — Multi-window.** One `AgenaClient` per window vs shared main-process pool. *Recommendation:* defer; the batcher and client-host are written per-window-ready (no globals) so this is additive later.

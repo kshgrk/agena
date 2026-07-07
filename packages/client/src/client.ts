@@ -21,6 +21,7 @@ import {
   PING_INTERVAL_MS,
   PROTOCOL_VERSION,
   type PromptAck,
+  type PtySummary,
   promptAckSchema,
   type RespondToApprovalAck,
   type RuntimeInfoAck,
@@ -46,6 +47,21 @@ import {
 } from "@agena/protocol";
 import { ulid } from "ulid";
 
+export {
+  type AgenaLocalConfig,
+  type AgenaLocalCredentials,
+  type AgenaLocalProfile,
+  DEFAULT_AGENA_URL,
+  defaultAgenaConfigDir,
+  loadOrCreateClientId,
+  type ResolvedLocalClientConfig,
+  type ResolveLocalClientOptions,
+  readAgenaLocalConfig,
+  readAgenaLocalCredentials,
+  resolveLocalClientConfig,
+  writeAgenaLocalConfig,
+  writeAgenaLocalCredentials,
+} from "./local-config.ts";
 // §9.5 PTY WS helpers shared by `agena shell` and the TUI's embedded split.
 export { isTerminalPtyClose, parsePtyExit, ptyDataToBytes } from "./pty.ts";
 // Client-minted ULIDs per §4.3; re-exported for the CLI's persisted clientId.
@@ -126,6 +142,11 @@ export type CreateSessionOptions = Partial<CreateSessionRequest>;
 export type ListSessionsOptions = ListSessionsQuery;
 export type SearchOptions = Partial<Omit<SearchQuery, "q">>;
 export type ListFilesOptions = { path?: string };
+export type ReadEventsOptions = { fromSeq?: number; limit?: number };
+export type ReadEventsPage = {
+  events: AgenaEvent[];
+  nextFromSeq: number | null;
+};
 
 export type PtyAttachment = {
   ptyId: string;
@@ -362,6 +383,20 @@ export class AgenaClient {
     return (body as { approvals: PendingApprovalSummary[] }).approvals;
   }
 
+  async readEvents(
+    sessionId: string,
+    opts: ReadEventsOptions = {},
+  ): Promise<ReadEventsPage> {
+    const query = new URLSearchParams();
+    if (opts.fromSeq !== undefined) query.set("fromSeq", String(opts.fromSeq));
+    if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+    const qs = query.toString();
+    return this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/events${qs ? `?${qs}` : ""}`,
+    ) as Promise<ReadEventsPage>;
+  }
+
   async listFiles(opts: ListFilesOptions = {}): Promise<FileEntry[]> {
     const query = new URLSearchParams();
     if (opts.path) query.set("path", opts.path);
@@ -416,6 +451,15 @@ export class AgenaClient {
     const ptyId = stringField(body, "ptyId");
     const wsPath = stringField(body, "wsPath");
     return { ptyId, wsPath, socket: this.connectPty(wsPath) };
+  }
+
+  async listPtys(): Promise<PtySummary[]> {
+    const body = await this.fetchJson("GET", "/v1/ptys");
+    return (body as { ptys: PtySummary[] }).ptys;
+  }
+
+  async killPty(ptyId: string): Promise<void> {
+    await this.fetchJson("DELETE", `/v1/ptys/${encodeURIComponent(ptyId)}`);
   }
 
   connectPty(wsPath: string): PtyWsLike {

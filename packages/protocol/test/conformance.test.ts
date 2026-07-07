@@ -295,6 +295,31 @@ describe("M4.5 durable event payloads", () => {
         options: [{ id: "yes", label: "Yes" }],
       }).success,
     ).toBe(true);
+    expect(
+      durableEventSchemas["approval.requested"].parse({
+        approvalId: "a",
+        kind: "confirm",
+        message: "Run shell command?",
+        subject: {
+          toolName: "shell",
+          args: { command: "pnpm test" },
+          cwd: "/workspace",
+          command: "pnpm test",
+          action: "execute",
+        },
+      }),
+    ).toEqual({
+      approvalId: "a",
+      kind: "confirm",
+      message: "Run shell command?",
+      subject: {
+        toolName: "shell",
+        args: { command: "pnpm test" },
+        cwd: "/workspace",
+        command: "pnpm test",
+        action: "execute",
+      },
+    });
   });
 });
 

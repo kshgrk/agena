@@ -604,4 +604,61 @@ describe("AgenaClient", () => {
       "http://127.0.0.1:7777/v1/files/archive?path=src+dir",
     ]);
   });
+
+  it("wraps event paging and PTY management HTTP routes", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/events")) {
+        return new Response(
+          JSON.stringify({ events: [event(3)], nextFromSeq: null }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/v1/ptys")) {
+        return new Response(
+          JSON.stringify({
+            ptys: [
+              {
+                ptyId: "pty_1",
+                cols: 80,
+                rows: 24,
+                cwd: "/workspace",
+                attached: true,
+                createdAt: "2026-07-06T00:00:00.000Z",
+                lastAttachedAt: "2026-07-06T00:00:00.000Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(
+      client.readEvents("session/1", { fromSeq: 2, limit: 10 }),
+    ).resolves.toEqual({ events: [event(3)], nextFromSeq: null });
+    await expect(client.listPtys()).resolves.toEqual([
+      {
+        ptyId: "pty_1",
+        cols: 80,
+        rows: 24,
+        cwd: "/workspace",
+        attached: true,
+        createdAt: "2026-07-06T00:00:00.000Z",
+        lastAttachedAt: "2026-07-06T00:00:00.000Z",
+      },
+    ]);
+    await expect(client.killPty("pty/1")).resolves.toBeUndefined();
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:7777/v1/sessions/session%2F1/events?fromSeq=2&limit=10",
+      "http://127.0.0.1:7777/v1/ptys",
+      "http://127.0.0.1:7777/v1/ptys/pty%2F1",
+    ]);
+  });
 });

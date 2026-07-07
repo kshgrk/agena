@@ -2,16 +2,8 @@
 import { execFileSync } from "node:child_process";
 // agena — M1 entrypoint: resolve url/token, resume the newest session or create
 // one, run the TUI. Runs directly under Node 22 type stripping (and Bun).
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import {
-  basename,
-  isAbsolute,
-  join,
-  normalize,
-  relative,
-  resolve,
-} from "node:path";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, normalize, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   AgenaClient,
@@ -21,7 +13,7 @@ import {
   type PtyWsLike,
   parsePtyExit,
   ptyDataToBytes,
-  ulid,
+  resolveLocalClientConfig,
 } from "@agena/client";
 import { runTui } from "@agena/tui";
 
@@ -59,26 +51,6 @@ type CliValues = {
   name?: string;
   recursive?: boolean;
 };
-
-/** Stable ULID per installed client (§5.1); persisted under ~/.config/agena/. */
-function loadClientId(): string {
-  const dir = join(homedir(), ".config", "agena");
-  const file = join(dir, "client-id");
-  try {
-    const id = readFileSync(file, "utf8").trim();
-    if (id) return id;
-  } catch {
-    // fall through and mint one
-  }
-  const id = ulid();
-  try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(file, `${id}\n`);
-  } catch {
-    // unwritable config dir -> per-run id is fine
-  }
-  return id;
-}
 
 function terminalSize(): { cols: number; rows: number } {
   return {
@@ -248,17 +220,20 @@ async function main(): Promise<number> {
     console.error("agena: use either --global or --all-projects, not both");
     return 2;
   }
-  const token = values.token ?? process.env.AGENA_TOKEN;
-  if (!token) {
+  const localConfig = resolveLocalClientConfig({
+    ...(values.url ? { url: values.url } : {}),
+    ...(values.token ? { token: values.token } : {}),
+  });
+  if (!localConfig.token) {
     console.error(
       `agena: missing token — set AGENA_TOKEN or pass --token\n${USAGE}`,
     );
     return 2;
   }
   const client = new AgenaClient({
-    url: values.url ?? process.env.AGENA_URL ?? "http://127.0.0.1:7777",
-    token,
-    clientId: loadClientId(),
+    url: localConfig.url,
+    token: localConfig.token,
+    clientId: localConfig.clientId,
     clientName: "agena",
     clientVersion: "0.0.0",
   });
