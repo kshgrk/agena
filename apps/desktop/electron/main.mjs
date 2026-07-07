@@ -1,0 +1,148 @@
+// Electron main: opens the renderer and hosts the REAL AgenaBridge
+// (bridge.mjs — @agena/client against the daemon; D-INV-2: the token lives
+// here, never in the renderer). Set AGENA_MOCK=1 to skip the real bridge and
+// fall back to the renderer's mock (window.agenaShell still gives Finder).
+// Daemon endpoint: AGENA_URL / AGENA_TOKEN env, defaulting to the local
+// docker workspace (127.0.0.1:7700, dev token).
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  MessageChannelMain,
+} from "electron";
+import { createBridgeHost } from "./bridge.mjs";
+
+const RENDERER_URL = process.env.AGENA_RENDERER_URL ?? "http://localhost:5199";
+const AGENA_URL = process.env.AGENA_URL ?? "http://127.0.0.1:7700";
+const AGENA_TOKEN = process.env.AGENA_TOKEN ?? "dev"; // dev-shell default
+const USE_MOCK = process.env.AGENA_MOCK === "1";
+const preload = fileURLToPath(new URL("./preload.cjs", import.meta.url));
+
+// Folder-capture caps for the mock-ingestion path (agena-shell:read-folder).
+// The real bridge copies via tar instead; these bound only the mock's memory.
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  "target",
+  ".venv",
+  "__pycache__",
+  ".DS_Store",
+]);
+const MAX_FILES = 400;
+const MAX_TEXT_BYTES = 128 * 1024;
+
+async function captureFolder(root) {
+  const files = [];
+  const queue = [root];
+  while (queue.length > 0 && files.length < MAX_FILES) {
+    const dir = queue.shift();
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (files.length >= MAX_FILES) break;
+      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(full);
+      } else if (entry.isFile()) {
+        try {
+          const info = await stat(full);
+          let text = null;
+          if (info.size <= MAX_TEXT_BYTES) {
+            const buf = await readFile(full);
+            if (!buf.subarray(0, 1024).includes(0)) text = buf.toString("utf8");
+          }
+          files.push({ path: relative(root, full), size: info.size, text });
+        } catch {
+          // unreadable file — skip
+        }
+      }
+    }
+  }
+  return { name: basename(root), files };
+}
+
+app.whenReady().then(() => {
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 960,
+    minHeight: 600,
+    backgroundColor: "#0c0e13",
+    title: "Agena",
+    webPreferences: {
+      preload,
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      additionalArguments: USE_MOCK ? ["--agena-mock"] : [],
+    },
+  });
+
+  const pickFolder = async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: "Open project folder",
+      buttonLabel: "Open project",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  };
+
+  // native picker + capture for the mock/browser path (window.agenaShell)
+  ipcMain.handle("agena-shell:pick-folder", () => pickFolder());
+  ipcMain.handle("agena-shell:read-folder", (_event, path) => {
+    if (typeof path !== "string" || !path.startsWith("/")) return null;
+    return captureFolder(path);
+  });
+
+  // the real bridge (window.agenaPreload → agena:invoke)
+  const host = createBridgeHost({
+    url: AGENA_URL,
+    token: AGENA_TOKEN,
+    userData: app.getPath("userData"),
+    broadcast: (channel, payload) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        w.webContents.send(channel, payload);
+      }
+    },
+  });
+  ipcMain.handle("agena:invoke", async (event, req) => {
+    const method = req?.method;
+    const args = Array.isArray(req?.args) ? req.args : [];
+    try {
+      const value = await host.call(method, args, {
+        pickFolder,
+        makePorts: () => new MessageChannelMain(),
+        sendPort: (ptyId, port) =>
+          event.sender.postMessage("agena:pty-port", { ptyId }, [port]),
+      });
+      return { ok: true, value };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: typeof err?.code === "string" ? err.code : "INTERNAL",
+          message: err?.message ?? String(err),
+          retryable: err?.retryable === true,
+        },
+      };
+    }
+  });
+
+  app.on("before-quit", () => void host.dispose());
+  win.loadURL(RENDERER_URL);
+});
+
+app.on("window-all-closed", () => app.quit());

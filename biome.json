@@ -8,6 +8,11 @@
   "files": {
     "ignoreUnknown": true
   },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
   "formatter": {
     "indentStyle": "space"
   },

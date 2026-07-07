@@ -8,3 +8,4 @@ overrides:
   '@earendil-works/pi-tui': 0.80.3
 onlyBuiltDependencies:
   - node-pty
+  - electron
