@@ -361,4 +361,16 @@ it("maps Pi session name changes into runtime title events", () => {
   expect(
     mapPiEvent(state, { type: "session_info_changed", name: "   " }),
   ).toEqual([]);
+
+  expect(
+    mapPiEvent(state, {
+      type: "session_info_changed",
+      name: "This is a very long generated session title that should never be allowed to crash the runtime pump",
+    }),
+  ).toEqual([
+    {
+      type: "session-title-changed",
+      title: "This is a very long generated session title that should neve",
+    },
+  ] satisfies RuntimeEvent[]);
 });

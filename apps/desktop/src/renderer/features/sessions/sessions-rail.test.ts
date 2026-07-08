@@ -2,6 +2,7 @@ import type { SessionSummary } from "@agena/protocol";
 import { describe, expect, it } from "vitest";
 import {
   createGlobalSessionInput,
+  createProjectSessionInput,
   sessionGroupLabel,
   splitSessionSections,
 } from "./sessions-rail.tsx";
@@ -38,6 +39,23 @@ describe("sessions rail scope helpers", () => {
     expect(createGlobalSessionInput()).toEqual({
       scope: "global",
       cwd: ".",
+    });
+  });
+
+  it("creates sessions at the project root from a project group seed", () => {
+    expect(
+      createProjectSessionInput(
+        summary({
+          projectId: "p-a",
+          projectRoot: "repo-a",
+          cwd: "repo-a/pkg",
+        }),
+      ),
+    ).toEqual({
+      scope: "project",
+      projectId: "p-a",
+      projectRoot: "repo-a",
+      cwd: "repo-a",
     });
   });
 

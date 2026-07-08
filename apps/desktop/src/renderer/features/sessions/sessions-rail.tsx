@@ -14,6 +14,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Folder,
   FolderOpen,
   Inbox,
   Plus,
@@ -119,6 +120,18 @@ type SessionSections = { projectGroups: Group[]; globalIds: string[] };
 
 export function createGlobalSessionInput(): Partial<CreateSessionRequest> {
   return { scope: "global", cwd: "." };
+}
+
+export function createProjectSessionInput(
+  session: SessionSummary,
+): Partial<CreateSessionRequest> | null {
+  if (!session.projectId || !session.projectRoot) return null;
+  return {
+    scope: "project",
+    projectId: session.projectId,
+    projectRoot: session.projectRoot,
+    cwd: session.projectRoot,
+  };
 }
 
 /** Newest-first order preserved within groups; control sessions never listed. */
@@ -338,6 +351,30 @@ export function SessionsRail() {
     }
   }, [busy]);
 
+  const createProjectSession = useCallback(
+    async (seed: SessionSummary | undefined) => {
+      if (busy || !seed) return;
+      const input = createProjectSessionInput(seed);
+      if (!input) {
+        toast("Project metadata is missing", { tone: "err" });
+        return;
+      }
+      setBusy(true);
+      try {
+        const id = await getBridge().createSession(input);
+        await ensureSubscribed(id, 0);
+        await refresh();
+        useSessions.getState().setActive(id);
+        useUi.getState().requestComposerInsert("");
+      } catch (err) {
+        toast(errMsg(err), { tone: "err" });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+
   useEffect(() => {
     const cycle = (dir: 1 | -1) => {
       const s = useSessions.getState();
@@ -470,6 +507,8 @@ export function SessionsRail() {
             <div className="flex h-full flex-col">
               <RailSection
                 title="Projects"
+                createLabel="New project"
+                createIcon={<Folder />}
                 onCreate={() => setProjectModalOpen(true)}
               />
               <RailSection
@@ -483,40 +522,48 @@ export function SessionsRail() {
           <div className="flex h-full flex-col">
             <RailSection
               title="Projects"
+              createLabel="New project"
+              createIcon={<Folder />}
               onCreate={() => setProjectModalOpen(true)}
             >
-              {sections.projectGroups.map((group) => (
-                <div key={group.key}>
-                  <ProjectGroupHeader
-                    label={group.label}
-                    count={group.ids.length}
-                    collapsed={collapsedProjects.has(group.key)}
-                    onToggle={() =>
-                      setCollapsedProjects((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(group.key)) next.delete(group.key);
-                        else next.add(group.key);
-                        return next;
-                      })
-                    }
-                  />
-                  {collapsedProjects.has(group.key)
-                    ? null
-                    : group.ids.map((id) => {
-                        const s = byId[id];
-                        return s ? (
-                          <SessionRow
-                            key={id}
-                            session={s}
-                            active={id === activeSessionId}
-                            onContextMenu={(x, y) =>
-                              setMenu({ sessionId: id, x, y })
-                            }
-                          />
-                        ) : null;
-                      })}
-                </div>
-              ))}
+              {sections.projectGroups.map((group) => {
+                const seed = group.ids
+                  .map((id) => byId[id])
+                  .find((s) => s !== undefined);
+                return (
+                  <div key={group.key}>
+                    <ProjectGroupHeader
+                      label={group.label}
+                      count={group.ids.length}
+                      collapsed={collapsedProjects.has(group.key)}
+                      onCreate={() => void createProjectSession(seed)}
+                      onToggle={() =>
+                        setCollapsedProjects((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(group.key)) next.delete(group.key);
+                          else next.add(group.key);
+                          return next;
+                        })
+                      }
+                    />
+                    {collapsedProjects.has(group.key)
+                      ? null
+                      : group.ids.map((id) => {
+                          const s = byId[id];
+                          return s ? (
+                            <SessionRow
+                              key={id}
+                              session={s}
+                              active={id === activeSessionId}
+                              onContextMenu={(x, y) =>
+                                setMenu({ sessionId: id, x, y })
+                              }
+                            />
+                          ) : null;
+                        })}
+                  </div>
+                );
+              })}
             </RailSection>
             <RailSection
               title="Global"
@@ -649,24 +696,35 @@ function ProjectGroupHeader({
   label,
   count,
   collapsed,
+  onCreate,
   onToggle,
 }: {
   label: string;
   count: number;
   collapsed: boolean;
+  onCreate: () => void;
   onToggle: () => void;
 }) {
   const Icon = collapsed ? ChevronRight : ChevronDown;
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className="sticky top-0 z-10 flex h-7 w-full items-center gap-1.5 bg-surface px-3 text-left text-[10px] font-medium uppercase tracking-wider text-ink-mute hover:bg-raised/60"
-    >
-      <Icon className="size-3 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className="shrink-0 tabular-nums">{count}</span>
-    </button>
+    <div className="sticky top-0 z-10 flex h-7 w-full items-center bg-surface pr-1 text-[10px] font-medium uppercase tracking-wider text-ink-mute">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left hover:bg-raised/60"
+      >
+        <Icon className="size-3 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="shrink-0 tabular-nums">{count}</span>
+      </button>
+      <IconButton
+        label={`New session in ${label}`}
+        size="sm"
+        onClick={onCreate}
+      >
+        <Plus />
+      </IconButton>
+    </div>
   );
 }
 
@@ -674,11 +732,15 @@ function RailSection({
   title,
   className,
   onCreate,
+  createLabel,
+  createIcon,
   children,
 }: {
   title: string;
   className?: string;
   onCreate: () => void;
+  createLabel?: string;
+  createIcon?: ReactNode;
   children?: ReactNode;
 }) {
   return (
@@ -686,11 +748,11 @@ function RailSection({
       <div className="sticky top-0 z-20 flex h-8 items-center justify-between bg-surface px-3 text-[10px] font-semibold uppercase tracking-wider text-ink-mute">
         <span>{title}</span>
         <IconButton
-          label={`New ${title.toLowerCase()}`}
+          label={createLabel ?? `New ${title.toLowerCase()}`}
           size="sm"
           onClick={onCreate}
         >
-          <Plus />
+          {createIcon ?? <Plus />}
         </IconButton>
       </div>
       {children}

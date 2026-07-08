@@ -7,3 +7,8 @@ coverage/
 .env.*
 !.env.example
 .local-state/
+dist-electron/
+release/
+.agena-dev-state/
+.local-inspect/
+__pycache__/

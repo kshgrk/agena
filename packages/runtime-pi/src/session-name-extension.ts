@@ -6,11 +6,24 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 const TITLE_PROMPT = [
-  "Generate a short session title for this coding task.",
-  "Return only the title.",
+  "You are a session title generator for an AI coding workspace.",
+  "Your only job is to name the session from the user's first message.",
+  "Do not answer the user's request.",
+  "Do not ask follow-up questions.",
+  "Do not mention missing files, attachments, links, access, or context.",
+  "Return only a compact noun phrase, 2-6 words, maximum 60 characters.",
   "Keep the user's language.",
-  "No quotes. No trailing punctuation.",
-  "Keep it concise.",
+  "Use Title Case when natural. No quotes. No trailing punctuation.",
+  "",
+  "Examples:",
+  "User: what themes are present in this portfolio",
+  "Title: Portfolio Theme Analysis",
+  "User: fix the flaky auth test",
+  "Title: Fix Flaky Auth Test",
+  "User: create a snake game in react",
+  "Title: React Snake Game",
+  "User: why is docker compose not reading .env",
+  "Title: Docker Compose Env Debugging",
 ].join("\n");
 
 function formatTitle(
@@ -66,7 +79,11 @@ export function sessionNameExtension(pi: ExtensionAPI) {
             {
               systemPrompt: TITLE_PROMPT,
               messages: [
-                { role: "user", content: firstPrompt, timestamp: Date.now() },
+                {
+                  role: "user",
+                  content: `First user message:\n${firstPrompt}\n\nReturn the session title only.`,
+                  timestamp: Date.now(),
+                },
               ],
             },
             {
@@ -83,7 +100,7 @@ export function sessionNameExtension(pi: ExtensionAPI) {
             .find((p) => p.type === "text");
           if (!part) return;
 
-          pi.setSessionName(part.text);
+          pi.setSessionName(titleFromResponse(part.text, firstPrompt));
           syncTitle(ctx);
           return;
         } catch {
@@ -92,4 +109,42 @@ export function sessionNameExtension(pi: ExtensionAPI) {
       }
     })();
   });
+}
+
+export function titleFromResponse(raw: string, firstPrompt: string): string {
+  const title = cleanTitle(raw);
+  if (title && !looksLikeAssistantReply(title)) return title;
+  return fallbackTitle(firstPrompt);
+}
+
+function cleanTitle(raw: string): string {
+  return raw
+    .replace(/^["'`]+|["'`.!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+}
+
+function looksLikeAssistantReply(title: string): boolean {
+  const lower = title.toLowerCase();
+  return (
+    title.includes("?") ||
+    /^(i\b|i'm\b|i don'?t\b|i can\b|i can'?t\b|sorry\b|could you\b|please\b|there (is|are)\b|it seems\b|based on\b)/.test(
+      lower,
+    ) ||
+    lower.includes("please share") ||
+    lower.includes("attached or linked") ||
+    lower.includes("don't see")
+  );
+}
+
+function fallbackTitle(prompt: string): string {
+  const cleaned = cleanTitle(prompt).replace(/[^\w\s-]/g, " ");
+  const words = cleaned.split(/\s+/).filter(Boolean).slice(0, 8);
+  const title = words
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ")
+    .slice(0, 60)
+    .trim();
+  return title || "New Session";
 }

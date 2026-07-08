@@ -36,17 +36,31 @@ function dbPath(): string {
   return join(dir, "agena.db");
 }
 
-test("uses rollback journal so live local inspection does not depend on WAL sidecars", () => {
-  const path = dbPath();
-  const store = new SqliteEventStore(path);
-  store.close();
+function journalModeWith(env: string | undefined): string {
+  const prev = process.env.AGENA_SQLITE_JOURNAL;
+  if (env === undefined) delete process.env.AGENA_SQLITE_JOURNAL;
+  else process.env.AGENA_SQLITE_JOURNAL = env;
+  try {
+    const path = dbPath();
+    new SqliteEventStore(path).close();
+    const db = new DatabaseSync(path);
+    const row = db.prepare("PRAGMA journal_mode").get() as {
+      journal_mode: string;
+    };
+    db.close();
+    return row.journal_mode;
+  } finally {
+    if (prev === undefined) delete process.env.AGENA_SQLITE_JOURNAL;
+    else process.env.AGENA_SQLITE_JOURNAL = prev;
+  }
+}
 
-  const db = new DatabaseSync(path);
-  const row = db.prepare("PRAGMA journal_mode").get() as {
-    journal_mode: string;
-  };
-  expect(row.journal_mode).toBe("delete");
-  db.close();
+test("uses rollback journal by default so live local inspection does not depend on WAL sidecars", () => {
+  expect(journalModeWith(undefined)).toBe("delete");
+});
+
+test("AGENA_SQLITE_JOURNAL=wal opts into WAL for replicated deployments (Litestream)", () => {
+  expect(journalModeWith("wal")).toBe("wal");
 });
 
 test("persists sessions and events across store reopen", async () => {

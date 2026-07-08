@@ -48,6 +48,7 @@ RUN mkdir -p /var/lib/agena /workspace \
 
 USER node
 WORKDIR /workspace
-VOLUME ["/workspace", "/var/lib/agena"]
+# no VOLUME instruction: compose declares named volumes itself, and Modal's
+# image builder rejects it (deploy/modal_app.py builds from this file)
 EXPOSE 7777
 CMD ["node", "/app/apps/daemon/src/main.ts"]

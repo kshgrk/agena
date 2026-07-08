@@ -196,6 +196,49 @@ describe("applyEvent + applyFrame", () => {
     });
   });
 
+  it("keeps the turn active after an assistant message completes until the run ends", () => {
+    let s = markSynced(emptyTranscript("s1"), 0);
+    s = applyEvent(
+      s,
+      ev(1, "run.started", {
+        runId: "r1",
+        trigger: "prompt",
+        triggerMessageId: "mu",
+      }),
+      false,
+    );
+    s = applyEvent(s, started("ma"), false);
+    s = applyEvent(
+      s,
+      ev(3, "message.assistant.completed", {
+        messageId: "ma",
+        content: [text("I'll check.")],
+        model: MODEL,
+        stopReason: "tool_use",
+      }),
+      false,
+    );
+    expect(s.inFlight).toBeNull();
+    expect(s.runtimeStatus).toEqual({ state: "generating" });
+
+    s = applyEvent(
+      s,
+      ev(4, "tool.call.started", {
+        toolCallId: "tc",
+        messageId: "ma",
+        runId: "r1",
+        turnId: "t1",
+        name: "bash",
+        args: { command: "pwd" },
+      }),
+      false,
+    );
+    expect(s.runtimeStatus).toEqual({ state: "generating" });
+
+    s = applyEvent(s, ev(5, "run.completed", { runId: "r1" }), false);
+    expect(s.runtimeStatus).toEqual({ state: "idle" });
+  });
+
   it("tracks the approval lifecycle in place", () => {
     let s = emptyTranscript("s1");
     s = applyEvent(

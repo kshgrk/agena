@@ -4,6 +4,7 @@
 // fall back to the renderer's mock (window.agenaShell still gives Finder).
 // Daemon endpoint: AGENA_URL / AGENA_TOKEN env, defaulting to the local
 // docker workspace (127.0.0.1:7700, dev token).
+import { readFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,9 +17,26 @@ import {
 } from "electron";
 import { createBridgeHost } from "./bridge.mjs";
 
-const RENDERER_URL = process.env.AGENA_RENDERER_URL ?? "http://localhost:5199";
-const AGENA_URL = process.env.AGENA_URL ?? "http://127.0.0.1:7700";
-const AGENA_TOKEN = process.env.AGENA_TOKEN ?? "dev"; // dev-shell default
+const DEV_PORT = process.env.AGENA_DEV_PORT ?? "5199";
+const RENDERER_URL =
+  process.env.AGENA_RENDERER_URL ?? `http://localhost:${DEV_PORT}`;
+
+// Packaged builds carry dist-config.json (written by scripts/bundle-main.mjs
+// from .env at package time — never committed): the release connects to the
+// Modal daemon out of the box. Env vars still override for dev/testing.
+function loadDistConfig() {
+  try {
+    return JSON.parse(
+      readFileSync(fileURLToPath(new URL("./dist-config.json", import.meta.url)), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+}
+const distConfig = loadDistConfig();
+const AGENA_URL =
+  process.env.AGENA_URL ?? distConfig?.url ?? "http://127.0.0.1:7700";
+const AGENA_TOKEN = process.env.AGENA_TOKEN ?? distConfig?.token ?? "dev";
 const USE_MOCK = process.env.AGENA_MOCK === "1";
 const preload = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 
@@ -72,6 +90,16 @@ async function captureFolder(root) {
     }
   }
   return { name: basename(root), files };
+}
+
+// A non-default dev port marks a parallel test instance: give it its own
+// userData so persisted state and the Chromium profile lock never collide
+// with the main instance.
+if (process.env.AGENA_DEV_PORT && process.env.AGENA_DEV_PORT !== "5199") {
+  app.setPath(
+    "userData",
+    `${app.getPath("userData")}-dev${process.env.AGENA_DEV_PORT}`,
+  );
 }
 
 app.whenReady().then(() => {
@@ -142,7 +170,11 @@ app.whenReady().then(() => {
   });
 
   app.on("before-quit", () => void host.dispose());
-  win.loadURL(RENDERER_URL);
+  if (app.isPackaged) {
+    void win.loadFile("dist/renderer/index.html");
+  } else {
+    void win.loadURL(RENDERER_URL);
+  }
 });
 
 app.on("window-all-closed", () => app.quit());

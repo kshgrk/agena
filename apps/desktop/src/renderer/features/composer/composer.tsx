@@ -125,9 +125,14 @@ const pickerCls =
 export function Composer({ sessionId }: { sessionId: string }) {
   const value = useComposerDrafts((s) => s.drafts[sessionId] ?? "");
   const setDraft = useComposerDrafts((s) => s.setDraft);
-  const active = useTranscripts(
-    (s) => (s.bySession[sessionId]?.inFlight ?? null) !== null,
-  );
+  const active = useTranscripts((s) => {
+    const t = s.bySession[sessionId];
+    return (
+      (t?.runtimeStatus?.state !== undefined &&
+        t.runtimeStatus.state !== "idle") ||
+      (t?.inFlight ?? null) !== null
+    );
+  });
   const steerCount = useTranscripts(
     (s) => s.bySession[sessionId]?.queue.steerCount ?? 0,
   );
@@ -194,9 +199,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
         title: "Abort turn",
         group: "Session",
         keywords: ["stop", "cancel", "esc"],
-        enabled: () =>
-          (useTranscripts.getState().bySession[sessionId]?.inFlight ?? null) !==
-          null,
+        enabled: () => {
+          const t = useTranscripts.getState().bySession[sessionId];
+          return (
+            (t?.runtimeStatus?.state !== undefined &&
+              t.runtimeStatus.state !== "idle") ||
+            (t?.inFlight ?? null) !== null
+          );
+        },
         run: () => void abortTurn(sessionId),
       },
       {

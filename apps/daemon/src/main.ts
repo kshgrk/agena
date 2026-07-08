@@ -8,10 +8,17 @@ import { startDaemon } from "./server.ts";
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
   // Dynamic import keeps the Pi SDK out of fake-runtime runs (tests/demo).
+  // AGENA_PI_DEFAULT_MODEL ("provider/model-id") pins the model for new
+  // sessions — deployments where Pi's availability scan would pick the wrong
+  // provider (e.g. stray AWS creds → bedrock) set it explicitly (§9.9
+  // runtime.pi.defaultModel).
+  const defaultModel = process.env.AGENA_PI_DEFAULT_MODEL;
   const adapter: RuntimeAdapter =
     config.runtime === "fake"
       ? new FakeRuntimeAdapter()
-      : new (await import("@agena/runtime-pi")).PiRuntimeAdapter();
+      : new (await import("@agena/runtime-pi")).PiRuntimeAdapter(
+          defaultModel ? { defaultModel } : {},
+        );
   const daemon = await startDaemon(config, adapter);
   log("info", "daemon listening", {
     host: config.host,

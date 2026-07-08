@@ -1,7 +1,7 @@
 {
   "name": "@agena/desktop",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0-beta",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -10,7 +10,8 @@
     "app:electron": "electron .",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "package": "vite build && node scripts/bundle-main.mjs && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
     "@agena/client": "workspace:*",
@@ -37,6 +38,8 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
     "electron": "43.0.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.1",
     "tailwindcss": "4.3.2",
     "vite": "8.1.3"
   }

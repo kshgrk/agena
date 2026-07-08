@@ -217,12 +217,20 @@ export function mapPiEvent(
         },
       ];
     case "session_info_changed": {
-      const title = ev.name?.trim();
+      const title = normalizeTitle(ev.name);
       return title ? [{ type: "session-title-changed", title }] : [];
     }
     default:
       return drop(state, ev.type);
   }
+}
+
+function normalizeTitle(title: string | undefined): string {
+  return (title ?? "")
+    .replace(/^["'`]+|["'`.!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
 }
 
 function toolResultBlocks(result: unknown): { type: "text"; text: string }[] {

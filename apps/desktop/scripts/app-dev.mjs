@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
-const url = process.env.AGENA_RENDERER_URL ?? "http://localhost:5199";
+const port = process.env.AGENA_DEV_PORT ?? "5199";
+const url = process.env.AGENA_RENDERER_URL ?? `http://localhost:${port}`;
 
 const vite = spawn("vite", ["--host", "127.0.0.1", "--strictPort"], {
   stdio: "inherit",

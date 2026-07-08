@@ -55,6 +55,7 @@ type Draft = {
   toolIndex: Record<string, number>;
   approvalIndex: Record<string, number>;
   inFlight: InFlightTail | null;
+  runtimeStatus: TranscriptState["runtimeStatus"];
 };
 
 function marker(base: BlockBase, markerKind: MarkerKind, text: string): Block {
@@ -322,6 +323,7 @@ function reduceEvent(d: Draft, event: AgenaEvent): void {
     }
     case "run.failed": {
       const p = ev.payload;
+      d.runtimeStatus = { state: "idle" };
       d.blocks.push(
         marker(
           base,
@@ -333,11 +335,15 @@ function reduceEvent(d: Draft, event: AgenaEvent): void {
     }
     // session/run/snapshot lifecycle stays out of the block list; the timeline
     // reads rawEvents.
-    case "session.created":
-    case "session.title.changed":
     case "run.started":
+      d.runtimeStatus = { state: "generating" };
+      break;
     case "run.completed":
     case "run.aborted":
+      d.runtimeStatus = { state: "idle" };
+      break;
+    case "session.created":
+    case "session.title.changed":
     case "snapshot.created":
     case "snapshot.restored":
     case "snapshot.restore_failed":
@@ -359,6 +365,7 @@ export function applyEvent(
     toolIndex: { ...state.toolIndex },
     approvalIndex: { ...state.approvalIndex },
     inFlight: state.inFlight,
+    runtimeStatus: state.runtimeStatus,
   };
   reduceEvent(d, event);
   return {
@@ -368,6 +375,7 @@ export function applyEvent(
     toolIndex: d.toolIndex,
     approvalIndex: d.approvalIndex,
     inFlight: d.inFlight,
+    runtimeStatus: d.runtimeStatus,
     rawEvents: [...state.rawEvents, rawRow(event)],
     lastSeq: event.seq,
   };
@@ -461,6 +469,7 @@ export function prependOlderEvents(
     toolIndex: {},
     approvalIndex: {},
     inFlight: null,
+    runtimeStatus: null,
   };
   const raw: RawEventRow[] = [];
   for (const event of events) {

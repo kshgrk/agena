@@ -97,10 +97,14 @@ export class SqliteEventStore implements EventStore {
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.#db = new DatabaseSync(dbPath);
+    // WAL sidecar files are fragile on Docker bind mounts when host tools
+    // inspect the DB live; Agena has one writer, so rollback journaling stays
+    // the local default. Replicated deployments (Litestream on Modal) REQUIRE
+    // WAL — they opt in via AGENA_SQLITE_JOURNAL=wal.
+    const wal = process.env.AGENA_SQLITE_JOURNAL === "wal";
     this.#db.exec(`
-      -- WAL sidecar files are fragile on Docker bind mounts when host tools
-      -- inspect the DB live; Agena has one writer, so rollback journaling wins.
-      PRAGMA journal_mode = DELETE;
+      PRAGMA journal_mode = ${wal ? "WAL" : "DELETE"};
+      ${wal ? "PRAGMA busy_timeout = 5000;" : ""}
       PRAGMA synchronous = FULL;
       PRAGMA foreign_keys = ON;
 

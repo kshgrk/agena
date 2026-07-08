@@ -1,6 +1,6 @@
 // Read-only file browser over listFiles/readFile (plan D3). No save/edit
 // affordance anywhere — the daemon has no write route yet.
-import type { FileEntry } from "@agena/protocol";
+import type { FileEntry, SessionSummary } from "@agena/protocol";
 import {
   ChevronRight,
   Copy,
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
+import { useSessions } from "../../store/index.ts";
 import {
   CodeBlock,
   cx,
@@ -82,6 +83,24 @@ const sortEntries = (entries: FileEntry[]): FileEntry[] =>
       (a.type === "dir" ? 0 : 1) - (b.type === "dir" ? 0 : 1) ||
       a.name.localeCompare(b.name),
   );
+
+function workspaceRelative(path: string): string {
+  const clean = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  const rel = clean.startsWith("/workspace/")
+    ? clean.slice("/workspace/".length)
+    : clean === "/workspace"
+      ? "."
+      : clean.replace(/^\.?\/*/, "");
+  return rel || ".";
+}
+
+export function fileRootForSession(
+  session: Pick<SessionSummary, "scope" | "projectRoot"> | undefined,
+): string {
+  return session?.scope === "project" && session.projectRoot
+    ? workspaceRelative(session.projectRoot)
+    : ".";
+}
 
 type DirState =
   | { status: "loading" }
@@ -284,6 +303,10 @@ function ViewerBody({
 // ---- pane -------------------------------------------------------------------
 
 export function FilesPane() {
+  const rootPath = useSessions((s) => {
+    const id = s.activeSessionId;
+    return fileRootForSession(id ? s.byId[id] : undefined);
+  });
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [viewer, setViewer] = useState<ViewerState>({ status: "idle" });
@@ -307,7 +330,13 @@ export function FilesPane() {
       );
   }, []);
 
-  useEffect(() => loadDir("."), [loadDir]);
+  useEffect(() => {
+    openReq.current += 1;
+    setDirs({});
+    setExpanded({});
+    setViewer({ status: "idle" });
+    loadDir(rootPath);
+  }, [loadDir, rootPath]);
 
   const onToggle = useCallback(
     (path: string) => {
@@ -364,7 +393,7 @@ export function FilesPane() {
         <div className="flex w-60 shrink-0 flex-col border-r border-border">
           <PanelHeader title="Files" />
           <div className="min-h-0 flex-1 overflow-auto py-1">
-            <DirRows path="." depth={0} ctx={ctx} />
+            <DirRows path={rootPath} depth={0} ctx={ctx} />
           </div>
         </div>
         <div className="flex min-w-0 flex-1 flex-col">

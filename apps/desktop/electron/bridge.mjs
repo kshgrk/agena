@@ -259,16 +259,40 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
     sock.onerror = () => {
       /* onclose follows */
     };
+    // The renderer fires resize/data the moment the terminal mounts — often
+    // before the WS finishes connecting (remote daemons make this race a
+    // certainty: "InvalidStateError: Sent before connected", which is fatal in
+    // main). Queue outbound traffic until open; drop it if the socket dies.
+    let sockOpen = false;
+    const outbox = [];
+    const sendNow = (data) => {
+      try {
+        sock.send(data);
+      } catch {
+        // socket closed/closing — the exit path already told the renderer
+      }
+    };
+    const send = (data) => {
+      if (sockOpen) sendNow(data);
+      else outbox.push(data);
+    };
+    sock.onopen = () => {
+      sockOpen = true;
+      for (const data of outbox) sendNow(data);
+      outbox.length = 0;
+    };
     port1.on("message", (e) => {
       const m = e.data;
       if (m?.type === "data" && m.data) {
-        sock.send(new Uint8Array(m.data));
+        send(new Uint8Array(m.data));
       } else if (m?.type === "resize") {
-        sock.send(
-          JSON.stringify({ type: "resize", cols: m.cols, rows: m.rows }),
-        );
+        send(JSON.stringify({ type: "resize", cols: m.cols, rows: m.rows }));
       } else if (m?.type === "close") {
-        sock.close(1000, "client close");
+        try {
+          sock.close(1000, "client close");
+        } catch {
+          // already closed
+        }
       }
     });
     port1.start();
@@ -370,11 +394,15 @@ async function tarFolder(src) {
   const tmp = await mkdtemp(join(tmpdir(), "agena-upload-"));
   const archive = join(tmp, "upload.tar");
   await pipeline(Readable.from(tarStream(src)), createWriteStream(archive));
-  const body = createReadStream(archive);
+  // Buffer, don't stream: a stream body sends Transfer-Encoding: chunked,
+  // which Modal's ingress proxy (aiohttp) cannot forward — it 500s before the
+  // daemon sees the request. A buffer sends Content-Length and works through
+  // every path. The tar is already source-only (SKIPPED_UPLOAD_NAMES).
+  const body = await readFile(archive);
   return {
     child: {
       kill() {
-        body.destroy(new Error("upload cancelled"));
+        // body is fully buffered; nothing in flight to cancel
       },
     },
     body,
