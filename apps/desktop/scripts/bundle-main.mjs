@@ -34,8 +34,12 @@ const env = Object.fromEntries(
     .filter((l) => l.includes("=") && !l.startsWith("#"))
     .map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim()]),
 );
-const url = env.AGENA_RELEASE_URL ?? "https://kshgrk--agena.modal.run";
+const url = env.AGENA_RELEASE_URL;
 const token = env.AGENA_MODAL_TOKEN;
-if (!token) throw new Error("AGENA_MODAL_TOKEN missing from .env — cannot bake release config");
+if (!url || !token) {
+  throw new Error(
+    "AGENA_RELEASE_URL and AGENA_MODAL_TOKEN must be set in the repo-root .env to bake a release build (see README: Desktop → Packaging)",
+  );
+}
 writeFileSync(`${out}/dist-config.json`, JSON.stringify({ url, token }));
 console.log(`bundled main → dist-electron/ (daemon: ${url})`);

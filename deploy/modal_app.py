@@ -1,4 +1,4 @@
-# Agena daemon on Modal (workspace: kshgrk). Deploy: modal deploy deploy/modal_app.py
+# Agena daemon on Modal. Deploy into YOUR workspace: modal deploy deploy/modal_app.py
 #
 # Shape (per final_plan INV-14 + oracle review):
 #   - ONE container ever (max_containers=1): the daemon is the single writer.
