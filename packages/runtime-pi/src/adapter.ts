@@ -37,6 +37,7 @@ import {
   type MapperState,
   mapPiEvent,
 } from "./event-map.ts";
+import { sessionNameExtension } from "./session-name-extension.ts";
 
 /** The exact-pinned Pi SDK version (§8.9), surfaced at /v1/diagnostics. */
 export const PI_SDK_VERSION: string = VERSION;
@@ -56,8 +57,9 @@ export interface PiRuntimeOptions {
  * neither <piDir>/extensions nor <workspace>/.pi/extensions. In the installed
  * 0.80.3 API an empty additionalExtensionPaths does NOT disable discovery
  * (DefaultPackageManager.resolve() still scans both dirs); `noExtensions: true`
- * is the control that does, keeping only explicitly passed paths/factories —
- * which we pass none of in M1. Verified by test/containment.test.ts.
+ * is the control that does, keeping only explicitly passed paths/factories.
+ * The single bundled factory is pi-session-name-compatible session naming.
+ * Verified by test/containment.test.ts.
  */
 export function containedResourceLoader(
   cwd: string,
@@ -68,6 +70,7 @@ export function containedResourceLoader(
     agentDir,
     settingsManager: SettingsManager.create(cwd, agentDir),
     additionalExtensionPaths: [],
+    extensionFactories: [sessionNameExtension],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,

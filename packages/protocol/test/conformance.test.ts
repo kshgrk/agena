@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   type AgenaEvent,
   commandSchemas,
+  createProjectRequestSchema,
   createPtyRequestSchema,
   createPtyResponseSchema,
   createSessionRequestSchema,
   DEFAULT_WIRE_LIMITS,
   diagnosticsResponseSchema,
   durableEventSchemas,
+  fileUploadQuerySchema,
+  fileUploadResponseSchema,
   knownAgenaEventSchema,
   knownAgenaFrameSchema,
   listSessionsQuerySchema,
@@ -17,6 +20,7 @@ import {
   PTY_PAUSE_BUFFERED_BYTES,
   PTY_RESUME_BUFFERED_BYTES,
   PTY_SCROLLBACK_BYTES,
+  projectResponseSchema,
   ptyClientControlFrameSchema,
   ptyDaemonControlFrameSchema,
   type WireEnvelope,
@@ -361,6 +365,33 @@ describe("M4 session HTTP scope schemas", () => {
 });
 
 describe("M5 diagnostics HTTP schema", () => {
+  it("validates project init and tar upload routes", () => {
+    expect(createProjectRequestSchema.parse({ name: "My App" })).toEqual({
+      name: "My App",
+    });
+    expect(
+      projectResponseSchema.parse({
+        name: "my-app",
+        projectId: "prj_my-app",
+        projectRoot: "my-app",
+        cwd: "my-app",
+      }),
+    ).toEqual({
+      name: "my-app",
+      projectId: "prj_my-app",
+      projectRoot: "my-app",
+      cwd: "my-app",
+    });
+    expect(
+      fileUploadQuerySchema.parse({ path: "my-app", format: "tar" }),
+    ).toEqual({ path: "my-app", format: "tar" });
+    expect(
+      fileUploadResponseSchema.parse({ path: "my-app", fileCount: 2 }),
+    ).toEqual({ path: "my-app", fileCount: 2 });
+    expect(PTY_HTTP_ROUTES.createProject.path).toBe("/v1/projects");
+    expect(PTY_HTTP_ROUTES.uploadFiles.path).toBe("/v1/files/upload");
+  });
+
   it("validates .agena discovery entries", () => {
     expect(
       diagnosticsResponseSchema.parse({
@@ -445,10 +476,22 @@ describe("event payloads and unknown types (§5.10)", () => {
     ).toBe(false);
   });
 
+  it("session title changes are durable known events", () => {
+    const renamed = {
+      ...validEvent,
+      type: "session.title.changed",
+      payload: { title: "x" },
+    };
+    expect(knownAgenaEventSchema.safeParse(renamed).success).toBe(true);
+    expect(
+      durableEventSchemas["session.title.changed"].parse(renamed.payload),
+    ).toEqual({ title: "x" });
+  });
+
   it("unknown event types still parse on the wire (client renders a generic row)", () => {
     const unknown = {
       ...validEvent,
-      type: "session.title.changed",
+      type: "session.renamed",
       payload: { title: "x" },
     };
     const parsed = wireEnvelopeSchema.parse({

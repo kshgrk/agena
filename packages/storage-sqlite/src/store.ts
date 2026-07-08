@@ -695,6 +695,20 @@ export class SqliteEventStore implements EventStore {
   #applyProjection(event: AgenaEvent): void {
     const p = record(event.payload);
     switch (event.type) {
+      case "session.created":
+        this.#db
+          .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+          .run(
+            typeof p.title === "string" ? p.title : null,
+            event.createdAt,
+            event.sessionId,
+          );
+        return;
+      case "session.title.changed":
+        this.#db
+          .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+          .run(stringField(p, "title"), event.createdAt, event.sessionId);
+        return;
       case "message.user.created":
         this.#insertMessage(event, "user", "completed", p.content, null, null);
         return;

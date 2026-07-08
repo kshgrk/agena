@@ -13,5 +13,5 @@ export default defineConfig({
     emptyOutDir: true,
     target: "es2023",
   },
-  server: { port: 5199 },
+  server: { port: 5199, strictPort: true },
 });

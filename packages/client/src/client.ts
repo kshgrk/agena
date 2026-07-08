@@ -14,12 +14,14 @@ import {
   type EmptyAck,
   emptyAckSchema,
   type FileEntry,
+  type FileUploadResponse,
   type InFlightSnapshot,
   type ListSessionsQuery,
   type ModelRef,
   type PendingApprovalSummary,
   PING_INTERVAL_MS,
   PROTOCOL_VERSION,
+  type ProjectResponse,
   type PromptAck,
   type PtySummary,
   promptAckSchema,
@@ -142,6 +144,7 @@ export type CreateSessionOptions = Partial<CreateSessionRequest>;
 export type ListSessionsOptions = ListSessionsQuery;
 export type SearchOptions = Partial<Omit<SearchQuery, "q">>;
 export type ListFilesOptions = { path?: string };
+export type UploadFilesOptions = { path: string; format?: "tar" };
 export type ReadEventsOptions = { fromSeq?: number; limit?: number };
 export type ReadEventsPage = {
   events: AgenaEvent[];
@@ -413,6 +416,24 @@ export class AgenaClient {
     return this.fetchBytes("GET", filesArchivePath(path));
   }
 
+  async createProject(name: string): Promise<ProjectResponse> {
+    return this.fetchJson("POST", "/v1/projects", {
+      name,
+    }) as Promise<ProjectResponse>;
+  }
+
+  async uploadFiles(
+    opts: UploadFilesOptions,
+    body: BodyInit,
+  ): Promise<FileUploadResponse> {
+    return this.fetchBody(
+      "POST",
+      filesUploadPath(opts.path, opts.format ?? "tar"),
+      body,
+      "application/x-tar",
+    ) as Promise<FileUploadResponse>;
+  }
+
   async listSnapshots(): Promise<SnapshotSummary[]> {
     const body = await this.fetchJson("GET", "/v1/snapshots");
     return (body as { snapshots: SnapshotSummary[] }).snapshots;
@@ -485,10 +506,22 @@ export class AgenaClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  private async fetchBody(
+    method: string,
+    path: string,
+    body: BodyInit,
+    contentType: string,
+  ): Promise<unknown> {
+    const res = await this.fetchRaw(method, path, body, contentType);
+    if (res.status === 204) return {};
+    return res.json();
+  }
+
   private async fetchRaw(
     method: string,
     path: string,
     body?: unknown,
+    contentType = "application/json",
   ): Promise<Response> {
     let res: Response;
     try {
@@ -496,9 +529,13 @@ export class AgenaClient {
         method,
         headers: {
           authorization: `Bearer ${this.token}`,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...(body === undefined ? {} : { "content-type": contentType }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined
+          ? {}
+          : contentType === "application/json"
+            ? { body: JSON.stringify(body) }
+            : { body: body as BodyInit, duplex: "half" }),
       });
     } catch (err) {
       throw new AgenaClientError(
@@ -819,4 +856,9 @@ function filesContentPath(path: string): string {
 function filesArchivePath(path: string): string {
   const query = new URLSearchParams({ path });
   return `/v1/files/archive?${query}`;
+}
+
+function filesUploadPath(path: string, format: "tar"): string {
+  const query = new URLSearchParams({ path, format });
+  return `/v1/files/upload?${query}`;
 }

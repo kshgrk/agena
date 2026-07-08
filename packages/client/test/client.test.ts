@@ -556,7 +556,7 @@ describe("AgenaClient", () => {
   });
 
   it("wraps file list/read/archive HTTP routes", async () => {
-    const fetchMock = vi.fn(async (url: string) => {
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (url.includes("/v1/files?")) {
         return new Response(
           JSON.stringify({
@@ -573,6 +573,23 @@ describe("AgenaClient", () => {
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      }
+      if (url.endsWith("/v1/projects")) {
+        return new Response(
+          JSON.stringify({
+            name: "my-app",
+            projectId: "prj_my-app",
+            projectRoot: "my-app",
+            cwd: "my-app",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/v1/files/upload?")) {
+        return new Response(JSON.stringify({ path: "my-app", fileCount: 1 }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
       }
       return new Response("ok", { status: 200 });
     });
@@ -597,12 +614,41 @@ describe("AgenaClient", () => {
     await expect(client.archiveFiles("src dir")).resolves.toEqual(
       new TextEncoder().encode("ok"),
     );
+    await expect(client.createProject("My App")).resolves.toEqual({
+      name: "my-app",
+      projectId: "prj_my-app",
+      projectRoot: "my-app",
+      cwd: "my-app",
+    });
+    await expect(
+      client.uploadFiles(
+        { path: "my-app", format: "tar" },
+        new TextEncoder().encode("tar"),
+      ),
+    ).resolves.toEqual({ path: "my-app", fileCount: 1 });
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "http://127.0.0.1:7777/v1/files?path=src+dir",
       "http://127.0.0.1:7777/v1/files/content?path=src+dir%2Fa.txt",
       "http://127.0.0.1:7777/v1/files/archive?path=src+dir",
+      "http://127.0.0.1:7777/v1/projects",
+      "http://127.0.0.1:7777/v1/files/upload?path=my-app&format=tar",
     ]);
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "My App" }),
+    });
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/x-tar",
+      },
+    });
   });
 
   it("wraps event paging and PTY management HTTP routes", async () => {

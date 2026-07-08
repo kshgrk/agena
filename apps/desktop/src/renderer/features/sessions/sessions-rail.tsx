@@ -1,6 +1,6 @@
 // Left rail — sessions (plan §7.2): project-grouped list from SessionSummary,
-// inline new-session composer, archive toggle, right-click context menu, and
-// the session.* commands (new / next / prev).
+// explicit project/global sections, archive toggle, right-click context menu,
+// and the session.* commands (new / next / prev).
 import type {
   CreateSessionRequest,
   SessionStatus,
@@ -9,6 +9,8 @@ import type {
 import {
   Archive,
   ArchiveRestore,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Eye,
   EyeOff,
@@ -17,9 +19,10 @@ import {
   Plus,
   RefreshCw,
 } from "lucide-react";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
-import { chordLabel, useCommands } from "../../store/commands.ts";
+import { useCommands } from "../../store/commands.ts";
 import {
   ensureSubscribed,
   useSessions,
@@ -37,6 +40,11 @@ import {
   MenuItem,
   MenuSeparator,
   MenuTrigger,
+  Modal,
+  ModalClose,
+  ModalDescription,
+  ModalFooter,
+  ModalTitle,
   PanelShell,
   RelativeTime,
   StatusDot,
@@ -68,24 +76,6 @@ export function sessionGroupLabel(session: SessionSummary): string {
     session.projectId ??
     "Global"
   );
-}
-
-export function createSessionInputForActive(
-  title: string,
-  active: SessionSummary | undefined,
-): Partial<CreateSessionRequest> {
-  const input: Partial<CreateSessionRequest> = title ? { title } : {};
-  if (active?.scope !== "project" || !active.projectId || !active.projectRoot) {
-    return input;
-  }
-  return {
-    ...input,
-    scope: "project",
-    projectId: active.projectId,
-    projectRoot: active.projectRoot,
-    cwd: active.cwd,
-    ...(active.hostCwdHint ? { hostCwdHint: active.hostCwdHint } : {}),
-  };
 }
 
 async function refresh(): Promise<void> {
@@ -125,26 +115,35 @@ async function setSessionStatus(
 // ---- grouping ------------------------------------------------------------------
 
 type Group = { key: string; label: string; ids: string[] };
+type SessionSections = { projectGroups: Group[]; globalIds: string[] };
 
-/** Newest-first order preserved within groups; control sessions never listed;
- * global scope collapses into one trailing "Global" group. */
-function groupSessions(
+export function createGlobalSessionInput(): Partial<CreateSessionRequest> {
+  return { scope: "global", cwd: "." };
+}
+
+/** Newest-first order preserved within groups; control sessions never listed. */
+export function splitSessionSections(
   byId: Readonly<Record<string, SessionSummary>>,
   order: readonly string[],
   showArchived: boolean,
-): Group[] {
+): SessionSections {
   const groups: Group[] = [];
   const index = new Map<string, Group>();
+  const globalIds: string[] = [];
   for (const id of order) {
     const s = byId[id];
     if (!s || s.scope === "control") continue;
     if (!showArchived && s.status === "archived") continue;
-    const key = s.scope === "global" || !s.projectId ? "global" : s.projectId;
+    if (s.scope === "global") {
+      globalIds.push(id);
+      continue;
+    }
+    const key = s.projectId ?? `project:${s.sessionId}`;
     let g = index.get(key);
     if (!g) {
       g = {
         key,
-        label: key === "global" ? "Global" : sessionGroupLabel(s),
+        label: sessionGroupLabel(s),
         ids: [],
       };
       index.set(key, g);
@@ -152,11 +151,7 @@ function groupSessions(
     }
     g.ids.push(id);
   }
-  // stable sort: Global group sinks to the bottom
-  groups.sort(
-    (a, b) => Number(a.key === "global") - Number(b.key === "global"),
-  );
-  return groups;
+  return { projectGroups: groups, globalIds };
 }
 
 // ---- row ---------------------------------------------------------------------
@@ -164,10 +159,12 @@ function groupSessions(
 function SessionRow({
   session,
   active,
+  showCwd = true,
   onContextMenu,
 }: {
   session: SessionSummary;
   active: boolean;
+  showCwd?: boolean;
   onContextMenu: (x: number, y: number) => void;
 }) {
   // Imported-origin badge only when the transcript (hence session.created) is
@@ -218,12 +215,16 @@ function SessionRow({
           className="shrink-0 text-[10px] text-ink-mute"
         />
       </span>
-      <span className="flex w-full items-center gap-1.5 pl-3">
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-mute">
-          {pathTail(session.cwd)}
+      {showCwd || origin ? (
+        <span className="flex w-full items-center gap-1.5 pl-3">
+          {showCwd ? (
+            <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-mute">
+              {pathTail(session.cwd)}
+            </span>
+          ) : null}
+          {origin ? <Badge tone="info">{origin}</Badge> : null}
         </span>
-        {origin ? <Badge tone="info">{origin}</Badge> : null}
-      </span>
+      ) : null}
     </button>
   );
 }
@@ -238,9 +239,12 @@ export function SessionsRail() {
   const error = useSessions((s) => s.error);
 
   const [showArchived, setShowArchived] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [menu, setMenu] = useState<{
     sessionId: string;
     x: number;
@@ -254,16 +258,15 @@ export function SessionsRail() {
     void refresh();
   }, []);
 
-  const openProject = useCallback(async () => {
-    if (busy) return;
-    try {
-      // The bridge owns pick AND copy-into-workspace (shared/bridge.ts): the
-      // paths below are workspace-relative, so this works against remote too.
-      const opened = await getBridge().openProjectFolder();
-      if (!opened) return;
-      setBusy(true);
+  const openProjectSession = useCallback(
+    async (opened: {
+      name: string;
+      projectId: string;
+      projectRoot: string;
+      cwd: string;
+      fileCount: number;
+    }) => {
       const id = await getBridge().createSession({
-        title: opened.name,
         scope: "project",
         projectId: opened.projectId,
         projectRoot: opened.projectRoot,
@@ -272,10 +275,61 @@ export function SessionsRail() {
       await ensureSubscribed(id, 0);
       await refresh();
       useSessions.getState().setActive(id);
+      useUi.getState().requestComposerInsert("");
+    },
+    [],
+  );
+
+  const newEmptyRemoteProject = useCallback(async () => {
+    if (busy) return;
+    const name = projectName.trim();
+    if (!name) {
+      toast("Project name is required", { tone: "err" });
+      return;
+    }
+    setBusy(true);
+    try {
+      const opened = await getBridge().createProject(name);
+      await openProjectSession(opened);
+      setProjectName("");
+      setProjectModalOpen(false);
+      toast(`Created ${opened.projectRoot}`, { tone: "ok" });
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, openProjectSession, projectName]);
+
+  const openProject = useCallback(async () => {
+    if (busy) return;
+    try {
+      // The bridge owns pick AND copy-into-workspace (shared/bridge.ts): the
+      // paths below are workspace-relative, so this works against remote too.
+      const opened = await getBridge().openProjectFolder();
+      if (!opened) return;
+      setBusy(true);
+      setProjectModalOpen(false);
+      await openProjectSession(opened);
       toast(
         `Copied ${opened.fileCount} file${opened.fileCount === 1 ? "" : "s"} → ${opened.projectRoot}`,
         { tone: "ok" },
       );
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, openProjectSession]);
+
+  const createGlobalSession = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const id = await getBridge().createSession(createGlobalSessionInput());
+      await ensureSubscribed(id, 0);
+      await refresh();
+      useSessions.getState().setActive(id);
       useUi.getState().requestComposerInsert("");
     } catch (err) {
       toast(errMsg(err), { tone: "err" });
@@ -287,11 +341,15 @@ export function SessionsRail() {
   useEffect(() => {
     const cycle = (dir: 1 | -1) => {
       const s = useSessions.getState();
-      const ids = groupSessions(
+      const sections = splitSessionSections(
         s.byId,
         s.order,
         showArchivedRef.current,
-      ).flatMap((g) => g.ids);
+      );
+      const ids = [
+        ...sections.projectGroups.flatMap((g) => g.ids),
+        ...sections.globalIds,
+      ];
       if (ids.length === 0) return;
       const i = s.activeSessionId ? ids.indexOf(s.activeSessionId) : -1;
       const next =
@@ -307,17 +365,17 @@ export function SessionsRail() {
     return useCommands.getState().register([
       {
         id: "session.new",
-        title: "New session",
+        title: "New global session",
         group: "Session",
         chord: "mod+n",
-        run: () => setCreating(true),
+        run: () => void createGlobalSession(),
       },
       {
         id: "project.open",
-        title: "Open project folder…",
+        title: "New project…",
         group: "Session",
         chord: "mod+o",
-        run: () => void openProject(),
+        run: () => setProjectModalOpen(true),
       },
       {
         id: "session.next",
@@ -334,34 +392,12 @@ export function SessionsRail() {
         run: () => cycle(-1),
       },
     ]);
-  }, [openProject]);
+  }, [createGlobalSession]);
 
-  const submitCreate = async () => {
-    if (busy) return;
-    setBusy(true);
-    const t = title.trim();
-    try {
-      const active = activeSessionId ? byId[activeSessionId] : undefined;
-      const id = await getBridge().createSession(
-        createSessionInputForActive(t, active),
-      );
-      await ensureSubscribed(id, 0);
-      await refresh();
-      useSessions.getState().setActive(id);
-      setCreating(false);
-      setTitle("");
-      // ponytail: no dedicated focus channel; an empty composer-insert request
-      // is the cross-pane "focus the composer" signal.
-      useUi.getState().requestComposerInsert("");
-    } catch (err) {
-      toast(errMsg(err), { tone: "err" });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const groups = groupSessions(byId, order, showArchived);
-  const visibleCount = groups.reduce((n, g) => n + g.ids.length, 0);
+  const sections = splitSessionSections(byId, order, showArchived);
+  const visibleCount =
+    sections.projectGroups.reduce((n, g) => n + g.ids.length, 0) +
+    sections.globalIds.length;
   const menuSession = menu ? byId[menu.sessionId] : undefined;
   const menuArchived = menuSession?.status === "archived";
 
@@ -373,20 +409,6 @@ export function SessionsRail() {
         </span>
         <span className="flex items-center gap-1">
           <IconButton
-            label={`New session · ${chordLabel("mod+n")}`}
-            size="sm"
-            onClick={() => setCreating(true)}
-          >
-            <Plus />
-          </IconButton>
-          <IconButton
-            label={`Open project folder · ${chordLabel("mod+o")}`}
-            size="sm"
-            onClick={() => void openProject()}
-          >
-            <FolderOpen />
-          </IconButton>
-          <IconButton
             label="Reload sessions"
             size="sm"
             onClick={() => void refresh()}
@@ -396,33 +418,7 @@ export function SessionsRail() {
         </span>
       </div>
 
-      {creating ? (
-        <form
-          className="shrink-0 border-b border-border p-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submitCreate();
-          }}
-        >
-          <TextInput
-            autoFocus
-            value={title}
-            disabled={busy}
-            placeholder="Session title — Enter to create, Esc to cancel"
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                e.stopPropagation();
-                setCreating(false);
-                setTitle("");
-              }
-            }}
-          />
-        </form>
-      ) : null}
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1">
         {error && order.length > 0 ? (
           <div className="flex items-center justify-between gap-2 border-b border-border bg-err/10 px-3 py-1 text-[11px] text-err">
             <span className="truncate">{error}</span>
@@ -471,40 +467,76 @@ export function SessionsRail() {
               className="h-full"
             />
           ) : (
-            <EmptyState
-              icon={Inbox}
-              title="No sessions yet"
-              action={
-                <Button
-                  variant="solid"
-                  size="sm"
-                  onClick={() => setCreating(true)}
-                >
-                  Create your first session
-                </Button>
-              }
-              className="h-full"
-            />
+            <div className="flex h-full flex-col">
+              <RailSection
+                title="Projects"
+                onCreate={() => setProjectModalOpen(true)}
+              />
+              <RailSection
+                title="Global"
+                className="border-t border-border"
+                onCreate={() => void createGlobalSession()}
+              />
+            </div>
           )
         ) : (
-          groups.map((group) => (
-            <div key={group.key}>
-              <div className="sticky top-0 z-10 bg-surface px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-ink-mute">
-                {group.label}
-              </div>
-              {group.ids.map((id) => {
+          <div className="flex h-full flex-col">
+            <RailSection
+              title="Projects"
+              onCreate={() => setProjectModalOpen(true)}
+            >
+              {sections.projectGroups.map((group) => (
+                <div key={group.key}>
+                  <ProjectGroupHeader
+                    label={group.label}
+                    count={group.ids.length}
+                    collapsed={collapsedProjects.has(group.key)}
+                    onToggle={() =>
+                      setCollapsedProjects((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(group.key)) next.delete(group.key);
+                        else next.add(group.key);
+                        return next;
+                      })
+                    }
+                  />
+                  {collapsedProjects.has(group.key)
+                    ? null
+                    : group.ids.map((id) => {
+                        const s = byId[id];
+                        return s ? (
+                          <SessionRow
+                            key={id}
+                            session={s}
+                            active={id === activeSessionId}
+                            onContextMenu={(x, y) =>
+                              setMenu({ sessionId: id, x, y })
+                            }
+                          />
+                        ) : null;
+                      })}
+                </div>
+              ))}
+            </RailSection>
+            <RailSection
+              title="Global"
+              className="border-t border-border"
+              onCreate={() => void createGlobalSession()}
+            >
+              {sections.globalIds.map((id) => {
                 const s = byId[id];
                 return s ? (
                   <SessionRow
                     key={id}
                     session={s}
                     active={id === activeSessionId}
+                    showCwd={false}
                     onContextMenu={(x, y) => setMenu({ sessionId: id, x, y })}
                   />
                 ) : null;
               })}
-            </div>
-          ))
+            </RailSection>
+          </div>
         )}
       </div>
 
@@ -559,6 +591,109 @@ export function SessionsRail() {
           </MenuContent>
         </Menu>
       ) : null}
+
+      <Modal
+        open={projectModalOpen}
+        onOpenChange={(open) => {
+          if (!busy) setProjectModalOpen(open);
+        }}
+        size="sm"
+      >
+        <ModalTitle>New project</ModalTitle>
+        <ModalDescription>
+          Start empty in the remote workspace, or copy a local folder into it.
+        </ModalDescription>
+        <div className="mt-4 grid gap-2">
+          <TextInput
+            value={projectName}
+            disabled={busy}
+            placeholder="Project name"
+            onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void newEmptyRemoteProject();
+              }
+            }}
+          />
+          <Button
+            className="justify-start"
+            disabled={busy}
+            icon={<Plus />}
+            onClick={() => void newEmptyRemoteProject()}
+          >
+            New empty remote project
+          </Button>
+          <Button
+            className="justify-start"
+            disabled={busy}
+            icon={<FolderOpen />}
+            onClick={() => void openProject()}
+          >
+            Copy local folder
+          </Button>
+        </div>
+        <ModalFooter>
+          <ModalClose asChild>
+            <Button disabled={busy} variant="ghost">
+              Cancel
+            </Button>
+          </ModalClose>
+        </ModalFooter>
+      </Modal>
     </PanelShell>
+  );
+}
+
+function ProjectGroupHeader({
+  label,
+  count,
+  collapsed,
+  onToggle,
+}: {
+  label: string;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const Icon = collapsed ? ChevronRight : ChevronDown;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="sticky top-0 z-10 flex h-7 w-full items-center gap-1.5 bg-surface px-3 text-left text-[10px] font-medium uppercase tracking-wider text-ink-mute hover:bg-raised/60"
+    >
+      <Icon className="size-3 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="shrink-0 tabular-nums">{count}</span>
+    </button>
+  );
+}
+
+function RailSection({
+  title,
+  className,
+  onCreate,
+  children,
+}: {
+  title: string;
+  className?: string;
+  onCreate: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <section className={cx("min-h-0 flex-1 overflow-y-auto", className)}>
+      <div className="sticky top-0 z-20 flex h-8 items-center justify-between bg-surface px-3 text-[10px] font-semibold uppercase tracking-wider text-ink-mute">
+        <span>{title}</span>
+        <IconButton
+          label={`New ${title.toLowerCase()}`}
+          size="sm"
+          onClick={onCreate}
+        >
+          <Plus />
+        </IconButton>
+      </div>
+      {children}
+    </section>
   );
 }

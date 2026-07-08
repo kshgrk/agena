@@ -1,5 +1,5 @@
 // M1-R2 (§8.3 / §14 M1): verify DefaultResourceLoader gives us extension
-// discovery control — the adapter's contained loader must load ZERO filesystem
+// discovery control — the adapter's contained loader must load no filesystem
 // extensions even when both <piDir>/extensions and <workspace>/.pi/extensions
 // contain extension files. Offline: pure filesystem work, no API key.
 //
@@ -52,10 +52,12 @@ it("M1-R2: contained loader loads no filesystem extensions", async () => {
     open.getExtensions().extensions.length + open.getExtensions().errors.length;
   expect(discovered).toBeGreaterThan(0);
 
-  // The adapter's configuration loads nothing from the filesystem.
+  // The adapter's configuration loads only its bundled session-name extension.
   const contained = containedResourceLoader(cwd, agentDir);
   await contained.reload();
-  expect(contained.getExtensions().extensions).toEqual([]);
+  expect(contained.getExtensions().extensions.map((e) => e.path)).toEqual([
+    "<inline:1>",
+  ]);
   expect(contained.getExtensions().errors).toEqual([]);
   expect(contained.getSkills().skills).toEqual([]);
 });

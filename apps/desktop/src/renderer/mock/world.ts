@@ -186,6 +186,10 @@ export class World {
       ...s.summary,
       lastSeq: event.seq,
       updatedAt: event.createdAt,
+      ...(type === "session.title.changed" &&
+      typeof (payload as { title?: unknown }).title === "string"
+        ? { title: (payload as { title: string }).title }
+        : {}),
     };
     if (s.subscribed) this.emit({ events: [{ event, replayed: false }] });
     return event;

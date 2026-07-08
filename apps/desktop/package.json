@@ -6,7 +6,8 @@
   "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite",
-    "app": "electron .",
+    "app": "node scripts/app-dev.mjs",
+    "app:electron": "electron .",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"

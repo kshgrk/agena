@@ -151,6 +151,7 @@ export type RuntimeEvent =
     }
   | { type: "model-changed"; from?: ModelRef; to: ModelRef }
   | { type: "thinking-level-changed"; from: string; to: string }
+  | { type: "session-title-changed"; title: string }
   | {
       type: "approval-requested";
       approval: ApprovalRequested;

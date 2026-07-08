@@ -173,6 +173,7 @@ export type AgenaBridge = {
 
   // HTTP
   createSession(input?: Partial<CreateSessionRequest>): Promise<string>;
+  createProject(name: string): Promise<OpenedProject>;
   listSessionSummaries(filters?: ListSessionsQuery): Promise<SessionSummary[]>;
   updateSessionStatus(sessionId: string, status: SessionStatus): Promise<void>;
   readEvents(

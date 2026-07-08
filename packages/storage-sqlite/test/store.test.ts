@@ -308,6 +308,42 @@ test("rebuildProjections recreates byte-identical message rows from the event lo
   expect(rows(path, "messages")).toEqual(before);
 });
 
+test("rebuildProjections restores generated session titles", async () => {
+  const path = dbPath();
+  let store = new SqliteEventStore(path);
+  const session = await store.createSession({
+    workspaceId: "ws-1",
+    title: "Initial title",
+  });
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "session.title.changed",
+        v: 1,
+        source: pi,
+        payload: { title: "Generated session name" },
+      },
+    ],
+  });
+  await expect(store.getSession(session.sessionId)).resolves.toMatchObject({
+    title: "Generated session name",
+  });
+  store.close();
+
+  exec(path, "UPDATE sessions SET title = 'stale title'");
+  store = new SqliteEventStore(path);
+  await expect(store.rebuildProjections()).resolves.toMatchObject({
+    sessions: 1,
+    events: 2,
+  });
+  await expect(store.getSession(session.sessionId)).resolves.toMatchObject({
+    title: "Generated session name",
+  });
+  store.close();
+});
+
 test("search is project-filtered and rebuild restores identical FTS hits", async () => {
   const path = dbPath();
   let store = new SqliteEventStore(path);

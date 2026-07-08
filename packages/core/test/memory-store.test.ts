@@ -158,6 +158,31 @@ test("filters project and global sessions", async () => {
   });
 });
 
+test("session title changes update the in-memory session projection", async () => {
+  const store = new InMemoryEventStore();
+  const session = await store.createSession({
+    workspaceId: "ws-1",
+    title: "Initial title",
+  });
+
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "session.title.changed",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: { title: "Generated session name" },
+      },
+    ],
+  });
+
+  await expect(store.getSession(session.sessionId)).resolves.toMatchObject({
+    title: "Generated session name",
+  });
+});
+
 test("lists pending approvals as requested minus terminal sibling", async () => {
   const store = new InMemoryEventStore();
   const a = await store.createSession({

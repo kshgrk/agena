@@ -196,6 +196,12 @@ export class InMemoryEventStore implements EventStore {
     state.events.push(...events);
     state.record.lastSeq = seq;
     state.record.updatedAt = now;
+    for (const event of events) {
+      if (event.type === "session.title.changed") {
+        const title = (event.payload as { title?: unknown }).title;
+        if (typeof title === "string") state.record.title = title;
+      }
+    }
 
     const batch = { sessionId: input.sessionId, events, lastSeq: seq };
     for (const listener of this.#listeners) {

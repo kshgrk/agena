@@ -1,9 +1,20 @@
 // Real AgenaBridge host: @agena/client lives HERE (main process, D-INV-2 —
 // the token never enters the renderer). Electron's Node (≥22.18) type-strips
 // the workspace .ts imports directly; no bundle step.
-import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  opendir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { AgenaClient, parsePtyExit, ulid } from "@agena/client";
 import { EMPTY_PERSISTED } from "../src/shared/bridge.ts";
 
@@ -183,43 +194,35 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
     return client;
   };
 
+  const createProject = async (name) => {
+    const project = await need().createProject(name);
+    return { ...project, fileCount: 0 };
+  };
+
   // ---- open project: pick (main.mjs supplies) + copy INTO the workspace ------
-  // The protocol path is POST /v1/files/upload?format=tar (M5); until the
-  // daemon serves it we tar-pipe through docker for LOCAL containers.
-  // ponytail: docker fallback is local-only by nature; the cloud path arrives
-  // with the upload route — same bridge method, swapped transport.
   const openProjectFolder = async (pickFolder) => {
     const src = await pickFolder();
     if (!src) return null;
     const name = (
       src.replace(/\/+$/, "").split("/").pop() ?? "project"
     ).replace(/[^A-Za-z0-9._-]+/g, "-");
-    const dest = `/workspace/${name}`;
-    const container = await dockerContainerForUrl(url);
-    if (!container) {
-      const err = new Error(
-        "cannot copy into the workspace: daemon has no files-upload route yet and no local docker container was found for it",
+    const project = await need().createProject(name);
+    const tar = await tarFolder(src);
+    let uploaded;
+    try {
+      uploaded = await need().uploadFiles(
+        { path: project.projectRoot, format: "tar" },
+        tar.body,
       );
-      err.code = "NOT_IMPLEMENTED";
+    } catch (err) {
+      tar.child.kill();
       throw err;
+    } finally {
+      await tar.cleanup();
     }
-    // COPYFILE_DISABLE stops macOS bsdtar emitting AppleDouble ._* entries
-    await sh(
-      `COPYFILE_DISABLE=1 tar -C ${q(src)} --exclude=node_modules --exclude=.git ` +
-        `--exclude=dist --exclude=build --exclude=.next --exclude=.DS_Store ` +
-        `--exclude='._*' -cf - . | ` +
-        `docker exec -i ${q(container)} sh -c 'mkdir -p ${dest} && tar -xf - -C ${dest}'`,
-    );
-    const out = await sh(
-      `docker exec ${q(container)} sh -c 'find ${dest} -type f | wc -l'`,
-    );
     return {
-      name,
-      // ponytail: client-side projectId slug until daemon-side registration (M4)
-      projectId: `prj_${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-      projectRoot: dest,
-      cwd: dest,
-      fileCount: Number.parseInt(out.trim(), 10) || 0,
+      ...project,
+      fileCount: uploaded.fileCount,
     };
   };
 
@@ -308,6 +311,8 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
         return need().compact(args[0]);
       case "createSession":
         return need().createSession(args[0]);
+      case "createProject":
+        return createProject(args[0]);
       case "listSessionSummaries":
         return need().listSessionSummaries(args[0] ?? {});
       case "updateSessionStatus":
@@ -361,48 +366,114 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
 
 // ---- helpers -------------------------------------------------------------------
 
-const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-
-function sh(cmd) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("/bin/sh", ["-c", cmd], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    let errOut = "";
-    child.stdout.on("data", (d) => {
-      out += d;
-    });
-    child.stderr.on("data", (d) => {
-      errOut += d;
-    });
-    child.on("close", (code) => {
-      if (code === 0) resolve(out);
-      else {
-        const err = new Error(errOut.trim() || `command failed (${code})`);
-        err.code = "INTERNAL";
-        reject(err);
-      }
-    });
-  });
+async function tarFolder(src) {
+  const tmp = await mkdtemp(join(tmpdir(), "agena-upload-"));
+  const archive = join(tmp, "upload.tar");
+  await pipeline(Readable.from(tarStream(src)), createWriteStream(archive));
+  const body = createReadStream(archive);
+  return {
+    child: {
+      kill() {
+        body.destroy(new Error("upload cancelled"));
+      },
+    },
+    body,
+    cleanup: () => rm(tmp, { recursive: true, force: true }),
+  };
 }
 
-/** Find the local docker container publishing the daemon's host port. */
-async function dockerContainerForUrl(url) {
-  let port;
-  try {
-    port = new URL(url).port || "80";
-  } catch {
-    return null;
-  }
-  try {
-    const out = await sh(`docker ps --format '{{.Names}}\t{{.Ports}}'`);
-    for (const line of out.trim().split("\n")) {
-      const [name, ports = ""] = line.split("\t");
-      if (name && ports.includes(`:${port}->`)) return name;
+const SKIPPED_UPLOAD_NAMES = new Set([
+  "node_modules",
+  ".venv",
+  "venv",
+  ".git",
+  ".cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".turbo",
+  "dist",
+  "build",
+  ".build",
+  ".next",
+  "coverage",
+  "__pycache__",
+  ".DS_Store",
+]);
+
+async function* tarStream(root) {
+  for await (const file of walkFiles(root)) {
+    const info = await lstat(file.absolute);
+    if (!info.isFile()) continue;
+    yield tarHeader(file.relative, info.size, info.mode, info.mtime);
+    if (info.size > 0) {
+      yield* createReadStream(file.absolute, { start: 0, end: info.size - 1 });
     }
-  } catch {
-    // docker not available
+    const padding = (512 - (info.size % 512)) % 512;
+    if (padding) yield Buffer.alloc(padding);
   }
-  return null;
+  yield Buffer.alloc(1024);
+}
+
+async function* walkFiles(root, dir = ".") {
+  const handle = await opendir(join(root, dir));
+  for await (const entry of handle) {
+    if (SKIPPED_UPLOAD_NAMES.has(entry.name) || entry.name.startsWith("._")) {
+      continue;
+    }
+    const relative = dir === "." ? entry.name : join(dir, entry.name);
+    const absolute = join(root, relative);
+    if (entry.isDirectory()) {
+      yield* walkFiles(root, relative);
+    } else if (entry.isFile()) {
+      yield { absolute, relative: relative.replaceAll("\\", "/") };
+    }
+  }
+}
+
+function tarHeader(path, size, mode, mtime) {
+  const { name, prefix } = splitTarPath(path);
+  const header = Buffer.alloc(512);
+  writeString(header, 0, 100, name);
+  writeOctal(header, 100, 8, mode & 0o777);
+  writeOctal(header, 108, 8, 0);
+  writeOctal(header, 116, 8, 0);
+  writeOctal(header, 124, 12, size);
+  writeOctal(header, 136, 12, Math.floor(mtime.getTime() / 1000));
+  header.fill(0x20, 148, 156);
+  header[156] = "0".charCodeAt(0);
+  writeString(header, 257, 6, "ustar");
+  writeString(header, 263, 2, "00");
+  writeString(header, 345, 155, prefix);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, "0").slice(-6), 148, 6);
+  header[154] = 0;
+  header[155] = 0x20;
+  return header;
+}
+
+function splitTarPath(path) {
+  if (Buffer.byteLength(path) <= 100) return { name: path, prefix: "" };
+  const parts = path.split("/");
+  for (let i = parts.length - 1; i > 0; i -= 1) {
+    const prefix = parts.slice(0, i).join("/");
+    const name = parts.slice(i).join("/");
+    if (Buffer.byteLength(prefix) <= 155 && Buffer.byteLength(name) <= 100) {
+      return { name, prefix };
+    }
+  }
+  throw new Error(`path too long to upload: ${path}`);
+}
+
+function writeString(header, offset, length, value) {
+  header.write(value, offset, length, "utf8");
+}
+
+function writeOctal(header, offset, length, value) {
+  const text = Math.trunc(value)
+    .toString(8)
+    .padStart(length - 1, "0")
+    .slice(-(length - 1));
+  header.write(text, offset, length - 1, "ascii");
+  header[offset + length - 1] = 0;
 }

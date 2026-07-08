@@ -5,11 +5,21 @@
 
 import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
-import { createReadStream, realpathSync } from "node:fs";
-import { lstat, readdir, readFile, stat } from "node:fs/promises";
+import { createReadStream, createWriteStream, realpathSync } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import type { Server } from "node:http";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type {
   ApprovalQueryStore,
   ClosableStore,
@@ -31,6 +41,7 @@ import {
 } from "@agena/core";
 import {
   type CreateSessionRequest,
+  createProjectRequestSchema,
   createPtyRequestSchema,
   createSessionRequestSchema,
   createSnapshotRequestSchema,
@@ -38,6 +49,7 @@ import {
   type FileEntry,
   fileArchiveQuerySchema,
   fileContentQuerySchema,
+  fileUploadQuerySchema,
   type ListSessionsQuery,
   listApprovalsQuerySchema,
   listFilesQuerySchema,
@@ -141,6 +153,44 @@ async function workspaceDirectory(
 }
 
 const EXTENSION_NAME_RE = /^[a-z0-9_]{1,64}$/;
+const PROJECT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function projectSlug(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 64);
+  if (!slug || !PROJECT_NAME_RE.test(slug)) throw new Error("INVALID_PROJECT");
+  return slug;
+}
+
+function projectIdFor(name: string): string {
+  return `prj_${name.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+}
+
+async function createProject(workspaceDir: string, name: string) {
+  const slug = projectSlug(name);
+  const absolute = await resolveWorkspacePath(workspaceDir, slug, {
+    forWrite: true,
+  });
+  try {
+    const info = await lstat(absolute);
+    if (!info.isDirectory()) throw new Error("PROJECT_EXISTS");
+    if ((await readdir(absolute)).length > 0) throw new Error("PROJECT_EXISTS");
+  } catch (err) {
+    const code = err instanceof Error ? (err as { code?: string }).code : "";
+    if (code !== "ENOENT") throw err;
+  }
+  await mkdir(absolute, { recursive: true });
+  return {
+    name: slug,
+    projectId: projectIdFor(slug),
+    projectRoot: slug,
+    cwd: slug,
+  };
+}
 
 async function discoverAgena(workspaceDir: string): Promise<{
   entries: DiscoveryEntry[];
@@ -316,6 +366,30 @@ export async function startDaemon(
       discovery: await discoverAgena(config.workspaceDir),
     }),
   );
+  app.post("/v1/projects", async (c) => {
+    const parsed = createProjectRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid project create request",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      return c.json(
+        await createProject(config.workspaceDir, parsed.data.name),
+        201,
+      );
+    } catch (err) {
+      return projectRouteError(c, err);
+    }
+  });
   app.post("/v1/sessions", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const parsed = createSessionRequestSchema.safeParse(body);
@@ -554,6 +628,28 @@ export async function startDaemon(
       return c.body(Readable.toWeb(tar.stdout) as ReadableStream);
     } catch (err) {
       return fileRouteError(c, err);
+    }
+  });
+  app.post("/v1/files/upload", async (c) => {
+    const parsed = fileUploadQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid file upload query",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      return c.json(
+        await uploadTar(config.workspaceDir, parsed.data.path, c.req.raw.body),
+        201,
+      );
+    } catch (err) {
+      return uploadRouteError(c, err);
     }
   });
   app.get("/v1/sessions/:id/events", async (c) => {
@@ -856,6 +952,96 @@ function closableStore(store: EventStore): ClosableStore | null {
   return "close" in store ? (store as EventStore & ClosableStore) : null;
 }
 
+async function uploadTar(
+  workspaceDir: string,
+  requested: string,
+  body: ReadableStream<Uint8Array> | null,
+): Promise<{ path: string; fileCount: number }> {
+  if (!body) throw new Error("EMPTY_UPLOAD");
+  if (isAbsolute(requested)) throw new PathViolation("path_escapes_workspace");
+  const target = await resolveWorkspacePath(workspaceDir, requested, {
+    forWrite: true,
+  });
+  const root = await resolveWorkspacePath(workspaceDir, ".");
+  const rel = relative(root, target) || ".";
+  const tmp = await mkdtemp(join(root, ".agena-upload-"));
+  const archive = join(tmp, "upload.tar");
+  const extractDir = join(tmp, "content");
+  try {
+    await pipeline(
+      Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]),
+      createWriteStream(archive),
+    );
+    const entries = (await execOut("tar", ["-tf", archive]))
+      .split("\n")
+      .filter(Boolean);
+    if (entries.some(unsafeTarEntry)) {
+      throw new PathViolation("path_escapes_workspace");
+    }
+    await rejectTarLinks(archive);
+    await mkdir(extractDir);
+    await execOut("tar", ["-xf", archive, "-C", extractDir]);
+    const fileCount = await countExtractedFiles(extractDir);
+    await ensureReplaceableDirectory(target);
+    await mkdir(dirname(target), { recursive: true });
+    await rename(extractDir, target);
+    return { path: rel, fileCount };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+function unsafeTarEntry(entry: string): boolean {
+  const cleaned = entry.replace(/^\.\//, "");
+  if (!cleaned || cleaned === ".") return false;
+  return (
+    cleaned.includes("\0") ||
+    cleaned.startsWith("/") ||
+    cleaned.split("/").includes("..")
+  );
+}
+
+async function ensureReplaceableDirectory(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (!info.isDirectory()) throw new Error("TARGET_EXISTS");
+    if ((await readdir(path)).length > 0) throw new Error("TARGET_EXISTS");
+    await rm(path, { recursive: true, force: true });
+  } catch (err) {
+    const code = err instanceof Error ? (err as { code?: string }).code : "";
+    if (code !== "ENOENT") throw err;
+  }
+}
+
+async function countExtractedFiles(dir: string): Promise<number> {
+  let count = 0;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isSymbolicLink()) throw new Error("UNSAFE_TAR");
+    if (entry.isDirectory()) count += await countExtractedFiles(path);
+    else if (entry.isFile()) count += 1;
+  }
+  return count;
+}
+
+function execOut(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.stderr.on("data", (d) => {
+      err += d;
+    });
+    child.on("close", (code) => {
+      if (code === 0) resolve(out);
+      else reject(new Error(err.trim() || `${cmd} failed (${code})`));
+    });
+  });
+}
+
 async function listWorkspaceFiles(workspaceDir: string, requested: string) {
   const dir = await resolveWorkspacePath(workspaceDir, requested);
   const info = await stat(dir);
@@ -918,6 +1104,95 @@ function fileRouteError(c: Context, err: unknown): Response {
   log("error", "file route failed", { err: message });
   return c.json(
     { code: "INTERNAL", message: "file route failed", retryable: false },
+    500,
+  );
+}
+
+async function rejectTarLinks(archive: string): Promise<void> {
+  const verbose = (await execOut("tar", ["-tvf", archive]))
+    .split("\n")
+    .filter(Boolean);
+  if (verbose.some((line) => line[0] === "l" || line[0] === "h")) {
+    throw new Error("UNSAFE_TAR");
+  }
+}
+
+function projectRouteError(c: Context, err: unknown): Response {
+  if (err instanceof PathViolation) {
+    return c.json(
+      {
+        code: "PATH_ESCAPES_WORKSPACE",
+        message: "project path must stay inside workspace",
+        retryable: false,
+        details: { reason: err.reason },
+      },
+      403,
+    );
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  if (message === "INVALID_PROJECT") {
+    return c.json(
+      {
+        code: "INVALID_PAYLOAD",
+        message: "project name must contain letters or numbers",
+        retryable: false,
+      },
+      400,
+    );
+  }
+  if (message === "PROJECT_EXISTS") {
+    return c.json(
+      {
+        code: "PROJECT_EXISTS",
+        message: "project path already exists and is not empty",
+        retryable: false,
+      },
+      409,
+    );
+  }
+  log("error", "project route failed", { err: message });
+  return c.json(
+    { code: "INTERNAL", message: "project route failed", retryable: false },
+    500,
+  );
+}
+
+function uploadRouteError(c: Context, err: unknown): Response {
+  if (err instanceof PathViolation) return fileRouteError(c, err);
+  const message = err instanceof Error ? err.message : String(err);
+  if (message === "UNSAFE_TAR") {
+    return c.json(
+      {
+        code: "INVALID_PAYLOAD",
+        message: "tar archive contains unsafe entries",
+        retryable: false,
+      },
+      400,
+    );
+  }
+  if (message === "EMPTY_UPLOAD") {
+    return c.json(
+      {
+        code: "INVALID_PAYLOAD",
+        message: "upload body is empty",
+        retryable: false,
+      },
+      400,
+    );
+  }
+  if (message === "TARGET_EXISTS") {
+    return c.json(
+      {
+        code: "TARGET_EXISTS",
+        message: "upload target already exists and is not empty",
+        retryable: false,
+      },
+      409,
+    );
+  }
+  log("error", "file upload failed", { err: message });
+  return c.json(
+    { code: "INTERNAL", message: "file upload failed", retryable: false },
     500,
   );
 }

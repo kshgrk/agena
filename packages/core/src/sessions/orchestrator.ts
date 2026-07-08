@@ -524,6 +524,11 @@ export class SessionOrchestrator {
         });
         s.thinkingLevel = ev.to as ThinkingLevel;
         return;
+      case "session-title-changed":
+        await this.#appendRuntime(s, "session.title.changed", {
+          title: ev.title,
+        });
+        return;
       case "approval-requested":
         await this.#appendRuntime(s, "approval.requested", ev.approval);
         return;
@@ -605,7 +610,15 @@ export class SessionOrchestrator {
       branchId: s.record.rootBranchId,
       events,
     });
-    s.lastSeq = result.lastSeq;
+    s.lastSeq = Math.max(s.lastSeq, result.lastSeq);
+    for (const event of result.events) {
+      if (event.type === "session.title.changed") {
+        const title = (event.payload as { title?: unknown }).title;
+        if (typeof title === "string") {
+          s.record = { ...s.record, title, updatedAt: event.createdAt };
+        }
+      }
+    }
     return result;
   }
 

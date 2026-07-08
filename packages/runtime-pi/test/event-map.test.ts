@@ -345,3 +345,20 @@ it("keeps the run open across agent_end with willRetry", () => {
     mapPiEvent(state, { type: "agent_end", messages: [], willRetry: false }),
   ).toEqual([{ type: "run-completed", runId: "r1" }]);
 });
+
+it("maps Pi session name changes into runtime title events", () => {
+  const state = createMapperState(() => "id");
+
+  expect(
+    mapPiEvent(state, {
+      type: "session_info_changed",
+      name: "  Fix Auth Flow  ",
+    }),
+  ).toEqual([
+    { type: "session-title-changed", title: "Fix Auth Flow" },
+  ] satisfies RuntimeEvent[]);
+
+  expect(
+    mapPiEvent(state, { type: "session_info_changed", name: "   " }),
+  ).toEqual([]);
+});

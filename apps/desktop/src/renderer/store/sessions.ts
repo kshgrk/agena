@@ -12,6 +12,7 @@ export type SessionsStore = SessionsState & {
   /** Also persists lastActiveSessionId (fire-and-forget). */
   setActive: (sessionId: string | null) => void;
   setStatus: (sessionId: string, status: SessionStatus) => void;
+  setTitle: (sessionId: string, title: string) => void;
   markLost: (sessionId: string) => void;
   /** ingest-internal: bump lastSeq/updatedAt when durable events arrive. */
   bump: (sessionId: string, seq: number, at: string) => void;
@@ -62,6 +63,12 @@ export const useSessions = create<SessionsStore>((set) => ({
       const cur = s.byId[sessionId];
       if (!cur || cur.status === status) return s;
       return { byId: { ...s.byId, [sessionId]: { ...cur, status } } };
+    }),
+  setTitle: (sessionId, title) =>
+    set((s) => {
+      const cur = s.byId[sessionId];
+      if (!cur || cur.title === title) return s;
+      return { byId: { ...s.byId, [sessionId]: { ...cur, title } } };
     }),
   markLost: (sessionId) =>
     set((s) =>

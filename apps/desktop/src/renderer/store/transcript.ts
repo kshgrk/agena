@@ -334,6 +334,7 @@ function reduceEvent(d: Draft, event: AgenaEvent): void {
     // session/run/snapshot lifecycle stays out of the block list; the timeline
     // reads rawEvents.
     case "session.created":
+    case "session.title.changed":
     case "run.started":
     case "run.completed":
     case "run.aborted":

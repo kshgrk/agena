@@ -248,6 +248,31 @@ export const fileArchiveQuerySchema = z.object({
 });
 export type FileArchiveQuery = z.infer<typeof fileArchiveQuerySchema>;
 
+export const createProjectRequestSchema = z.object({
+  name: z.string().min(1),
+});
+export type CreateProjectRequest = z.infer<typeof createProjectRequestSchema>;
+
+export const projectResponseSchema = z.object({
+  name: z.string().min(1),
+  projectId: z.string().min(1),
+  projectRoot: z.string().min(1),
+  cwd: z.string().min(1),
+});
+export type ProjectResponse = z.infer<typeof projectResponseSchema>;
+
+export const fileUploadQuerySchema = z.object({
+  path: z.string().min(1),
+  format: z.literal("tar"),
+});
+export type FileUploadQuery = z.infer<typeof fileUploadQuerySchema>;
+
+export const fileUploadResponseSchema = z.object({
+  path: z.string().min(1),
+  fileCount: z.number().int().nonnegative(),
+});
+export type FileUploadResponse = z.infer<typeof fileUploadResponseSchema>;
+
 export const discoveryEntrySchema = z.object({
   kind: z.enum(["tool", "skill", "hook"]),
   name: z.string().min(1),
@@ -364,6 +389,18 @@ export const PTY_HTTP_ROUTES = {
     method: "GET",
     path: "/v1/files/archive",
     query: fileArchiveQuerySchema,
+  },
+  createProject: {
+    method: "POST",
+    path: "/v1/projects",
+    request: createProjectRequestSchema,
+    response: projectResponseSchema,
+  },
+  uploadFiles: {
+    method: "POST",
+    path: "/v1/files/upload",
+    query: fileUploadQuerySchema,
+    response: fileUploadResponseSchema,
   },
   diagnostics: {
     method: "GET",

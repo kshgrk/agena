@@ -419,6 +419,20 @@ export function createMockBridge(): AgenaBridge {
       return sessionId;
     },
 
+    async createProject(name: string): Promise<OpenedProject> {
+      requireConnected();
+      const clean = name.replace(/[^A-Za-z0-9._-]+/g, "-") || "project";
+      addWorkspaceFolder(clean, []);
+      const projectRoot = clean;
+      return {
+        name: clean,
+        projectId: `prj_${clean.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        projectRoot,
+        cwd: projectRoot,
+        fileCount: 0,
+      };
+    },
+
     async openProjectFolder(): Promise<OpenedProject | null> {
       requireConnected();
       // Pick: Finder via the dev shell, prompt in a plain browser. Copy: the
@@ -456,7 +470,7 @@ export function createMockBridge(): AgenaBridge {
         setTimeout(r, 300 + Math.min(files.length * 3, 1200)),
       );
       addWorkspaceFolder(name, files);
-      const projectRoot = `/workspace/${name}`;
+      const projectRoot = name;
       return {
         name,
         projectId: `prj_${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,

@@ -16,8 +16,9 @@ through the `AgenaBridge` contract on `window.agena`.
 ## Running
 
 ```sh
-pnpm dev        # Vite renderer on http://localhost:5199
-pnpm app        # Electron app; requires pnpm dev already running
+pnpm dev          # Vite renderer on http://localhost:5199
+pnpm app          # starts Vite, waits for it, then opens Electron
+pnpm app:electron # Electron only, for an already-running renderer
 ```
 
 In a bare browser `window.agena` is absent, so bootstrap dynamically imports

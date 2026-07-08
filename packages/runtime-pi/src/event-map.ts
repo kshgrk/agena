@@ -216,6 +216,10 @@ export function mapPiEvent(
           durationMs: 0,
         },
       ];
+    case "session_info_changed": {
+      const title = ev.name?.trim();
+      return title ? [{ type: "session-title-changed", title }] : [];
+    }
     default:
       return drop(state, ev.type);
   }

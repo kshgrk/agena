@@ -83,6 +83,14 @@ function routeApprovalEvent(event: AgenaEvent): void {
   }
 }
 
+function routeSessionEvent(event: AgenaEvent): void {
+  if (event.type !== "session.title.changed") return;
+  const title = (event.payload as { title?: unknown } | null)?.title;
+  if (typeof title === "string") {
+    useSessions.getState().setTitle(event.sessionId, title);
+  }
+}
+
 export function ingestBatch(batch: UiBatch): void {
   const transcripts = useTranscripts.getState();
   const sessions = useSessions.getState();
@@ -92,6 +100,7 @@ export function ingestBatch(batch: UiBatch): void {
     if (prev && event.seq <= prev.lastSeq) continue; // duplicate delivery
     transcripts.update(event.sessionId, (t) => applyEvent(t, event, replayed));
     routeApprovalEvent(event);
+    routeSessionEvent(event);
     sessions.bump(event.sessionId, event.seq, event.createdAt);
   }
 

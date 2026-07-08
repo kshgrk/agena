@@ -51,6 +51,11 @@ export const sessionCreatedSchema = z
   });
 export type SessionCreated = z.infer<typeof sessionCreatedSchema>;
 
+export const sessionTitleChangedSchema = z.object({
+  title: z.string().min(1).max(80),
+});
+export type SessionTitleChanged = z.infer<typeof sessionTitleChangedSchema>;
+
 export const messageUserCreatedSchema = z.object({
   messageId: z.string().min(1),
   content: z.array(contentBlockSchema),
@@ -324,6 +329,7 @@ export type SnapshotDeleted = z.infer<typeof snapshotDeletedSchema>;
 // not listed here (P12).
 export const durableEventSchemas = {
   "session.created": sessionCreatedSchema,
+  "session.title.changed": sessionTitleChangedSchema,
   "message.user.created": messageUserCreatedSchema,
   "message.runtime.created": messageRuntimeCreatedSchema,
   "message.assistant.started": messageAssistantStartedSchema,
@@ -382,6 +388,12 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("session.created"),
     payload: sessionCreatedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("session.title.changed"),
+    payload: sessionTitleChangedSchema,
   }),
   z.object({
     ...eventBase,

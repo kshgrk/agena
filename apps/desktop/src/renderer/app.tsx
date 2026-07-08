@@ -26,7 +26,6 @@ import { SessionsRail } from "./features/sessions/sessions-rail.tsx";
 import { SnapshotsPane } from "./features/snapshots/snapshots-pane.tsx";
 import { StatusBar } from "./features/statusbar/status-bar.tsx";
 import { TerminalDock } from "./features/terminal/terminal-dock.tsx";
-import { TimelineStrip } from "./features/timeline/timeline-strip.tsx";
 import { TranscriptPane } from "./features/transcript/transcript-pane.tsx";
 import { getBridge } from "./lib/bridge.ts";
 import { connectAndBootstrap } from "./lib/connect.ts";
@@ -73,7 +72,6 @@ function SessionWorkspace() {
   }
   return (
     <PanelShell key={activeSessionId} className="bg-app">
-      <TimelineStrip sessionId={activeSessionId} />
       <div className="min-h-0 flex-1">
         <TranscriptPane sessionId={activeSessionId} />
       </div>

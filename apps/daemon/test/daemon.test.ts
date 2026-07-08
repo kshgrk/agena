@@ -1,6 +1,7 @@
 // Suites 6 & 7, M1 subset (§13.5): real WS against an ephemeral port with the
 // FakeRuntimeAdapter — zero model calls (P16).
 
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -275,6 +276,42 @@ function rawPty(data: RawData): string {
       : Buffer.from(data).toString("utf8");
 }
 
+function tarFile(name: string, content: string): Blob {
+  const data = Buffer.from(content);
+  const header = Buffer.alloc(512);
+  header.write(name, 0, "utf8");
+  writeTarOctal(header, 100, 8, 0o100644);
+  writeTarOctal(header, 108, 8, 0);
+  writeTarOctal(header, 116, 8, 0);
+  writeTarOctal(header, 124, 12, data.length);
+  writeTarOctal(header, 136, 12, 0);
+  header.fill(0x20, 148, 156);
+  header[156] = "0".charCodeAt(0);
+  header.write("ustar", 257, "ascii");
+  header.write("00", 263, "ascii");
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
+  header[154] = 0;
+  header[155] = 0x20;
+  const tar = Buffer.concat([
+    header,
+    data,
+    Buffer.alloc((512 - (data.length % 512)) % 512),
+    Buffer.alloc(1024),
+  ]);
+  return new Blob([Uint8Array.from(tar)], { type: "application/x-tar" });
+}
+
+function writeTarOctal(
+  header: Buffer,
+  offset: number,
+  length: number,
+  value: number,
+): void {
+  header.write(value.toString(8).padStart(length - 1, "0"), offset, length - 1);
+  header[offset + length - 1] = 0;
+}
+
 test("bad or missing token ⇒ raw HTTP 401 upgrade rejection; /health stays open", async () => {
   const daemon = await boot();
   expect(
@@ -479,6 +516,64 @@ test("GET /v1/files lists and reads workspace files, rejecting escapes", async (
   );
   expect(escaped.status).toBe(403);
   expect(await escaped.json()).toMatchObject({
+    code: "PATH_ESCAPES_WORKSPACE",
+  });
+});
+
+test("POST /v1/projects creates workspace projects", async () => {
+  const workspace = stateDir();
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const res = await fetch(`http://127.0.0.1:${daemon.port}/v1/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ name: "My App" }),
+  });
+  expect(res.status).toBe(201);
+  expect(await res.json()).toEqual({
+    name: "my-app",
+    projectId: "prj_my-app",
+    projectRoot: "my-app",
+    cwd: "my-app",
+  });
+  expect(existsSync(join(workspace, "my-app"))).toBe(true);
+});
+
+test("POST /v1/files/upload extracts safe tar and rejects unsafe entries", async () => {
+  const workspace = stateDir();
+  const src = stateDir();
+  mkdirSync(join(src, "nested"), { recursive: true });
+  writeFileSync(join(src, "nested", "a.txt"), "hello");
+  const archive = join(stateDir(), "safe.tar");
+  execFileSync("tar", ["-cf", archive, "-C", src, "."]);
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    workspaceDir: workspace,
+  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/x-tar",
+  };
+
+  const uploaded = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/files/upload?path=my-app&format=tar`,
+    { method: "POST", headers, body: new Blob([readFileSync(archive)]) },
+  );
+  expect(uploaded.status).toBe(201);
+  expect(await uploaded.json()).toEqual({ path: "my-app", fileCount: 1 });
+  expect(
+    readFileSync(join(workspace, "my-app", "nested", "a.txt"), "utf8"),
+  ).toBe("hello");
+
+  const rejected = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/files/upload?path=bad&format=tar`,
+    { method: "POST", headers, body: tarFile("../evil.txt", "nope") },
+  );
+  expect(rejected.status).toBe(403);
+  expect(await rejected.json()).toMatchObject({
     code: "PATH_ESCAPES_WORKSPACE",
   });
 });
