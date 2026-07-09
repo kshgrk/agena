@@ -1,9 +1,28 @@
 import { DropdownMenu } from "radix-ui";
 import type { ComponentProps } from "react";
+import { useUi } from "../store/ui.ts";
 import { cx } from "./cx.ts";
 
-/** Root: <Menu><MenuTrigger>…</MenuTrigger><MenuContent>…</MenuContent></Menu> */
-export const Menu = DropdownMenu.Root;
+/** Root: <Menu><MenuTrigger>…</MenuTrigger><MenuContent>…</MenuContent></Menu>
+ * Bumps the overlay counter while open so the native browser view hides under
+ * it (D-INV-3). ponytail: relies on Radix's balanced open→close onOpenChange;
+ * a menu unmounted while open won't decrement — acceptable for transient menus. */
+export function Menu({
+  onOpenChange,
+  ...rest
+}: ComponentProps<typeof DropdownMenu.Root>) {
+  return (
+    <DropdownMenu.Root
+      onOpenChange={(open) => {
+        const ui = useUi.getState();
+        if (open) ui.enterOverlay();
+        else ui.exitOverlay();
+        onOpenChange?.(open);
+      }}
+      {...rest}
+    />
+  );
+}
 
 /** asChild by default — pass a Button/IconButton as the single child. */
 export function MenuTrigger(

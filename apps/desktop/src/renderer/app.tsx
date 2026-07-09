@@ -16,6 +16,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PersistedState } from "../shared/bridge.ts";
 import { ApprovalsHost } from "./features/approvals/approvals-host.tsx";
+import { BrowserPane, initBrowserStore } from "./features/browser/index.ts";
 import { Composer } from "./features/composer/composer.tsx";
 import { FilesPane } from "./features/files/files-pane.tsx";
 import { InspectorPane } from "./features/inspector/inspector-pane.tsx";
@@ -96,6 +97,8 @@ function panelNode(id: string): ReactNode {
       return <SessionWorkspace />;
     case "inspector":
       return <InspectorPane />;
+    case "browser":
+      return <BrowserPane />;
     case "terminal":
       return <TerminalDock />;
     case "files":
@@ -183,6 +186,26 @@ function applyInspector(api: DockviewApi, open: boolean): void {
   }
 }
 
+/** The embedded browser opens on demand in a wide right-side group (~640px so a
+ * real site is usable). Mirrors applyInspector's add/remove-and-activate. */
+function applyBrowser(api: DockviewApi, open: boolean): void {
+  const panel = api.getPanel("browser");
+  if (open && !panel) {
+    ensureTranscript(api);
+    const added = api.addPanel({
+      id: "browser",
+      component: "browser",
+      title: "Browser",
+      inactive: true,
+      initialWidth: 640,
+      position: { referencePanel: "transcript", direction: "right" },
+    });
+    if (!added.group.activePanel) added.api.setActive();
+  } else if (!open && panel) {
+    api.removePanel(panel);
+  }
+}
+
 /** Bump to discard persisted layouts whose defaults no longer apply. */
 const LAYOUT_VERSION = 2;
 
@@ -206,6 +229,9 @@ export function App({ persisted }: { persisted: PersistedState }) {
     const el = containerRef.current;
     if (!el) return;
     let disposed = false;
+
+    // Subscribe to native browser state + register browser commands (idempotent).
+    initBrowserStore();
 
     const api = createDockview(el, {
       theme: {
@@ -257,6 +283,7 @@ export function App({ persisted }: { persisted: PersistedState }) {
 
     // one-time store sync FROM the layout (both-ways contract, dockview side)
     useUi.getState().setInspectorOpen(api.getPanel("inspector") !== undefined);
+    useUi.getState().setBrowserOpen(api.getPanel("browser") !== undefined);
     useUi.getState().setTerminalOpen(dockGroup(api)?.api.isVisible ?? false);
 
     // dockview → store (tab close buttons)
@@ -269,6 +296,8 @@ export function App({ persisted }: { persisted: PersistedState }) {
         });
       } else if (panel.id === "inspector") {
         useUi.getState().setInspectorOpen(false);
+      } else if (panel.id === "browser") {
+        useUi.getState().setBrowserOpen(false);
       } else if (
         DOCK_IDS.includes(panel.id) &&
         !DOCK_IDS.some((id) => api.getPanel(id))
@@ -277,9 +306,9 @@ export function App({ persisted }: { persisted: PersistedState }) {
       }
     });
     const addSub = api.onDidAddPanel((panel) => {
-      if (!disposed && panel.id === "inspector") {
-        useUi.getState().setInspectorOpen(true);
-      }
+      if (disposed) return;
+      if (panel.id === "inspector") useUi.getState().setInspectorOpen(true);
+      else if (panel.id === "browser") useUi.getState().setBrowserOpen(true);
     });
 
     // store → dockview
@@ -287,6 +316,7 @@ export function App({ persisted }: { persisted: PersistedState }) {
       if (s.inspectorOpen !== prev.inspectorOpen) {
         applyInspector(api, s.inspectorOpen);
       }
+      if (s.browserOpen !== prev.browserOpen) applyBrowser(api, s.browserOpen);
       if (s.terminalOpen !== prev.terminalOpen) applyDock(api, s.terminalOpen);
     });
 

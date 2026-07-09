@@ -55,7 +55,12 @@ const samples: WireEnvelope[] = [
   {
     kind: "hello",
     protocolVersion: PROTOCOL_VERSION,
-    client: { name: "agena", version: "0.0.0", platform: "darwin" },
+    client: {
+      name: "agena",
+      version: "0.0.0",
+      platform: "darwin",
+      capabilities: ["visible_browser"],
+    },
     clientId: "01CLIENT",
   },
   {
@@ -106,6 +111,20 @@ const samples: WireEnvelope[] = [
   },
   { kind: "ping", ts: "2026-07-06T00:00:00.000Z" },
   { kind: "pong", ts: "2026-07-06T00:00:00.000Z" },
+  {
+    kind: "visibleBrowserRequest",
+    requestId: "01BROWSER",
+    action: { action: "read", sessionId: "01SESSION" },
+  },
+  {
+    kind: "visibleBrowserResponse",
+    requestId: "01BROWSER",
+    result: {
+      url: "https://example.com/",
+      title: "Example",
+      text: "Example Domain",
+    },
+  },
 ];
 
 describe("suite 1: registries", () => {

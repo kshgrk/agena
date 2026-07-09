@@ -2,6 +2,7 @@
 // dispatch with requestId ack/error, subscribe with the §6.3 buffer-then-splice
 // replay, and post-commit fanout registered on the store's onCommitted seam (§6.2).
 // ponytail later: unsubscribe and the remaining §5.4 commands.
+import { randomUUID } from "node:crypto";
 import type { EventStore, SessionOrchestrator } from "@agena/core";
 import { OrchestratorError } from "@agena/core";
 import type {
@@ -20,6 +21,8 @@ import type {
   SetThinkingLevelCmd,
   SteerCmd,
   SubscribeCmd,
+  VisibleBrowserAction,
+  VisibleBrowserResult,
   WireEnvelope,
 } from "@agena/protocol";
 import {
@@ -35,6 +38,7 @@ import {
   PING_INTERVAL_MS,
   PROTOCOL_VERSION,
   REQUEST_DEDUPE_TTL_MS,
+  VISIBLE_BROWSER_CAPABILITY,
   WS_CLOSE_CODES,
   WS_SUBPROTOCOL,
   wireEnvelopeSchema,
@@ -71,6 +75,7 @@ interface Subscription {
 interface Conn {
   ws: WebSocket;
   clientId: string | null; // null until hello; becomes EventSource.clientId (P3)
+  capabilities: Set<string>;
   subs: Map<string, Subscription>; // sessionId → subscription
   malformed: number;
   oversized: number;
@@ -84,6 +89,13 @@ interface Conn {
 
 type TerminalResponse = Extract<WireEnvelope, { kind: "ack" | "error" }>;
 type DedupeEntry = { response: TerminalResponse; expiresAt: number };
+type BrowserPending = {
+  resolve: (result: VisibleBrowserResult) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const VISIBLE_BROWSER_TIMEOUT_MS = 30_000;
 
 export class Gateway {
   readonly wss = new WebSocketServer({
@@ -96,6 +108,7 @@ export class Gateway {
   #conns = new Set<Conn>();
   #bySession = new Map<string, Set<Conn>>();
   #dedupe = new Map<string, DedupeEntry>();
+  #browserPending = new Map<string, BrowserPending>();
 
   constructor(store: EventStore, orchestrator: SessionOrchestrator) {
     this.#store = store;
@@ -118,10 +131,40 @@ export class Gateway {
     }
   };
 
+  requestVisibleBrowser = (
+    action: VisibleBrowserAction,
+  ): Promise<VisibleBrowserResult> => {
+    const conn = [...this.#conns].find(
+      (c) =>
+        c.clientId !== null &&
+        c.capabilities.has(VISIBLE_BROWSER_CAPABILITY) &&
+        c.ws.readyState === WebSocket.OPEN,
+    );
+    if (!conn) {
+      return Promise.reject(
+        new Error("visible browser unavailable: no desktop client connected"),
+      );
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#browserPending.delete(requestId);
+        reject(new Error("visible browser request timed out"));
+      }, VISIBLE_BROWSER_TIMEOUT_MS);
+      this.#browserPending.set(requestId, { resolve, reject, timer });
+      this.#send(conn, {
+        kind: "visibleBrowserRequest",
+        requestId,
+        action,
+      });
+    });
+  };
+
   connect(ws: WebSocket): void {
     const conn: Conn = {
       ws,
       clientId: null,
+      capabilities: new Set(),
       subs: new Map(),
       malformed: 0,
       oversized: 0,
@@ -197,6 +240,9 @@ export class Gateway {
       case "pong":
         conn.missedPongs = 0;
         return;
+      case "visibleBrowserResponse":
+        this.#handleVisibleBrowserResponse(env.data.requestId, env.data);
+        return;
       case "cmd":
         this.#dispatch(
           conn,
@@ -239,6 +285,7 @@ export class Gateway {
     if (conn.helloTimer) clearTimeout(conn.helloTimer);
     conn.helloTimer = null;
     conn.clientId = hello.data.clientId;
+    conn.capabilities = new Set(hello.data.client.capabilities ?? []);
     this.#send(conn, {
       kind: "welcome",
       protocolVersion: PROTOCOL_VERSION,
@@ -640,6 +687,25 @@ export class Gateway {
       if (set?.size === 0) this.#bySession.delete(sessionId);
     }
     this.#conns.delete(conn);
+  }
+
+  #handleVisibleBrowserResponse(
+    requestId: string,
+    env: Extract<WireEnvelope, { kind: "visibleBrowserResponse" }>,
+  ): void {
+    const pending = this.#browserPending.get(requestId);
+    if (!pending) return;
+    this.#browserPending.delete(requestId);
+    clearTimeout(pending.timer);
+    if (env.error) {
+      pending.reject(new Error(env.error.message));
+      return;
+    }
+    if (!env.result) {
+      pending.reject(new Error("visible browser response missing result"));
+      return;
+    }
+    pending.resolve(env.result);
   }
 }
 

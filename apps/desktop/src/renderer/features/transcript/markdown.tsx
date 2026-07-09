@@ -4,6 +4,7 @@ import { memo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock, InlineCode } from "../../ui/index.ts";
+import { openInAppBrowser } from "../browser/index.ts";
 
 const REMARK_PLUGINS = [remarkGfm];
 
@@ -16,7 +17,11 @@ const components: Components = {
       className="text-accent hover:underline"
       onClick={(e) => {
         e.preventDefault();
-        if (href) window.open(href, "_blank", "noopener");
+        if (!href) return;
+        // http/https/localhost → embedded pane; mailto:/tel:/etc. → OS handler.
+        if (!openInAppBrowser(href, "agent")) {
+          window.open(href, "_blank", "noopener");
+        }
       }}
     >
       {children}

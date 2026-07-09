@@ -11,6 +11,7 @@
     "@agena/core": "workspace:*",
     "@agena/protocol": "workspace:*",
     "@earendil-works/pi-ai": "0.80.3",
-    "@earendil-works/pi-coding-agent": "0.80.3"
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "typebox": "1.1.38"
   }
 }

@@ -94,6 +94,7 @@ function adaptPreload(p: AgenaPreload): AgenaBridge {
     get(_target, prop) {
       if (prop === "onBatch") return p.onBatch;
       if (prop === "onStatus") return p.onStatus;
+      if (prop === "onBrowserState") return p.onBrowserState;
       if (prop === "openPty") return openPty;
       if (typeof prop !== "string") return undefined;
       // never look callable for promise/serialization protocol probes — a

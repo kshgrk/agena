@@ -17,11 +17,39 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { AgenaClient, parsePtyExit, ulid } from "@agena/client";
 import { EMPTY_PERSISTED } from "../src/shared/bridge.ts";
+import { createBrowserHost } from "./browser-host.mjs";
+import { createTunnelPool, parseLocalPort } from "./tunnel.mjs";
 
 const FLUSH_MS = 16; // one renderer frame per UiBatch (§5.1 of docs/desktop_plan.md)
 
-export function createBridgeHost({ url, token, userData, broadcast }) {
+export function createBridgeHost({
+  url,
+  token,
+  userData,
+  broadcast,
+  getWindow,
+}) {
   let client = null;
+
+  // ---- embedded browser: tunnel pool + WebContentsView host -----------------
+  const tunnelPool = createTunnelPool({ url, token });
+  const browserHost = createBrowserHost({
+    getWindow: getWindow ?? (() => null),
+    broadcast,
+    partition: "persist:agena-browse",
+  });
+  const resolveBrowserUrl = async (rawUrl) => {
+    const port = parseLocalPort(rawUrl);
+    if (port === null) return rawUrl;
+    const local = await tunnelPool.ensureTunnel(port);
+    const u = new URL(rawUrl);
+    return `${local}${u.pathname}${u.search}${u.hash}`;
+  };
+  const openBrowserUrl = async (rawUrl) => {
+    const target = await resolveBrowserUrl(rawUrl);
+    await browserHost.open(target);
+    return target;
+  };
   let connectedInfo = null;
   const branchIds = new Map(); // sessionId → branchId (from subscribe acks)
 
@@ -170,6 +198,13 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
     client.onSessionLost = (sessionId) => {
       ensureBuf().lostSessions.push(sessionId);
       schedule();
+    };
+    client.onVisibleBrowserRequest = async (action) => {
+      if (action.action === "open") {
+        const target = await resolveBrowserUrl(action.url);
+        return browserHost.agentRequest({ ...action, url: target });
+      }
+      return browserHost.agentRequest(action);
     };
     client.onStatus = (state, detail) =>
       broadcast("agena:status", { state, detail });
@@ -371,6 +406,22 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
         return loadPersisted();
       case "savePersisted":
         return savePersisted(args[0] ?? {});
+      case "browserOpen": {
+        const rawUrl = args[0];
+        return openBrowserUrl(rawUrl);
+      }
+      case "browserNavigate":
+        return browserHost.navigate(args[0]);
+      case "browserSetBounds":
+        return browserHost.setBounds(args[0]);
+      case "browserSetVisible":
+        return browserHost.setVisible(args[0]);
+      case "browserOpenDevTools":
+        return browserHost.openDevTools();
+      case "browserPopOut":
+        return browserHost.popOut();
+      case "browserClose":
+        return browserHost.close();
       default: {
         const err = new Error(`unknown bridge method "${method}"`);
         err.code = "INVALID_PAYLOAD";
@@ -382,6 +433,8 @@ export function createBridgeHost({ url, token, userData, broadcast }) {
   return {
     call,
     dispose: async () => {
+      browserHost.close();
+      tunnelPool.closeAll();
       await client?.close().catch(() => {});
       client = null;
     },

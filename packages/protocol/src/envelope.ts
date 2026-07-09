@@ -5,6 +5,10 @@ import { agenaEventSchema } from "./events.ts";
 import { agenaFrameSchema } from "./frames.ts";
 import { wireLimitsSchema } from "./limits.ts";
 import { inFlightSnapshotSchema } from "./snapshot.ts";
+import {
+  visibleBrowserActionSchema,
+  visibleBrowserResultSchema,
+} from "./visible-browser.ts";
 
 // §5.1 handshake. Client sends hello first; daemon replies welcome or error + close 4400.
 export const helloEnvelopeSchema = z.object({
@@ -14,6 +18,7 @@ export const helloEnvelopeSchema = z.object({
     name: z.string().min(1),
     version: z.string().min(1),
     platform: z.string().min(1),
+    capabilities: z.array(z.string().min(1)).optional(),
   }),
   // Stable ULID per installed client; becomes EventSource.clientId on user events (P3).
   clientId: z.string().min(1),
@@ -92,6 +97,25 @@ export const pongEnvelopeSchema = z.object({
 });
 export type PongEnvelope = z.infer<typeof pongEnvelopeSchema>;
 
+export const visibleBrowserRequestEnvelopeSchema = z.object({
+  kind: z.literal("visibleBrowserRequest"),
+  requestId: z.string().min(1),
+  action: visibleBrowserActionSchema,
+});
+export type VisibleBrowserRequestEnvelope = z.infer<
+  typeof visibleBrowserRequestEnvelopeSchema
+>;
+
+export const visibleBrowserResponseEnvelopeSchema = z.object({
+  kind: z.literal("visibleBrowserResponse"),
+  requestId: z.string().min(1),
+  result: visibleBrowserResultSchema.optional(),
+  error: agenaErrorSchema.optional(),
+});
+export type VisibleBrowserResponseEnvelope = z.infer<
+  typeof visibleBrowserResponseEnvelopeSchema
+>;
+
 // §5.2 — every JSON message on the main WS is exactly one of these.
 export const wireEnvelopeSchema = z.discriminatedUnion("kind", [
   helloEnvelopeSchema,
@@ -105,5 +129,7 @@ export const wireEnvelopeSchema = z.discriminatedUnion("kind", [
   snapshotEnvelopeSchema,
   pingEnvelopeSchema,
   pongEnvelopeSchema,
+  visibleBrowserRequestEnvelopeSchema,
+  visibleBrowserResponseEnvelopeSchema,
 ]);
 export type WireEnvelope = z.infer<typeof wireEnvelopeSchema>;

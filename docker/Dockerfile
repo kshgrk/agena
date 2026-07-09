@@ -41,6 +41,20 @@ COPY packages/core packages/core
 COPY packages/runtime-pi packages/runtime-pi
 COPY packages/storage-sqlite packages/storage-sqlite
 
+# Agent browser tool (opt-in at runtime via AGENA_BROWSER_TOOL=1; see
+# docs/agent-browser.md). The binaries live in the image but are inert unless
+# the env is set. Debian's system chromium is used directly via
+# AGENT_BROWSER_EXECUTABLE_PATH, so agent-browser needs no Chrome-for-Testing
+# download. Pi's extension loader supplies the pi peer-deps, so a global install
+# of pi-agent-browser-native is enough. This layer is skippable for non-browser
+# builds by deleting it — nothing else depends on it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g agent-browser pi-agent-browser-native \
+    && npm cache clean --force
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
 # Two roots, separate and never mixed (§3.3 / P1); state is 0700.
 RUN mkdir -p /var/lib/agena /workspace \
     && chown node:node /var/lib/agena /workspace \

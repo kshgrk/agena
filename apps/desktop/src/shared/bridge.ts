@@ -224,6 +224,59 @@ export type AgenaBridge = {
    * daemon-side with M4; the client-side slug is mock-era scaffolding.
    */
   openProjectFolder(): Promise<OpenedProject | null>;
+
+  // ---- embedded browser (docs/desktop_plan.md §7 browser pane) -------------
+  // A native WebContentsView, owned by main, composited over the renderer in
+  // the browser panel's rect. Workspace `localhost:<port>` URLs are transparently
+  // tunneled to the daemon container (a real host-loopback listener), so no
+  // preview URLs are needed. The renderer only owns the toolbar + bounds; the
+  // page itself is out of the renderer's reach (sandboxed, its own partition).
+  /** Open (or navigate) the pane to a URL. Returns the resolved/tunneled URL. */
+  browserOpen(url: string, opts?: BrowserOpenOptions): Promise<string>;
+  browserNavigate(action: BrowserNavAction): Promise<void>;
+  /** Renderer streams the panel's viewport rect; main calls setBounds. */
+  browserSetBounds(bounds: BrowserBounds): Promise<void>;
+  /**
+   * BINDING (D-INV-3): a WebContentsView paints ABOVE all renderer DOM —
+   * palette, dropdowns, toasts, and above all the approval modal would render
+   * underneath it. The renderer MUST hide the view whenever any overlay is up.
+   */
+  browserSetVisible(visible: boolean): Promise<void>;
+  browserOpenDevTools(): Promise<void>;
+  /** Reparent the view into its own BrowserWindow; page state survives. */
+  browserPopOut(): Promise<void>;
+  browserClose(): Promise<void>;
+  onBrowserState(cb: (state: BrowserState) => void): () => void;
+};
+
+export type BrowserOpenOptions = {
+  /** Provenance for routing/telemetry; does not change behavior in v1. */
+  source?: "user" | "agent" | "terminal";
+};
+
+export type BrowserNavAction =
+  | { kind: "back" }
+  | { kind: "forward" }
+  | { kind: "reload" }
+  | { kind: "stop" }
+  | { kind: "url"; url: string };
+
+export type BrowserBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BrowserState = {
+  /** Absent until a page loads; null when the pane is closed/empty. */
+  url: string | null;
+  title: string | null;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  /** Popped out into its own window — the in-app pane is empty. */
+  poppedOut: boolean;
 };
 
 export type OpenedProject = {
@@ -269,6 +322,7 @@ export type AgenaPreload = {
   onStatus(
     cb: (state: BridgeConnectionState, detail?: string) => void,
   ): () => void;
+  onBrowserState(cb: (state: BrowserState) => void): () => void;
 };
 
 declare global {

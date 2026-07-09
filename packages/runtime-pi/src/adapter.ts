@@ -5,6 +5,7 @@
 // (§14 M1). steer/abort/setModel/compact/approvals, the tool bridge, and idle
 // eviction land with M2–M4.
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
   CreateRuntimeSessionInput,
@@ -38,6 +39,7 @@ import {
   mapPiEvent,
 } from "./event-map.ts";
 import { sessionNameExtension } from "./session-name-extension.ts";
+import { createVisibleBrowserTool } from "./visible-browser-tool.ts";
 
 /** The exact-pinned Pi SDK version (§8.9), surfaced at /v1/diagnostics. */
 export const PI_SDK_VERSION: string = VERSION;
@@ -65,17 +67,51 @@ export function containedResourceLoader(
   cwd: string,
   agentDir: string,
 ): DefaultResourceLoader {
+  const browser = browserExtensionSource();
   return new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager: SettingsManager.create(cwd, agentDir),
-    additionalExtensionPaths: [],
+    // Opt-in agent browser tool only (AGENA_BROWSER_TOOL=1). additionalExtensionPaths
+    // still load under noExtensions:true — only filesystem auto-discovery is disabled —
+    // so containment is unchanged when the tool is off (browser === null → []).
+    additionalExtensionPaths: browser ? [browser] : [],
     extensionFactories: [sessionNameExtension],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
   });
+}
+
+/**
+ * Resolve the pi-agent-browser-native extension source when the agent browser
+ * tool is enabled via AGENA_BROWSER_TOOL=1 (§ agent-browser). Returns null when
+ * disabled or the package is not installed, so the daemon behaves exactly as
+ * before (containment test unaffected). The package is installed only in the
+ * container image (docker/Dockerfile), so require.resolve degrades gracefully
+ * to a warning in local dev. AGENA_BROWSER_EXTENSION overrides the resolved
+ * path. Pi's extension loader supplies the package's pi peer-deps (pi-tui,
+ * typebox, …) via its jiti alias map, so no runtime-pi dependency is needed.
+ */
+function browserExtensionSource(): string | null {
+  if (process.env.AGENA_BROWSER_TOOL !== "1") return null;
+  const override = process.env.AGENA_BROWSER_EXTENSION;
+  if (override) return override;
+  try {
+    const require = createRequire(import.meta.url);
+    // Pass the package root dir: DefaultResourceLoader reads its pi.extensions
+    // manifest to find the extension entry. package.json has no "exports", so
+    // this subpath resolves via classic resolution (incl. global node_modules).
+    return dirname(require.resolve("pi-agent-browser-native/package.json"));
+  } catch (err) {
+    console.warn(
+      `[agena-runtime-pi] AGENA_BROWSER_TOOL=1 but pi-agent-browser-native is not resolvable; agent browser tool disabled: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
 }
 
 function parseModelRef(spec: string): ModelRef {
@@ -132,6 +168,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     const resourceLoader = containedResourceLoader(input.cwd, this.piDir);
     await resourceLoader.reload();
+    const customTools = input.visibleBrowser
+      ? [createVisibleBrowserTool(input.visibleBrowser, input.sessionId)]
+      : [];
 
     const { session, extensionsResult, modelFallbackMessage } =
       await createAgentSession({
@@ -145,7 +184,22 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           ? SessionManager.open(input.runtimeSessionRef, undefined, input.cwd)
           : SessionManager.create(input.cwd),
         ...(!input.runtimeSessionRef ? { thinkingLevel: "off" as const } : {}),
-        tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+        // Explicit allowlist: extension-registered tools are filtered unless
+        // named here. agent_browser joins only when its extension actually
+        // resolved (same gate the loader uses), so a missing package degrades
+        // to exactly the baseline toolset.
+        tools: [
+          "read",
+          "bash",
+          "edit",
+          "write",
+          "grep",
+          "find",
+          "ls",
+          ...(input.visibleBrowser ? ["visible_browser"] : []),
+          ...(browserExtensionSource() !== null ? ["agent_browser"] : []),
+        ],
+        customTools,
         ...(model ? { model } : {}), // absent → Pi settings default (§8.3 fallback)
       });
     // M1: extension-failed / model-changed RuntimeEvents are M2+ — log only.

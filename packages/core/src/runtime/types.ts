@@ -12,6 +12,8 @@ import type {
   RuntimeInfoAck,
   ThinkingLevel,
   UsageTotals,
+  VisibleBrowserAction,
+  VisibleBrowserResult,
 } from "@agena/protocol";
 
 export type RuntimeId = "pi" | "fake";
@@ -31,6 +33,11 @@ export interface CreateRuntimeSessionInput {
   cwd: string; // absolute runtime cwd inside workspace/project scope
   runtimeSessionRef?: string; // Pi JSONL path when rehydrating
   model?: ModelRef;
+  visibleBrowser?: VisibleBrowserController;
+}
+
+export interface VisibleBrowserController {
+  request(action: VisibleBrowserAction): Promise<VisibleBrowserResult>;
 }
 
 export interface RuntimeSession {

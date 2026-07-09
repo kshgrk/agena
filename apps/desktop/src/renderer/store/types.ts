@@ -215,4 +215,13 @@ export type UiSlice = {
   paletteOpen: boolean;
   inspectorOpen: boolean;
   terminalOpen: boolean;
+  /** Browser pane visible in the dock (native WebContentsView follows this). */
+  browserOpen: boolean;
+  /**
+   * True while any DOM overlay is up (palette, a modal, an open menu). The
+   * browser host hides the native WebContentsView when set — it paints above
+   * all renderer DOM, incl. the approval modal (D-INV-3). Menus/modals bump a
+   * counter via enterOverlay/exitOverlay; palette flips it directly.
+   */
+  overlayCount: number;
 };

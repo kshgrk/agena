@@ -41,6 +41,9 @@ import {
   setThinkingLevelAckSchema,
   subscribeAckSchema,
   type ThinkingLevel,
+  VISIBLE_BROWSER_CAPABILITY,
+  type VisibleBrowserAction,
+  type VisibleBrowserResult,
   type WelcomeEnvelope,
   type WireEnvelope,
   WS_PATH,
@@ -177,6 +180,9 @@ export class AgenaClient {
   onSnapshot: ((snapshot: InFlightSnapshot) => void) | undefined;
   onStatus: ((state: ConnectionState, detail?: string) => void) | undefined;
   onSync: ((sessionId: string, upToSeq: number) => void) | undefined;
+  onVisibleBrowserRequest:
+    | ((action: VisibleBrowserAction) => Promise<VisibleBrowserResult>)
+    | undefined;
   /** Daemon no longer knows the session (M1 in-memory store lost on restart, §5.8/P8). */
   onSessionLost: ((sessionId: string) => void) | undefined;
 
@@ -591,6 +597,9 @@ export class AgenaClient {
               name: this.clientName,
               version: this.clientVersion,
               platform: process.platform,
+              ...(this.onVisibleBrowserRequest
+                ? { capabilities: [VISIBLE_BROWSER_CAPABILITY] }
+                : {}),
             },
             clientId: this.clientId,
           }),
@@ -669,8 +678,41 @@ export class AgenaClient {
       case "ping":
         this.sock?.send(JSON.stringify({ kind: "pong", ts: env.ts }));
         return;
+      case "visibleBrowserRequest":
+        void this.handleVisibleBrowserRequest(env.requestId, env.action);
+        return;
       default: // hello/cmd/pong/... are not expected daemon->client; ignore
         return;
+    }
+  }
+
+  private async handleVisibleBrowserRequest(
+    requestId: string,
+    action: VisibleBrowserAction,
+  ): Promise<void> {
+    try {
+      if (!this.onVisibleBrowserRequest) {
+        throw new AgenaClientError(
+          "RUNTIME_UNAVAILABLE",
+          "visible browser handler is not registered",
+          true,
+        );
+      }
+      const result = await this.onVisibleBrowserRequest(action);
+      this.sock?.send(
+        JSON.stringify({ kind: "visibleBrowserResponse", requestId, result }),
+      );
+    } catch (err) {
+      const code = err instanceof AgenaClientError ? err.code : "INTERNAL";
+      const retryable = err instanceof AgenaClientError ? err.retryable : false;
+      const message = err instanceof Error ? err.message : String(err);
+      this.sock?.send(
+        JSON.stringify({
+          kind: "visibleBrowserResponse",
+          requestId,
+          error: { code, message, retryable },
+        }),
+      );
     }
   }
 

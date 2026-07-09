@@ -31,6 +31,7 @@ import type {
   RuntimeAdapter,
   RuntimeEvent,
   RuntimeSession,
+  VisibleBrowserController,
 } from "../runtime/types.ts";
 
 export class OrchestratorError extends Error {
@@ -46,6 +47,7 @@ export interface SessionOrchestratorOptions {
   workspaceDir?: string; // default '/workspace' (§3.2)
   /** Ephemeral frame sink (P12) — the daemon points this at FanoutHub.publishFrame. */
   publishFrame?: (frame: AgenaFrame) => void;
+  visibleBrowser?: VisibleBrowserController;
 }
 
 interface SessionState {
@@ -64,6 +66,7 @@ export class SessionOrchestrator {
   #adapter: RuntimeAdapter;
   #workspaceDir: string;
   #publishFrame: (frame: AgenaFrame) => void;
+  #visibleBrowser: VisibleBrowserController | undefined;
   #runtimeSource: EventSource;
   #sessions = new Map<string, SessionState>();
 
@@ -76,6 +79,7 @@ export class SessionOrchestrator {
     this.#adapter = adapter;
     this.#workspaceDir = options.workspaceDir ?? "/workspace";
     this.#publishFrame = options.publishFrame ?? (() => {});
+    this.#visibleBrowser = options.visibleBrowser;
     // P3 provenance: runtime-derived events are stamped runtime:'pi'; the fake
     // adapter is not 'pi', so the optional field stays absent.
     this.#runtimeSource =
@@ -349,6 +353,7 @@ export class SessionOrchestrator {
       ...(s.record.runtimeSessionRef
         ? { runtimeSessionRef: s.record.runtimeSessionRef }
         : {}),
+      ...(this.#visibleBrowser ? { visibleBrowser: this.#visibleBrowser } : {}),
     });
     const runtimeRefs = runtimeSessionRefs(this.#store);
     if (

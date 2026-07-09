@@ -4,9 +4,10 @@
 // The token never enters git; it exists only inside the built artifact
 // (private-beta stance: repo/releases are private; dynamic login replaces this
 // before any public release).
-import { build } from "esbuild";
+
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const out = `${root}dist-electron`;
@@ -32,7 +33,10 @@ const env = Object.fromEntries(
   readFileSync(`${root}../../.env`, "utf8")
     .split("\n")
     .filter((l) => l.includes("=") && !l.startsWith("#"))
-    .map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim()]),
+    .map((l) => [
+      l.slice(0, l.indexOf("=")).trim(),
+      l.slice(l.indexOf("=") + 1).trim(),
+    ]),
 );
 const url = env.AGENA_RELEASE_URL;
 const token = env.AGENA_MODAL_TOKEN;

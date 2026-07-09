@@ -16,5 +16,8 @@ export default defineConfig(({ command }) => ({
     target: "es2023",
   },
   // AGENA_DEV_PORT lets a second local instance run beside the main one
-  server: { port: Number(process.env.AGENA_DEV_PORT ?? 5199), strictPort: true },
+  server: {
+    port: Number(process.env.AGENA_DEV_PORT ?? 5199),
+    strictPort: true,
+  },
 }));

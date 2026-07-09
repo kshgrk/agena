@@ -29,6 +29,10 @@ import {
   type AgenaBridge,
   type BridgeConnectionState,
   type BridgeError,
+  type BrowserBounds,
+  type BrowserNavAction,
+  type BrowserOpenOptions,
+  type BrowserState,
   type ConnectedInfo,
   EMPTY_PERSISTED,
   type HostFolderFile,
@@ -127,6 +131,32 @@ export function createMockBridge(): AgenaBridge {
       if (detail === undefined) cb(state);
       else cb(state, detail);
     }
+  };
+
+  // ---- fake embedded browser (no real WebContentsView in a bare browser) ----
+  const browserListeners = new Set<(state: BrowserState) => void>();
+  let browserState: BrowserState = {
+    url: null,
+    title: null,
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+    poppedOut: false,
+  };
+  const emitBrowser = (patch: Partial<BrowserState>): void => {
+    browserState = { ...browserState, ...patch };
+    for (const cb of browserListeners) cb(browserState);
+  };
+  const fakeLoad = (url: string): string => {
+    let host = url;
+    try {
+      host = new URL(url).host || url;
+    } catch {
+      // keep the raw string as the title
+    }
+    emitBrowser({ url, title: host, loading: true, canGoBack: true });
+    setTimeout(() => emitBrowser({ loading: false, title: host }), 200);
+    return url;
   };
 
   const requireConnected = (): void => {
@@ -714,6 +744,42 @@ export function createMockBridge(): AgenaBridge {
     ): () => void {
       statusListeners.add(cb);
       return () => statusListeners.delete(cb);
+    },
+
+    // ---- embedded browser (fake: no native WebContentsView in a bare browser) -----
+    async browserOpen(
+      url: string,
+      _opts?: BrowserOpenOptions,
+    ): Promise<string> {
+      return fakeLoad(url);
+    },
+    async browserNavigate(action: BrowserNavAction): Promise<void> {
+      if (action.kind === "url") fakeLoad(action.url);
+      else if (action.kind === "reload" && browserState.url) {
+        fakeLoad(browserState.url);
+      } else if (action.kind === "stop") emitBrowser({ loading: false });
+    },
+    async browserSetBounds(_bounds: BrowserBounds): Promise<void> {},
+    async browserSetVisible(_visible: boolean): Promise<void> {},
+    async browserOpenDevTools(): Promise<void> {
+      console.info("[mock] browserOpenDevTools — no-op in the browser mock");
+    },
+    async browserPopOut(): Promise<void> {
+      emitBrowser({ poppedOut: !browserState.poppedOut });
+    },
+    async browserClose(): Promise<void> {
+      emitBrowser({
+        url: null,
+        title: null,
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+        poppedOut: false,
+      });
+    },
+    onBrowserState(cb: (state: BrowserState) => void): () => void {
+      browserListeners.add(cb);
+      return () => browserListeners.delete(cb);
     },
 
     // ---- terminals -------------------------------------------------------------------

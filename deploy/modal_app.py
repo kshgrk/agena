@@ -49,6 +49,11 @@ workspace = modal.Volume.from_name("agena-workspace", create_if_missing=True)
     scaledown_window=1200,
     timeout=60 * 60 * 24,
     cpu=2,
+    # 2048 schedules reliably on Modal; 4096 (=4.8GiB with overhead) got stuck
+    # "waiting to be scheduled". Light headless chromium for the opt-in agent
+    # browser tool fits here; bump to 3072 only if chromium OOMs under real use
+    # (see docs/agent-browser.md). Enable via AGENA_BROWSER_TOOL=1 in the
+    # agena-daemon secret; inert (no chromium spawned) when unset.
     memory=2048,
 )
 @modal.concurrent(max_inputs=1000)

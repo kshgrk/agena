@@ -68,6 +68,7 @@ import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
 import { PtyManager } from "./pty-manager.ts";
 import { SnapshotManager } from "./snapshots.ts";
+import { TunnelManager } from "./tunnel-manager.ts";
 
 export interface Daemon {
   port: number;
@@ -313,12 +314,17 @@ export async function startDaemon(
       : new InMemoryEventStore();
   // `gateway` is initialized before any frame can be published (frames only
   // flow after a prompt), so the closure is safe.
+  let gateway: Gateway;
   const orchestrator = new SessionOrchestrator(store, adapter, {
     workspaceDir: config.workspaceDir,
     publishFrame: (frame) => gateway.publishFrame(frame),
+    visibleBrowser: {
+      request: (action) => gateway.requestVisibleBrowser(action),
+    },
   });
-  const gateway = new Gateway(store, orchestrator);
+  gateway = new Gateway(store, orchestrator);
   const ptys = new PtyManager(store, config.workspaceDir);
+  const tunnels = new TunnelManager();
   const controlSession = await ensureControlSession(store);
   const snapshots = new SnapshotManager(
     store,
@@ -881,6 +887,11 @@ export async function startDaemon(
       return;
     }
     const path = (req.url ?? "").split("?")[0] ?? "";
+    const tunnelMatch = /^\/v1\/tunnels\/(\d+)\/ws$/.exec(path);
+    if (tunnelMatch?.[1]) {
+      tunnels.handleUpgrade(req, socket, head, Number(tunnelMatch[1]));
+      return;
+    }
     const ptyMatch = /^\/v1\/ptys\/([^/]+)\/ws$/.exec(path);
     const ptyId = ptyMatch?.[1];
     if (ptyId) {
@@ -905,6 +916,7 @@ export async function startDaemon(
     close: async () => {
       await orchestrator.shutdown();
       await ptys.close();
+      await tunnels.close();
       gateway.close();
       server.closeIdleConnections(); // don't hang on kept-alive HTTP sockets
       await new Promise<void>((resolve) => server.close(() => resolve()));

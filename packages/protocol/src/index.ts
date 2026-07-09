@@ -11,3 +11,4 @@ export * from "./limits.ts";
 export * from "./pty.ts";
 export * from "./snapshot.ts";
 export * from "./version.ts";
+export * from "./visible-browser.ts";

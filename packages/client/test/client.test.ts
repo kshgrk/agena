@@ -73,7 +73,11 @@ function event(seq: number): AgenaEvent {
   };
 }
 
-async function connected(): Promise<{ client: AgenaClient; sock: FakeSocket }> {
+async function connected(
+  opts: {
+    onVisibleBrowserRequest?: AgenaClient["onVisibleBrowserRequest"];
+  } = {},
+): Promise<{ client: AgenaClient; sock: FakeSocket }> {
   const sockets: FakeSocket[] = [];
   const client = new AgenaClient({
     url: "http://127.0.0.1:7777",
@@ -84,6 +88,7 @@ async function connected(): Promise<{ client: AgenaClient; sock: FakeSocket }> {
       return s;
     },
   });
+  client.onVisibleBrowserRequest = opts.onVisibleBrowserRequest;
   const p = client.connect();
   const sock = sockets[0] as FakeSocket;
   sock.open();
@@ -127,6 +132,39 @@ describe("AgenaClient", () => {
 
     await expect(p2).resolves.toEqual({ messageId: "m2", seq: 9 });
     await expect(p1).rejects.toMatchObject({ code: "SESSION_BUSY" });
+    await client.close();
+  });
+
+  it("answers visible-browser requests from the daemon", async () => {
+    const handler = vi.fn(async () => ({
+      url: "https://example.com/",
+      title: "Example",
+      text: "ok",
+    }));
+    const { client, sock } = await connected({
+      onVisibleBrowserRequest: handler,
+    });
+    expect(JSON.parse(sock.sent[0] ?? "")).toMatchObject({
+      kind: "hello",
+      client: { capabilities: ["visible_browser"] },
+    });
+
+    sock.receive({
+      kind: "visibleBrowserRequest",
+      requestId: "browser-1",
+      action: { action: "read", sessionId: "s1" },
+    });
+
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    expect(JSON.parse(sock.sent.at(-1) ?? "")).toEqual({
+      kind: "visibleBrowserResponse",
+      requestId: "browser-1",
+      result: {
+        url: "https://example.com/",
+        title: "Example",
+        text: "ok",
+      },
+    });
     await client.close();
   });
 

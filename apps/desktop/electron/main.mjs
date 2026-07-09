@@ -27,7 +27,10 @@ const RENDERER_URL =
 function loadDistConfig() {
   try {
     return JSON.parse(
-      readFileSync(fileURLToPath(new URL("./dist-config.json", import.meta.url)), "utf8"),
+      readFileSync(
+        fileURLToPath(new URL("./dist-config.json", import.meta.url)),
+        "utf8",
+      ),
     );
   } catch {
     return null;
@@ -140,6 +143,7 @@ app.whenReady().then(() => {
     url: AGENA_URL,
     token: AGENA_TOKEN,
     userData: app.getPath("userData"),
+    getWindow: () => win,
     broadcast: (channel, payload) => {
       for (const w of BrowserWindow.getAllWindows()) {
         w.webContents.send(channel, payload);

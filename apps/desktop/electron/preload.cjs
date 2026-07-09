@@ -22,6 +22,11 @@ if (!useMock) {
       ipcRenderer.on("agena:status", handler);
       return () => ipcRenderer.removeListener("agena:status", handler);
     },
+    onBrowserState: (cb) => {
+      const handler = (_event, state) => cb(state);
+      ipcRenderer.on("agena:browser-state", handler);
+      return () => ipcRenderer.removeListener("agena:browser-state", handler);
+    },
   });
 
   // PTY MessagePorts can't cross contextBridge return values; they hop via

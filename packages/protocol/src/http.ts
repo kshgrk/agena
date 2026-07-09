@@ -299,6 +299,10 @@ export const diagnosticsResponseSchema = z.object({
 });
 export type DiagnosticsResponse = z.infer<typeof diagnosticsResponseSchema>;
 
+export function tunnelWsPath(port: number): string {
+  return `/v1/tunnels/${port}/ws`;
+}
+
 export const PTY_HTTP_ROUTES = {
   createSession: {
     method: "POST",

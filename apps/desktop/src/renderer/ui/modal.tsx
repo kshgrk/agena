@@ -1,5 +1,6 @@
 import { Dialog } from "radix-ui";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
+import { useUi } from "../store/ui.ts";
 import { cx } from "./cx.ts";
 
 export type ModalSize = "sm" | "md" | "lg";
@@ -26,6 +27,14 @@ export function Modal({
   className,
   children,
 }: ModalProps) {
+  // D-INV-3: a modal is an overlay — the native browser WebContentsView must
+  // hide while it's up (it paints above ALL DOM, incl. the approval modal).
+  useEffect(() => {
+    if (!open) return;
+    const ui = useUi.getState();
+    ui.enterOverlay();
+    return () => ui.exitOverlay();
+  }, [open]);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
