@@ -19,6 +19,14 @@ const BASE_COMMANDS: CommandDef[] = [
     run: () => useUi.getState().togglePalette(),
   },
   {
+    id: "settings.toggle",
+    title: "Toggle Settings",
+    group: "View",
+    chord: "mod+,",
+    keywords: ["preferences", "import", "options"],
+    run: () => useUi.getState().toggleSettings(),
+  },
+  {
     id: "inspector.toggle",
     title: "Toggle Inspector",
     group: "View",

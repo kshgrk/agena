@@ -133,6 +133,19 @@ export class SessionOrchestrator {
     );
   }
 
+  /** Tear down live state for sessions being deleted (project removal). */
+  async evictSessions(sessionIds: string[]): Promise<void> {
+    await Promise.all(
+      sessionIds.map(async (id) => {
+        const s = this.#sessions.get(id);
+        if (!s) return;
+        if (s.busy) await this.#terminalize(s, "user_abort");
+        await s.runtime?.dispose();
+        this.#sessions.delete(id);
+      }),
+    );
+  }
+
   /** §5.4 prompt: ack is { messageId, seq }; completion arrives as events. */
   async handlePrompt(
     sessionId: string,

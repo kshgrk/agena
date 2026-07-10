@@ -1,6 +1,8 @@
 // THE renderer↔main contract (desktop_plan.md §5). Joint-review-only file: the
 // preload implements this against @agena/client in main; the mock implements it
-// against fixtures. Renderer code depends on this type and @agena/protocol ONLY.
+// against fixtures. Renderer code depends on this type and @agena/protocol ONLY
+// (plus type-only importer shapes, which erase at build time).
+import type { ProjectGroup } from "@agena/importer";
 import type {
   AgenaEvent,
   AgenaFrame,
@@ -11,6 +13,8 @@ import type {
   DiagnosticsResponse,
   EmptyAck,
   FileEntry,
+  Harness,
+  ImportLedgerEntry,
   InFlightSnapshot,
   ListSessionsQuery,
   ModelRef,
@@ -134,6 +138,30 @@ export const EMPTY_PERSISTED: PersistedState = {
   activeProfile: null,
 };
 
+// ---- local-session import (settings_import_plan.md §1/§9) --------------------
+
+export type { ProjectGroup };
+
+export type ImportPlan = {
+  projects: Array<{
+    cwd: string;
+    name: string;
+    /** Only honored for new projects whose cwd still exists (plan §8 step 2). */
+    copyFiles: boolean;
+    /** Empty = project files only. */
+    harnesses: Harness[];
+  }>;
+};
+
+export type ImportRunResult = {
+  sessions: Array<{
+    sourcePath: string;
+    status: "ok" | "skipped" | "error";
+    sessionId?: string;
+    error?: string;
+  }>;
+};
+
 // ---- the bridge -------------------------------------------------------------
 
 export type ReadEventsPage = {
@@ -174,6 +202,10 @@ export type AgenaBridge = {
   // HTTP
   createSession(input?: Partial<CreateSessionRequest>): Promise<string>;
   createProject(name: string): Promise<OpenedProject>;
+  /** Full teardown: db rows, workspace files, pi sessions, snapshots. */
+  deleteProject(
+    projectId: string,
+  ): Promise<{ projectId: string; deletedSessions: number }>;
   listSessionSummaries(filters?: ListSessionsQuery): Promise<SessionSummary[]>;
   updateSessionStatus(sessionId: string, status: SessionStatus): Promise<void>;
   readEvents(
@@ -199,6 +231,16 @@ export type AgenaBridge = {
   deleteSnapshot(snapshotId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticsResponse>;
   listPtys(): Promise<PtySummary[]>;
+
+  // local-session import (Electron main scans/converts; daemon stores the ledger)
+  /** refresh forces a differential re-scan; otherwise the cached index may serve. */
+  importScan(opts?: {
+    refresh?: boolean;
+  }): Promise<{ projects: ProjectGroup[]; scannedAt: string }>;
+  /** Per-session failures land in the result, never reject the batch. */
+  importRun(plan: ImportPlan): Promise<ImportRunResult>;
+  /** The daemon import ledger for this machine (GET /v1/imports). */
+  importStatus(): Promise<{ imports: ImportLedgerEntry[] }>;
 
   // streams
   onBatch(cb: (batch: UiBatch) => void): () => void;

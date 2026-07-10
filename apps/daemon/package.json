@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@agena/core": "workspace:*",
+    "@agena/importer": "workspace:*",
     "@agena/protocol": "workspace:*",
     "@agena/runtime-pi": "workspace:*",
     "@agena/storage-sqlite": "workspace:*",

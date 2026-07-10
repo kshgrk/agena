@@ -28,6 +28,7 @@ COPY apps/cli/package.json apps/cli/
 COPY apps/daemon/package.json apps/daemon/
 COPY packages/client/package.json packages/client/
 COPY packages/core/package.json packages/core/
+COPY packages/importer/package.json packages/importer/
 COPY packages/protocol/package.json packages/protocol/
 COPY packages/runtime-pi/package.json packages/runtime-pi/
 COPY packages/storage-sqlite/package.json packages/storage-sqlite/
@@ -38,6 +39,7 @@ RUN pnpm install --frozen-lockfile --prod --filter @agena/daemon...
 COPY apps/daemon apps/daemon
 COPY packages/protocol packages/protocol
 COPY packages/core packages/core
+COPY packages/importer packages/importer
 COPY packages/runtime-pi packages/runtime-pi
 COPY packages/storage-sqlite packages/storage-sqlite
 

@@ -15,6 +15,7 @@ import {
   rename,
   rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
 import type { Server } from "node:http";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -28,6 +29,7 @@ import type {
   ProjectionStore,
   RecoveryStore,
   RuntimeAdapter,
+  RuntimeSessionRefStore,
   SearchStore,
   SessionFilter,
   SessionRecord,
@@ -39,20 +41,25 @@ import {
   resolveWorkspacePath,
   SessionOrchestrator,
 } from "@agena/core";
+import { synthesizeEvents } from "@agena/importer";
 import {
   type CreateSessionRequest,
   createProjectRequestSchema,
   createPtyRequestSchema,
   createSessionRequestSchema,
   createSnapshotRequestSchema,
+  type DeleteProjectResponse,
   type DiscoveryEntry,
   type FileEntry,
   fileArchiveQuerySchema,
   fileContentQuerySchema,
   fileUploadQuerySchema,
+  type ImportLedgerEntry,
+  importSessionRequestSchema,
   type ListSessionsQuery,
   listApprovalsQuerySchema,
   listFilesQuerySchema,
+  listImportsQuerySchema,
   listSessionsQuerySchema,
   PROTOCOL_VERSION,
   restoreSnapshotRequestSchema,
@@ -395,6 +402,242 @@ export async function startDaemon(
     } catch (err) {
       return projectRouteError(c, err);
     }
+  });
+  // Full project teardown: rows (Litestream replicates to R2), workspace
+  // files, pi session JSONLs, snapshot archives. Live runtimes evicted first.
+  app.delete("/v1/projects/:id", async (c) => {
+    const projectId = c.req.param("id");
+    const deleter =
+      "deleteProject" in store
+        ? (store as EventStore & {
+            deleteProject(id: string): {
+              root: string;
+              sessionIds: string[];
+              piSessionPaths: string[];
+              snapshotPaths: string[];
+            } | null;
+          })
+        : null;
+    if (!deleter) {
+      return c.json(
+        {
+          code: "UNSUPPORTED",
+          message: "store does not support project deletion",
+          retryable: false,
+        },
+        501,
+      );
+    }
+    const sessionIds = (
+      await store.listSessions({ projectId, includeArchived: true })
+    ).map((s) => s.sessionId);
+    await orchestrator.evictSessions(sessionIds);
+    const deleted = deleter.deleteProject(projectId);
+    if (!deleted) {
+      return c.json(
+        {
+          code: "NOT_FOUND",
+          message: `unknown project: ${projectId}`,
+          retryable: false,
+        },
+        404,
+      );
+    }
+    for (const path of [...deleted.piSessionPaths, ...deleted.snapshotPaths]) {
+      await rm(path, { force: true }).catch(() => {});
+    }
+    try {
+      const root = await resolveWorkspacePath(
+        config.workspaceDir,
+        deleted.root,
+      );
+      await rm(root, { recursive: true, force: true });
+    } catch {
+      // root escaped the workspace or is already gone — rows are the source of truth
+    }
+    return c.json({
+      projectId,
+      deletedSessions: deleted.sessionIds.length,
+    } satisfies DeleteProjectResponse);
+  });
+  // settings_import_plan.md §6: pi-native JSONL comes in, session + events come out.
+  app.post("/v1/imports/session", async (c) => {
+    const parsed = importSessionRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid session import request",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    const imports = importStore(store);
+    if (!imports) {
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: "store does not support imports",
+          retryable: false,
+        },
+        500,
+      );
+    }
+    const fp = parsed.data.sourceFingerprint;
+    const existing = imports.findImport(
+      fp.machineId,
+      fp.harness,
+      fp.sourceSessionId,
+    );
+    if (existing?.sessionId) {
+      return c.json({
+        sessionId: existing.sessionId,
+        seededEvents: 0,
+        alreadyImported: true,
+      });
+    }
+    const header = piSessionHeader(parsed.data.piSession);
+    if (!header) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "piSession must be pi v3 JSONL with a session header",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    try {
+      const scope = await validateSessionScope(config.workspaceDir, {
+        scope: "project",
+        projectId: parsed.data.projectId,
+        projectRoot: parsed.data.projectRoot,
+      });
+      // Same layout SessionManager writes (`--<cwd-dashes>--/<ts>_<id>.jsonl`)
+      // under the piDir the runtime adapter derives from AGENA_STATE_DIR.
+      const sessionFile = join(
+        config.stateDir,
+        "pi",
+        "sessions",
+        `--${header.cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
+        `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`,
+      );
+      await mkdir(dirname(sessionFile), { recursive: true });
+      await writeFile(sessionFile, parsed.data.piSession);
+      const origin =
+        fp.harness === "claude"
+          ? ("import.claude" as const)
+          : fp.harness === "codex"
+            ? ("import.codex" as const)
+            : undefined; // pi sources are already pi-native
+      const session = await store.createSession({
+        workspaceId: "default",
+        ...(parsed.data.title !== undefined
+          ? { title: parsed.data.title }
+          : {}),
+        scope: "project",
+        cwd: scope.cwd,
+        ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        ...(scope.projectRoot ? { projectRoot: scope.projectRoot } : {}),
+        source: { kind: "importer" },
+        ...(origin ? { origin } : {}),
+      });
+      // Claim the fingerprint right after creating the session: a concurrent
+      // duplicate POST loses on UNIQUE(machine_id, harness, source_session_id)
+      // here, and a later failure (event seeding) still leaves the ledger row,
+      // so a retry dedupes instead of duplicating the session.
+      // ponytail: not one transaction — a crash between createSession and this
+      // insert can orphan one session; a store-level import txn fixes it.
+      try {
+        imports.insertImport({
+          sessionId: session.sessionId,
+          projectId: parsed.data.projectId,
+          machineId: fp.machineId,
+          harness: fp.harness,
+          sourcePath: fp.sourcePath,
+          sourceSessionId: fp.sourceSessionId,
+          sourceMtimeMs: fp.mtimeMs,
+          sourceSize: fp.size,
+        });
+      } catch (err) {
+        const winner = imports.findImport(
+          fp.machineId,
+          fp.harness,
+          fp.sourceSessionId,
+        );
+        if (!winner?.sessionId) throw err;
+        // lost the race — hide the extra session and defer to the winner
+        await sessionStatusStore(store)?.updateSessionStatus(
+          session.sessionId,
+          "archived",
+        );
+        return c.json({
+          sessionId: winner.sessionId,
+          seededEvents: 0,
+          alreadyImported: true,
+        });
+      }
+      await imports.updateRuntimeSessionRef(session.sessionId, sessionFile);
+      const events = synthesizeEvents(
+        parsed.data.piSession,
+        parsed.data.title !== undefined ? { title: parsed.data.title } : {},
+      );
+      await store.appendEvents({
+        sessionId: session.sessionId,
+        branchId: session.rootBranchId,
+        events,
+      });
+      return c.json(
+        {
+          sessionId: session.sessionId,
+          seededEvents: events.length,
+          alreadyImported: false,
+        },
+        201,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === "INVALID_CWD") {
+        return c.json(
+          {
+            code: "INVALID_PAYLOAD",
+            message: "projectRoot must exist under /workspace",
+            retryable: false,
+          },
+          400,
+        );
+      }
+      log("error", "session import failed", { err: String(err) });
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: "session import failed",
+          retryable: false,
+        },
+        500,
+      );
+    }
+  });
+  app.get("/v1/imports", async (c) => {
+    const parsed = listImportsQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid imports query",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    const imports = importStore(store);
+    return c.json({
+      imports: imports ? imports.listImports(parsed.data.machineId) : [],
+    });
   });
   app.post("/v1/sessions", async (c) => {
     const body = await c.req.json().catch(() => ({}));
@@ -958,6 +1201,52 @@ function recoveryStore(store: EventStore): RecoveryStore | null {
   return "reconcileOpenWork" in store
     ? (store as EventStore & RecoveryStore)
     : null;
+}
+
+// Import-ledger capabilities live on SqliteEventStore only (plan §6); typed
+// structurally like the other opt-in store guards above.
+type ImportLedgerStore = RuntimeSessionRefStore & {
+  insertImport(
+    entry: Omit<ImportLedgerEntry, "id" | "importedAt">,
+  ): ImportLedgerEntry;
+  findImport(
+    machineId: string,
+    harness: string,
+    sourceSessionId: string,
+  ): ImportLedgerEntry | null;
+  listImports(machineId?: string): ImportLedgerEntry[];
+};
+
+function importStore(store: EventStore): ImportLedgerStore | null {
+  return "insertImport" in store
+    ? (store as EventStore & ImportLedgerStore)
+    : null;
+}
+
+/** First JSONL line must be a pi v3 session header with a filename-safe id. */
+function piSessionHeader(
+  piSession: string,
+): { id: string; timestamp: string; cwd: string } | null {
+  let header: unknown;
+  try {
+    header = JSON.parse(piSession.split("\n", 1)[0] ?? "");
+  } catch {
+    return null;
+  }
+  const h = header as Record<string, unknown>;
+  if (
+    h?.type !== "session" ||
+    h.version !== 3 ||
+    typeof h.id !== "string" ||
+    !/^[A-Za-z0-9._-]+$/.test(h.id) ||
+    typeof h.timestamp !== "string" ||
+    !/^[0-9TZ:.+-]+$/.test(h.timestamp) ||
+    typeof h.cwd !== "string" ||
+    h.cwd === ""
+  ) {
+    return null;
+  }
+  return { id: h.id, timestamp: h.timestamp, cwd: h.cwd };
 }
 
 function closableStore(store: EventStore): ClosableStore | null {

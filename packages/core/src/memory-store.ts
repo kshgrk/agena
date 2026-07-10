@@ -64,7 +64,9 @@ export class InMemoryEventStore implements EventStore {
             workspaceId: input.workspaceId,
             ...(input.title !== undefined ? { title: input.title } : {}),
             runtime: "pi",
-            origin: scope.scope === "control" ? "control" : "native",
+            origin:
+              input.origin ??
+              (scope.scope === "control" ? "control" : "native"),
             ...scope,
             rootBranchId: record.rootBranchId,
           },

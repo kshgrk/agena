@@ -41,6 +41,9 @@ importers:
       '@agena/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@agena/importer':
+        specifier: workspace:*
+        version: link:../../packages/importer
       '@agena/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -72,6 +75,9 @@ importers:
       '@agena/client':
         specifier: workspace:*
         version: link:../../packages/client
+      '@agena/importer':
+        specifier: workspace:*
+        version: link:../../packages/importer
       '@agena/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -169,6 +175,12 @@ importers:
       ulid:
         specifier: 3.0.2
         version: 3.0.2
+
+  packages/importer:
+    dependencies:
+      '@agena/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/protocol:
     dependencies:

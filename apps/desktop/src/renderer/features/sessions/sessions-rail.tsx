@@ -19,10 +19,12 @@ import {
   Inbox,
   Plus,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
+import { errMsg } from "../../lib/errors.ts";
 import { useCommands } from "../../store/commands.ts";
 import {
   ensureSubscribed,
@@ -54,12 +56,6 @@ import {
 } from "../../ui/index.ts";
 
 // ---- helpers -----------------------------------------------------------------
-
-function errMsg(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  const msg = (err as { message?: unknown } | null)?.message;
-  return typeof msg === "string" ? msg : "Something went wrong";
-}
 
 /** Last two path segments — enough context for a dense rail. */
 function pathTail(path: string): string {
@@ -258,10 +254,22 @@ export function SessionsRail() {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
     () => new Set(),
   );
-  const [menu, setMenu] = useState<{
-    sessionId: string;
-    x: number;
-    y: number;
+  const [menu, setMenu] = useState<
+    | { kind: "session"; sessionId: string; x: number; y: number }
+    | {
+        kind: "project";
+        projectId: string;
+        label: string;
+        ids: string[];
+        x: number;
+        y: number;
+      }
+    | null
+  >(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    projectId: string;
+    label: string;
+    ids: string[];
   } | null>(null);
 
   const showArchivedRef = useRef(showArchived);
@@ -435,8 +443,33 @@ export function SessionsRail() {
   const visibleCount =
     sections.projectGroups.reduce((n, g) => n + g.ids.length, 0) +
     sections.globalIds.length;
-  const menuSession = menu ? byId[menu.sessionId] : undefined;
+  const menuSession =
+    menu?.kind === "session" ? byId[menu.sessionId] : undefined;
   const menuArchived = menuSession?.status === "archived";
+
+  const deleteProject = useCallback(async () => {
+    if (!deleteTarget || busy) return;
+    setBusy(true);
+    try {
+      const res = await getBridge().deleteProject(deleteTarget.projectId);
+      if (
+        useSessions.getState().activeSessionId &&
+        deleteTarget.ids.includes(useSessions.getState().activeSessionId ?? "")
+      ) {
+        useSessions.getState().setActive(null);
+      }
+      setDeleteTarget(null);
+      toast(
+        `Deleted ${deleteTarget.label} (${res.deletedSessions} session${res.deletedSessions === 1 ? "" : "s"})`,
+        { tone: "ok" },
+      );
+      await refresh();
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, deleteTarget]);
 
   return (
     <PanelShell>
@@ -536,6 +569,19 @@ export function SessionsRail() {
                       label={group.label}
                       count={group.ids.length}
                       collapsed={collapsedProjects.has(group.key)}
+                      onContextMenu={
+                        seed?.projectId
+                          ? (x, y) =>
+                              setMenu({
+                                kind: "project",
+                                projectId: group.key,
+                                label: group.label,
+                                ids: [...group.ids],
+                                x,
+                                y,
+                              })
+                          : undefined
+                      }
                       onCreate={() => void createProjectSession(seed)}
                       onToggle={() =>
                         setCollapsedProjects((prev) => {
@@ -556,7 +602,12 @@ export function SessionsRail() {
                               session={s}
                               active={id === activeSessionId}
                               onContextMenu={(x, y) =>
-                                setMenu({ sessionId: id, x, y })
+                                setMenu({
+                                  kind: "session",
+                                  sessionId: id,
+                                  x,
+                                  y,
+                                })
                               }
                             />
                           ) : null;
@@ -578,7 +629,9 @@ export function SessionsRail() {
                     session={s}
                     active={id === activeSessionId}
                     showCwd={false}
-                    onContextMenu={(x, y) => setMenu({ sessionId: id, x, y })}
+                    onContextMenu={(x, y) =>
+                      setMenu({ kind: "session", sessionId: id, x, y })
+                    }
                   />
                 ) : null;
               })}
@@ -613,31 +666,89 @@ export function SessionsRail() {
               style={{ left: menu.x, top: menu.y }}
             />
           </MenuTrigger>
-          <MenuContent>
-            <MenuItem
-              onSelect={() =>
-                void setSessionStatus(
-                  menu.sessionId,
-                  menuArchived ? "idle" : "archived",
-                )
-              }
-            >
-              {menuArchived ? <ArchiveRestore /> : <Archive />}
-              {menuArchived ? "Unarchive" : "Archive"}
-            </MenuItem>
-            <MenuSeparator />
-            <MenuItem
-              onSelect={() => {
-                void navigator.clipboard.writeText(menu.sessionId);
-                toast("Session id copied");
-              }}
-            >
-              <Copy />
-              Copy session id
-            </MenuItem>
-          </MenuContent>
+          {menu.kind === "session" ? (
+            <MenuContent>
+              <MenuItem
+                onSelect={() =>
+                  void setSessionStatus(
+                    menu.sessionId,
+                    menuArchived ? "idle" : "archived",
+                  )
+                }
+              >
+                {menuArchived ? <ArchiveRestore /> : <Archive />}
+                {menuArchived ? "Unarchive" : "Archive"}
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem
+                onSelect={() => {
+                  void navigator.clipboard.writeText(menu.sessionId);
+                  toast("Session id copied");
+                }}
+              >
+                <Copy />
+                Copy session id
+              </MenuItem>
+            </MenuContent>
+          ) : (
+            <MenuContent>
+              <MenuItem
+                onSelect={() => {
+                  void navigator.clipboard.writeText(menu.projectId);
+                  toast("Project id copied");
+                }}
+              >
+                <Copy />
+                Copy project id
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem
+                className="text-err"
+                onSelect={() =>
+                  setDeleteTarget({
+                    projectId: menu.projectId,
+                    label: menu.label,
+                    ids: menu.ids,
+                  })
+                }
+              >
+                <Trash2 />
+                Delete project…
+              </MenuItem>
+            </MenuContent>
+          )}
         </Menu>
       ) : null}
+
+      <Modal
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!busy && !open) setDeleteTarget(null);
+        }}
+      >
+        <ModalTitle>Delete {deleteTarget?.label}?</ModalTitle>
+        <ModalDescription>
+          Permanently removes this project everywhere: all{" "}
+          {deleteTarget?.ids.length} session
+          {deleteTarget?.ids.length === 1 ? "" : "s"} and their history, the
+          workspace files, and any snapshots. This cannot be undone.
+        </ModalDescription>
+        <ModalFooter>
+          <ModalClose asChild>
+            <Button variant="ghost" size="sm" disabled={busy}>
+              Cancel
+            </Button>
+          </ModalClose>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={busy}
+            onClick={() => void deleteProject()}
+          >
+            Delete project
+          </Button>
+        </ModalFooter>
+      </Modal>
 
       <Modal
         open={projectModalOpen}
@@ -698,12 +809,14 @@ function ProjectGroupHeader({
   collapsed,
   onCreate,
   onToggle,
+  onContextMenu,
 }: {
   label: string;
   count: number;
   collapsed: boolean;
   onCreate: () => void;
   onToggle: () => void;
+  onContextMenu?: ((x: number, y: number) => void) | undefined;
 }) {
   const Icon = collapsed ? ChevronRight : ChevronDown;
   return (
@@ -711,6 +824,11 @@ function ProjectGroupHeader({
       <button
         type="button"
         onClick={onToggle}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(e.clientX, e.clientY);
+        }}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left hover:bg-raised/60"
       >
         <Icon className="size-3 shrink-0" />

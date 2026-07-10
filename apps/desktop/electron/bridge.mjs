@@ -18,6 +18,8 @@ import { pipeline } from "node:stream/promises";
 import { AgenaClient, parsePtyExit, ulid } from "@agena/client";
 import { EMPTY_PERSISTED } from "../src/shared/bridge.ts";
 import { createBrowserHost } from "./browser-host.mjs";
+import { runImport } from "./importer/run.mjs";
+import { scanImports } from "./importer/scan.mjs";
 import { createTunnelPool, parseLocalPort } from "./tunnel.mjs";
 
 const FLUSH_MS = 16; // one renderer frame per UiBatch (§5.1 of docs/desktop_plan.md)
@@ -372,6 +374,8 @@ export function createBridgeHost({
         return need().createSession(args[0]);
       case "createProject":
         return createProject(args[0]);
+      case "deleteProject":
+        return need().deleteProject(args[0]);
       case "listSessionSummaries":
         return need().listSessionSummaries(args[0] ?? {});
       case "updateSessionStatus":
@@ -422,6 +426,16 @@ export function createBridgeHost({
         return browserHost.popOut();
       case "browserClose":
         return browserHost.close();
+      case "importScan":
+        return scanImports({ userData, refresh: args[0]?.refresh });
+      case "importRun":
+        return runImport(args[0], {
+          client: need(),
+          machineId: await loadClientId(),
+          userData,
+        });
+      case "importStatus":
+        return need().listImports(await loadClientId());
       default: {
         const err = new Error(`unknown bridge method "${method}"`);
         err.code = "INVALID_PAYLOAD";
@@ -443,7 +457,8 @@ export function createBridgeHost({
 
 // ---- helpers -------------------------------------------------------------------
 
-async function tarFolder(src) {
+// Exported for importer/run.mjs (§8 step 2 reuses the same tar + skip-list).
+export async function tarFolder(src) {
   const tmp = await mkdtemp(join(tmpdir(), "agena-upload-"));
   const archive = join(tmp, "upload.tar");
   await pipeline(Readable.from(tarStream(src)), createWriteStream(archive));

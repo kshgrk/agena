@@ -12,6 +12,8 @@ export type UiStore = UiSlice & {
   setTheme: (theme: UiSlice["theme"]) => void;
   togglePalette: () => void;
   setPaletteOpen: (open: boolean) => void;
+  toggleSettings: () => void;
+  setSettingsOpen: (open: boolean) => void;
   toggleInspector: () => void;
   setInspectorOpen: (open: boolean) => void;
   toggleTerminal: () => void;
@@ -28,6 +30,7 @@ export const uiInitial: UiSlice = {
   composerInsert: null,
   theme: "dark",
   paletteOpen: false,
+  settingsOpen: false,
   inspectorOpen: false,
   terminalOpen: false,
   browserOpen: false,
@@ -58,6 +61,8 @@ export const useUi = create<UiStore>((set) => ({
   },
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),

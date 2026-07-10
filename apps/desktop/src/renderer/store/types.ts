@@ -213,6 +213,7 @@ export type UiSlice = {
   composerInsert: { text: string; nonce: number } | null;
   theme: "dark" | "light" | "system";
   paletteOpen: boolean;
+  settingsOpen: boolean;
   inspectorOpen: boolean;
   terminalOpen: boolean;
   /** Browser pane visible in the dock (native WebContentsView follows this). */

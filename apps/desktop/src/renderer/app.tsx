@@ -24,6 +24,7 @@ import { CommandPalette } from "./features/palette/command-palette.tsx";
 import { GlobalHotkeys } from "./features/palette/global-hotkeys.tsx";
 import { SearchPane } from "./features/search/search-pane.tsx";
 import { SessionsRail } from "./features/sessions/sessions-rail.tsx";
+import { SettingsModal } from "./features/settings/settings-modal.tsx";
 import { SnapshotsPane } from "./features/snapshots/snapshots-pane.tsx";
 import { StatusBar } from "./features/statusbar/status-bar.tsx";
 import { TerminalDock } from "./features/terminal/terminal-dock.tsx";
@@ -395,6 +396,7 @@ export function App({ persisted }: { persisted: PersistedState }) {
       <Toasts />
       <ApprovalsHost />
       <CommandPalette />
+      <SettingsModal />
       <GlobalHotkeys />
     </TooltipProvider>
   );

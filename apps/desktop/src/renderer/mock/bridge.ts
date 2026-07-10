@@ -9,6 +9,7 @@ import type {
   DiagnosticsResponse,
   EmptyAck,
   FileEntry,
+  ImportLedgerEntry,
   ListSessionsQuery,
   ModelRef,
   PendingApprovalSummary,
@@ -36,9 +37,12 @@ import {
   type ConnectedInfo,
   EMPTY_PERSISTED,
   type HostFolderFile,
+  type ImportPlan,
+  type ImportRunResult,
   type OpenedProject,
   type PersistedState,
   type ProfileSummary,
+  type ProjectGroup,
   type PtyHandle,
   type ReadEventsPage,
   type UiBatch,
@@ -90,6 +94,31 @@ function fakeSha256(seed: string): string {
   }
   return out;
 }
+
+// Fixture scan (settings_import_plan.md §1): two projects, mixed harnesses;
+// openwork is partially imported so the ledger badges have something to show.
+const IMPORT_PROJECTS: ProjectGroup[] = [
+  {
+    cwd: "/Users/dev/Desktop/Rough/zonko/luf",
+    exists: true,
+    codebaseBytes: 48_234_496,
+    byHarness: {
+      codex: { count: 99, bytes: 31_457_280 },
+      claude: { count: 68, bytes: 20_971_520 },
+      pi: { count: 12, bytes: 2_097_152 },
+    },
+  },
+  {
+    cwd: "/Users/dev/Desktop/Rough/openwork",
+    exists: true,
+    codebaseBytes: 72_704,
+    byHarness: {
+      codex: { count: 0, bytes: 0 },
+      claude: { count: 3, bytes: 1_258_291 },
+      pi: { count: 0, bytes: 0 },
+    },
+  },
+];
 
 function eventText(
   e: AgenaEvent,
@@ -175,6 +204,33 @@ export function createMockBridge(): AgenaBridge {
     }
     return s;
   };
+
+  // openwork already has files + 2 of its 3 claude sessions in the ledger
+  // ("1 new since import"); claude source paths embed the dash-encoded cwd,
+  // which is the anchor the Settings UI joins on.
+  const openworkEnc = "-Users-dev-Desktop-Rough-openwork";
+  const importLedger: ImportLedgerEntry[] = [
+    {
+      id: ulid(),
+      projectId: "prj_openwork",
+      machineId: CLIENT_ID,
+      harness: "files",
+      sourcePath: "/Users/dev/Desktop/Rough/openwork",
+      importedAt: "2026-07-09T08:00:00.000Z",
+    },
+    ...[0, 1].map(
+      (i): ImportLedgerEntry => ({
+        id: ulid(),
+        sessionId: ulid(),
+        projectId: "prj_openwork",
+        machineId: CLIENT_ID,
+        harness: "claude",
+        sourcePath: `/Users/dev/.claude/projects/${openworkEnc}/session-${i}.jsonl`,
+        sourceSessionId: ulid(),
+        importedAt: "2026-07-09T08:00:01.000Z",
+      }),
+    ),
+  ];
 
   const snapshots: SnapshotSummary[] = [
     {
@@ -463,6 +519,17 @@ export function createMockBridge(): AgenaBridge {
       };
     },
 
+    async deleteProject(
+      projectId: string,
+    ): Promise<{ projectId: string; deletedSessions: number }> {
+      requireConnected();
+      const ids = [...world.sessions.values()]
+        .filter((s) => s.summary.projectId === projectId)
+        .map((s) => s.summary.sessionId);
+      for (const id of ids) world.sessions.delete(id);
+      return { projectId, deletedSessions: ids.length };
+    },
+
     async openProjectFolder(): Promise<OpenedProject | null> {
       requireConnected();
       // Pick: Finder via the dev shell, prompt in a plain browser. Copy: the
@@ -732,6 +799,68 @@ export function createMockBridge(): AgenaBridge {
     async listPtys(): Promise<PtySummary[]> {
       requireConnected();
       return [];
+    },
+
+    // ---- local-session import ------------------------------------------------
+    async importScan(opts?: { refresh?: boolean }) {
+      requireConnected();
+      if (opts?.refresh) await sleep(400);
+      return {
+        projects: IMPORT_PROJECTS.map((p) => ({
+          ...p,
+          byHarness: { ...p.byHarness },
+        })),
+        scannedAt: new Date().toISOString(),
+      };
+    },
+
+    async importRun(plan: ImportPlan): Promise<ImportRunResult> {
+      requireConnected();
+      // Fixture theater only — dedupe/idempotency live in the daemon route and
+      // the sqlite UNIQUE constraint, not here.
+      const sessions: ImportRunResult["sessions"] = [];
+      for (const proj of plan.projects) {
+        const scan = IMPORT_PROJECTS.find((p) => p.cwd === proj.cwd);
+        const enc = proj.cwd.replaceAll("/", "-");
+        const projectId = `prj_${proj.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+        importLedger.push({
+          id: ulid(),
+          projectId,
+          machineId: CLIENT_ID,
+          harness: "files",
+          sourcePath: proj.cwd,
+          importedAt: new Date().toISOString(),
+        });
+        for (const harness of proj.harnesses) {
+          for (let i = 0; i < (scan?.byHarness[harness]?.count ?? 0); i++) {
+            const sourcePath = `/Users/dev/.${harness}/projects/${enc}/session-${i}.jsonl`;
+            if (sessions.length === 0) {
+              // one skipped row so the result list exercises that badge tone
+              sessions.push({ sourcePath, status: "skipped" });
+              continue;
+            }
+            const sessionId = ulid();
+            importLedger.push({
+              id: ulid(),
+              sessionId,
+              projectId,
+              machineId: CLIENT_ID,
+              harness,
+              sourcePath,
+              sourceSessionId: ulid(),
+              importedAt: new Date().toISOString(),
+            });
+            sessions.push({ sourcePath, status: "ok", sessionId });
+          }
+        }
+      }
+      await sleep(400);
+      return { sessions };
+    },
+
+    async importStatus() {
+      requireConnected();
+      return { imports: [...importLedger] };
     },
 
     // ---- streams -------------------------------------------------------------------

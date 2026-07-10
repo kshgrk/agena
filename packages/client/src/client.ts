@@ -9,12 +9,16 @@ import {
   type CompactAck,
   type CreateSessionRequest,
   compactAckSchema,
+  type DeleteProjectResponse,
   type DiagnosticsResponse,
   diagnosticsResponseSchema,
   type EmptyAck,
   emptyAckSchema,
   type FileEntry,
   type FileUploadResponse,
+  type ImportSessionRequest,
+  type ImportSessionResponse,
+  type ImportsResponse,
   type InFlightSnapshot,
   type ListSessionsQuery,
   type ModelRef,
@@ -426,6 +430,33 @@ export class AgenaClient {
     return this.fetchJson("POST", "/v1/projects", {
       name,
     }) as Promise<ProjectResponse>;
+  }
+
+  /** Full teardown: db rows, workspace files, pi sessions, snapshots. */
+  async deleteProject(projectId: string): Promise<DeleteProjectResponse> {
+    return this.fetchJson(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(projectId)}`,
+    ) as Promise<DeleteProjectResponse>;
+  }
+
+  async importSession(
+    body: ImportSessionRequest,
+  ): Promise<ImportSessionResponse> {
+    return this.fetchJson(
+      "POST",
+      "/v1/imports/session",
+      body,
+    ) as Promise<ImportSessionResponse>;
+  }
+
+  /** Returns the {@link ImportsResponse} envelope verbatim — the bridge passes it through. */
+  async listImports(machineId?: string): Promise<ImportsResponse> {
+    const qs = machineId ? `?machineId=${encodeURIComponent(machineId)}` : "";
+    return this.fetchJson(
+      "GET",
+      `/v1/imports${qs}`,
+    ) as Promise<ImportsResponse>;
   }
 
   async uploadFiles(

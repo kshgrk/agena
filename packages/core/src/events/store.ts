@@ -47,6 +47,8 @@ export interface CreateSessionInput {
   workspaceId: string;
   title?: string;
   source?: EventSource; // defaults to { kind: "user" } (§5.5 session.created)
+  /** session.created provenance; defaults to "native" ("control" for control scope). */
+  origin?: "import.claude" | "import.codex";
   scope?: SessionScope;
   projectId?: string;
   projectRoot?: string;

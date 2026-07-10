@@ -26,6 +26,7 @@ import {
 import type {
   AgenaEvent,
   EventSource,
+  ImportLedgerEntry,
   SearchHit,
   SessionStatus,
   SnapshotSummary,
@@ -78,6 +79,19 @@ type EventRow = {
   source_client_id: string | null;
   payload: string;
   created_at: string;
+};
+
+type ImportRow = {
+  id: string;
+  session_id: string | null;
+  project_id: string;
+  machine_id: string;
+  harness: ImportLedgerEntry["harness"];
+  source_path: string;
+  source_session_id: string | null;
+  source_mtime_ms: number | null;
+  source_size: number | null;
+  imported_at: string;
 };
 
 type CountRow = { count: number };
@@ -213,6 +227,20 @@ export class SqliteEventStore implements EventStore {
         created_at TEXT NOT NULL
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS imports (
+        id                TEXT PRIMARY KEY,
+        session_id        TEXT,
+        project_id        TEXT NOT NULL,
+        machine_id        TEXT NOT NULL,
+        harness           TEXT NOT NULL CHECK (harness IN ('claude','codex','pi','files')),
+        source_path       TEXT NOT NULL,
+        source_session_id TEXT,
+        source_mtime_ms   REAL,
+        source_size       INTEGER,
+        imported_at       TEXT NOT NULL,
+        UNIQUE (machine_id, harness, source_session_id)
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS snapshots (
         id           TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -258,7 +286,8 @@ export class SqliteEventStore implements EventStore {
         workspaceId: input.workspaceId,
         ...(input.title !== undefined ? { title: input.title } : {}),
         runtime: "pi",
-        origin: scope.scope === "control" ? "control" : "native",
+        origin:
+          input.origin ?? (scope.scope === "control" ? "control" : "native"),
         ...scope,
         rootBranchId: record.rootBranchId,
       },
@@ -543,6 +572,120 @@ export class SqliteEventStore implements EventStore {
       rank: row.rank,
       ...(row.seq !== null ? { seq: row.seq } : {}),
     }));
+  }
+
+  insertImport(
+    entry: Omit<ImportLedgerEntry, "id" | "importedAt">,
+  ): ImportLedgerEntry {
+    const id = ulid();
+    const importedAt = new Date().toISOString();
+    this.#db
+      .prepare(
+        `INSERT INTO imports
+         (id, session_id, project_id, machine_id, harness, source_path,
+          source_session_id, source_mtime_ms, source_size, imported_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        entry.sessionId ?? null,
+        entry.projectId,
+        entry.machineId,
+        entry.harness,
+        entry.sourcePath,
+        entry.sourceSessionId ?? null,
+        entry.sourceMtimeMs ?? null,
+        entry.sourceSize ?? null,
+        importedAt,
+      );
+    return { ...entry, id, importedAt };
+  }
+
+  findImport(
+    machineId: string,
+    harness: string,
+    sourceSessionId: string,
+  ): ImportLedgerEntry | null {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM imports
+         WHERE machine_id = ? AND harness = ? AND source_session_id = ?`,
+      )
+      .get(machineId, harness, sourceSessionId) as ImportRow | undefined;
+    return row ? importFromRow(row) : null;
+  }
+
+  listImports(machineId?: string): ImportLedgerEntry[] {
+    const rows = (
+      machineId === undefined
+        ? this.#db.prepare("SELECT * FROM imports ORDER BY id ASC").all()
+        : this.#db
+            .prepare(
+              "SELECT * FROM imports WHERE machine_id = ? ORDER BY id ASC",
+            )
+            .all(machineId)
+    ) as ImportRow[];
+    return rows.map(importFromRow);
+  }
+
+  /**
+   * Full-teardown of a project: every row referencing it, in one tx. Returns
+   * what the caller must remove from the filesystem (pi JSONLs, snapshot
+   * archives, the workspace root) — null when the project doesn't exist.
+   */
+  deleteProject(projectId: string): {
+    root: string;
+    sessionIds: string[];
+    piSessionPaths: string[];
+    snapshotPaths: string[];
+  } | null {
+    const project = this.#db
+      .prepare("SELECT root FROM projects WHERE id = ?")
+      .get(projectId) as { root: string } | undefined;
+    if (!project) return null;
+    const sessions = this.#db
+      .prepare("SELECT id, pi_session_path FROM sessions WHERE project_id = ?")
+      .all(projectId) as { id: string; pi_session_path: string | null }[];
+    const sessionIds = sessions.map((s) => s.id);
+    const ph = sessionIds.map(() => "?").join(",");
+    const snapshots = sessionIds.length
+      ? (this.#db
+          .prepare(
+            `SELECT storage_path FROM snapshots WHERE session_id IN (${ph})`,
+          )
+          .all(...sessionIds) as { storage_path: string }[])
+      : [];
+    this.#transaction(() => {
+      if (sessionIds.length) {
+        for (const table of [
+          "events",
+          "messages",
+          "tool_calls",
+          "messages_fts",
+          "branches",
+          "snapshots",
+        ]) {
+          this.#db
+            .prepare(`DELETE FROM ${table} WHERE session_id IN (${ph})`)
+            .run(...sessionIds);
+        }
+        this.#db
+          .prepare(`DELETE FROM sessions WHERE id IN (${ph})`)
+          .run(...sessionIds);
+      }
+      this.#db
+        .prepare("DELETE FROM imports WHERE project_id = ?")
+        .run(projectId);
+      this.#db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    });
+    return {
+      root: project.root,
+      sessionIds,
+      piSessionPaths: sessions
+        .map((s) => s.pi_session_path)
+        .filter((p): p is string => p !== null),
+      snapshotPaths: snapshots.map((s) => s.storage_path),
+    };
   }
 
   onCommitted(listener: CommitListener): () => void {
@@ -914,6 +1057,25 @@ function sessionFromRow(row: SessionRow): SessionRecord {
     ...(row.project_root !== null ? { projectRoot: row.project_root } : {}),
     cwd: row.cwd,
     ...(row.host_cwd_hint !== null ? { hostCwdHint: row.host_cwd_hint } : {}),
+  };
+}
+
+function importFromRow(row: ImportRow): ImportLedgerEntry {
+  return {
+    id: row.id,
+    ...(row.session_id !== null ? { sessionId: row.session_id } : {}),
+    projectId: row.project_id,
+    machineId: row.machine_id,
+    harness: row.harness,
+    sourcePath: row.source_path,
+    ...(row.source_session_id !== null
+      ? { sourceSessionId: row.source_session_id }
+      : {}),
+    ...(row.source_mtime_ms !== null
+      ? { sourceMtimeMs: row.source_mtime_ms }
+      : {}),
+    ...(row.source_size !== null ? { sourceSize: row.source_size } : {}),
+    importedAt: row.imported_at,
   };
 }
 

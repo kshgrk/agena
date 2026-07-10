@@ -261,6 +261,18 @@ export const projectResponseSchema = z.object({
 });
 export type ProjectResponse = z.infer<typeof projectResponseSchema>;
 
+export const projectIdParamsSchema = z.object({
+  id: z.string().min(1),
+});
+export type ProjectIdParams = z.infer<typeof projectIdParamsSchema>;
+
+/** Full teardown: rows, workspace files, pi sessions, snapshots (R2 follows the db). */
+export const deleteProjectResponseSchema = z.object({
+  projectId: z.string().min(1),
+  deletedSessions: z.number().int().min(0),
+});
+export type DeleteProjectResponse = z.infer<typeof deleteProjectResponseSchema>;
+
 export const fileUploadQuerySchema = z.object({
   path: z.string().min(1),
   format: z.literal("tar"),
@@ -298,6 +310,65 @@ export const diagnosticsResponseSchema = z.object({
   }),
 });
 export type DiagnosticsResponse = z.infer<typeof diagnosticsResponseSchema>;
+
+// ---- session import (settings_import_plan.md §6) ----------------------------
+
+export const importHarnessSchema = z.enum(["claude", "codex", "pi"]);
+export type Harness = z.infer<typeof importHarnessSchema>;
+
+export const sourceFingerprintSchema = z.object({
+  harness: importHarnessSchema,
+  machineId: z.string().min(1),
+  sourcePath: z.string().min(1),
+  sourceSessionId: z.string().min(1),
+  mtimeMs: z.number().nonnegative(),
+  size: z.number().int().nonnegative(),
+});
+export type SourceFingerprint = z.infer<typeof sourceFingerprintSchema>;
+
+export const importSessionRequestSchema = z.object({
+  projectId: z.string().min(1),
+  projectRoot: z.string().min(1),
+  title: z.string().optional(),
+  sourceFingerprint: sourceFingerprintSchema,
+  /** pi v3 JSONL, converted client-side. ≤ ~13 MB per session — plain JSON body. */
+  piSession: z.string().min(1),
+});
+export type ImportSessionRequest = z.infer<typeof importSessionRequestSchema>;
+
+export const importSessionResponseSchema = z.object({
+  sessionId: z.string().min(1),
+  seededEvents: z.number().int().nonnegative(),
+  /** True when the ledger already had (machineId, harness, sourceSessionId). */
+  alreadyImported: z.boolean(),
+});
+export type ImportSessionResponse = z.infer<typeof importSessionResponseSchema>;
+
+export const listImportsQuerySchema = z.object({
+  machineId: z.string().min(1).optional(),
+});
+export type ListImportsQuery = z.infer<typeof listImportsQuerySchema>;
+
+// Mirrors the daemon `imports` ledger table row.
+export const importLedgerEntrySchema = z.object({
+  id: z.string().min(1),
+  /** Absent for project-only (harness "files") imports. */
+  sessionId: z.string().min(1).optional(),
+  projectId: z.string().min(1),
+  machineId: z.string().min(1),
+  harness: z.enum(["claude", "codex", "pi", "files"]),
+  sourcePath: z.string().min(1),
+  sourceSessionId: z.string().min(1).optional(),
+  sourceMtimeMs: z.number().optional(),
+  sourceSize: z.number().int().optional(),
+  importedAt: z.string(),
+});
+export type ImportLedgerEntry = z.infer<typeof importLedgerEntrySchema>;
+
+export const importsResponseSchema = z.object({
+  imports: z.array(importLedgerEntrySchema),
+});
+export type ImportsResponse = z.infer<typeof importsResponseSchema>;
 
 export function tunnelWsPath(port: number): string {
   return `/v1/tunnels/${port}/ws`;
@@ -400,11 +471,29 @@ export const PTY_HTTP_ROUTES = {
     request: createProjectRequestSchema,
     response: projectResponseSchema,
   },
+  deleteProject: {
+    method: "DELETE",
+    path: "/v1/projects/:id",
+    params: projectIdParamsSchema,
+    response: deleteProjectResponseSchema,
+  },
   uploadFiles: {
     method: "POST",
     path: "/v1/files/upload",
     query: fileUploadQuerySchema,
     response: fileUploadResponseSchema,
+  },
+  importSession: {
+    method: "POST",
+    path: "/v1/imports/session",
+    request: importSessionRequestSchema,
+    response: importSessionResponseSchema,
+  },
+  listImports: {
+    method: "GET",
+    path: "/v1/imports",
+    query: listImportsQuerySchema,
+    response: importsResponseSchema,
   },
   diagnostics: {
     method: "GET",

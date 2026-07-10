@@ -9,12 +9,7 @@ import {
 } from "../store/index.ts";
 import { toast } from "../ui/index.ts";
 import { getBridge } from "./bridge.ts";
-
-function errMsg(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  const m = (err as { message?: unknown } | null)?.message;
-  return typeof m === "string" ? m : "Connection failed";
-}
+import { errMsg } from "./errors.ts";
 
 export async function connectAndBootstrap(
   persisted: PersistedState,
