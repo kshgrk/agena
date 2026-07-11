@@ -393,6 +393,67 @@ test("POST/GET /v1/sessions: bearer-gated create + list (the `agena` boot path)"
   ).toHaveLength(1);
 });
 
+test("provider auth routes save and remove keys without returning them", async () => {
+  let key = "";
+  const provider = (configured: boolean) => ({
+    id: "anthropic",
+    name: "Anthropic",
+    methods: ["api_key" as const],
+    modelCount: 1,
+    configured,
+    ...(configured ? { credentialKind: "api_key" as const } : {}),
+  });
+  const providers = {
+    list: () => [provider(Boolean(key))],
+    async saveApiKey(_id: string, value: string) {
+      key = value;
+      return provider(true);
+    },
+    async remove() {
+      key = "";
+      return provider(false);
+    },
+    async loginOAuth() {
+      return provider(false);
+    },
+  };
+  const daemon = await boot(
+    Object.assign(new FakeRuntimeAdapter(), { providers }),
+  );
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+
+  const saved = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/providers/anthropic/api-key`,
+    { method: "PUT", headers, body: JSON.stringify({ apiKey: "secret" }) },
+  );
+  expect(saved.status).toBe(200);
+  expect(JSON.stringify(await saved.json())).not.toContain("secret");
+  expect(key).toBe("secret");
+
+  const listed = await fetch(`http://127.0.0.1:${daemon.port}/v1/providers`, {
+    headers,
+  });
+  expect(await listed.json()).toMatchObject({
+    providers: [{ id: "anthropic", configured: true }],
+  });
+
+  const removed = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/providers/anthropic/auth`,
+    { method: "DELETE", headers },
+  );
+  expect(removed.status).toBe(200);
+  expect(key).toBe("");
+
+  const oversized = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/providers/${"x".repeat(129)}/api-key`,
+    { method: "PUT", headers, body: JSON.stringify({ apiKey: "key" }) },
+  );
+  expect(oversized.status).toBe(400);
+});
+
 test("GET /v1/search returns project-filtered sqlite FTS hits", async () => {
   const dir = stateDir();
   const daemon = await boot(new FakeRuntimeAdapter(), {

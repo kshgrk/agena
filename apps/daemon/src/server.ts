@@ -65,7 +65,11 @@ import {
   listImportsQuerySchema,
   listSessionsQuerySchema,
   PROTOCOL_VERSION,
+  providerIdParamsSchema,
+  providerOAuthFlowParamsSchema,
+  respondProviderOAuthRequestSchema,
   restoreSnapshotRequestSchema,
+  saveProviderApiKeyRequestSchema,
   searchQuerySchema,
   updateSessionStatusRequestSchema,
   WS_PATH,
@@ -73,10 +77,12 @@ import {
 import { SqliteEventStore } from "@agena/storage-sqlite";
 import { serve } from "@hono/node-server";
 import { type Context, Hono } from "hono";
+import { cors } from "hono/cors";
 import type { DaemonConfig } from "./config.ts";
 import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
 import { McpService } from "./mcp-service.ts";
+import { ProviderAuthService } from "./provider-auth-service.ts";
 import { PtyManager } from "./pty-manager.ts";
 import { SkillService } from "./skill-service.ts";
 import { SnapshotManager } from "./snapshots.ts";
@@ -90,11 +96,66 @@ export interface Daemon {
   close(): Promise<void>;
 }
 
+function tokenValueOk(given: string, token: string): boolean {
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 function tokenOk(header: string | undefined, token: string): boolean {
   if (!header?.startsWith("Bearer ")) return false;
-  const given = Buffer.from(header.slice("Bearer ".length));
-  const want = Buffer.from(token);
-  return given.length === want.length && timingSafeEqual(given, want);
+  return tokenValueOk(header.slice("Bearer ".length), token);
+}
+
+function providerAuthUnavailable(c: Context) {
+  return c.json(
+    {
+      code: "NOT_SUPPORTED",
+      message: "provider authentication requires the Pi runtime",
+      retryable: false,
+    },
+    501,
+  );
+}
+
+function invalidProviderRequest(c: Context) {
+  return c.json(
+    {
+      code: "INVALID_PAYLOAD",
+      message: "invalid provider authentication request",
+      retryable: false,
+    },
+    400,
+  );
+}
+
+function providerAuthError(c: Context, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return c.json(
+    {
+      code: message.includes("not found")
+        ? "NOT_FOUND"
+        : "PROVIDER_AUTH_FAILED",
+      message,
+      retryable: false,
+    },
+    message.includes("not found") ? 404 : 400,
+  );
+}
+
+/** WS upgrades also accept `?token=` — browser WebSocket cannot set headers. */
+function upgradeTokenOk(
+  req: {
+    headers: { authorization?: string | undefined };
+    url?: string | undefined;
+  },
+  token: string,
+): boolean {
+  if (tokenOk(req.headers.authorization, token)) return true;
+  const qs = (req.url ?? "").split("?")[1];
+  if (!qs) return false;
+  const given = new URLSearchParams(qs).get("token");
+  return given !== null && tokenValueOk(given, token);
 }
 
 async function validateSessionScope(
@@ -327,6 +388,16 @@ export async function startDaemon(
   const store: EventStore = sqlite ?? new InMemoryEventStore();
   const mcps = sqlite ? new McpService(sqlite, config.stateDir) : null;
   const skills = sqlite ? new SkillService(sqlite, config.stateDir) : null;
+  const providers =
+    "providers" in adapter &&
+    typeof adapter.providers === "object" &&
+    adapter.providers !== null
+      ? new ProviderAuthService(
+          adapter.providers as ConstructorParameters<
+            typeof ProviderAuthService
+          >[0],
+        )
+      : null;
   await mcps?.initialize();
   // `gateway` is initialized before any frame can be published (frames only
   // flow after a prompt), so the closure is safe.
@@ -369,6 +440,18 @@ export async function startDaemon(
     }),
   );
 
+  // Browser clients (WsBridge) are cross-origin: the authorization header
+  // triggers CORS preflight, so /v1 answers OPTIONS and echoes the origin.
+  // Auth still gates every request — CORS only unblocks the browser's checks.
+  app.use(
+    "/v1/*",
+    cors({
+      origin: (origin) => origin,
+      allowHeaders: ["authorization", "content-type"],
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    }),
+  );
+
   // §9.3 session routes.
   // ponytail: GET/PATCH /v1/sessions/:id lands with richer session management.
   app.use("/v1/*", async (c, next) => {
@@ -389,6 +472,99 @@ export async function startDaemon(
     }),
   );
   app.get("/v1/mcps", (c) => c.json({ mcps: mcps?.list() ?? [] }));
+  app.get("/v1/providers", (c) =>
+    providers
+      ? c.json({ providers: providers.list() })
+      : c.json(
+          {
+            code: "NOT_SUPPORTED",
+            message: "provider authentication requires the Pi runtime",
+            retryable: false,
+          },
+          501,
+        ),
+  );
+  app.put("/v1/providers/:id/api-key", async (c) => {
+    if (!providers) return providerAuthUnavailable(c);
+    const params = providerIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidProviderRequest(c);
+    const parsed = saveProviderApiKeyRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) return invalidProviderRequest(c);
+    try {
+      return c.json({
+        provider: await providers.saveApiKey(
+          params.data.id,
+          parsed.data.apiKey,
+          parsed.data.env,
+        ),
+      });
+    } catch (error) {
+      return providerAuthError(c, error);
+    }
+  });
+  app.delete("/v1/providers/:id/auth", async (c) => {
+    if (!providers) return providerAuthUnavailable(c);
+    const params = providerIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidProviderRequest(c);
+    try {
+      return c.json({ provider: await providers.remove(params.data.id) });
+    } catch (error) {
+      return providerAuthError(c, error);
+    }
+  });
+  app.post("/v1/providers/:id/oauth/start", async (c) => {
+    if (!providers) return providerAuthUnavailable(c);
+    const params = providerIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidProviderRequest(c);
+    try {
+      return c.json(await providers.startOAuth(params.data.id));
+    } catch (error) {
+      return providerAuthError(c, error);
+    }
+  });
+  app.get("/v1/providers/oauth/:flowId", (c) => {
+    if (!providers) return providerAuthUnavailable(c);
+    const params = providerOAuthFlowParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidProviderRequest(c);
+    const status = providers.status(params.data.flowId);
+    return status
+      ? c.json(status)
+      : c.json(
+          {
+            code: "NOT_FOUND",
+            message: "provider OAuth flow not found",
+            retryable: false,
+          },
+          404,
+        );
+  });
+  app.post("/v1/providers/oauth/:flowId/respond", async (c) => {
+    if (!providers) return providerAuthUnavailable(c);
+    const params = providerOAuthFlowParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidProviderRequest(c);
+    const parsed = respondProviderOAuthRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) return invalidProviderRequest(c);
+    try {
+      providers.respond(params.data.flowId, parsed.data);
+      const status = providers.status(params.data.flowId);
+      return status
+        ? c.json(status)
+        : c.json(
+            {
+              code: "NOT_FOUND",
+              message: "provider OAuth flow not found",
+              retryable: false,
+            },
+            404,
+          );
+    } catch (error) {
+      return providerAuthError(c, error);
+    }
+  });
   app.get("/v1/skills", (c) => c.json({ skills: skills?.list() ?? [] }));
   app.post("/v1/skills/check-updates", async (c) => {
     if (!skills)
@@ -1313,7 +1489,7 @@ export async function startDaemon(
   );
 
   server.on("upgrade", (req, socket, head) => {
-    if (!tokenOk(req.headers.authorization, config.token)) {
+    if (!upgradeTokenOk(req, config.token)) {
       socket.write(
         "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
       );

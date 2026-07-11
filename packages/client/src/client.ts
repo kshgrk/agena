@@ -24,6 +24,7 @@ import {
   type ImportSkillResponse,
   type ImportsResponse,
   type InFlightSnapshot,
+  type ListProvidersResponse,
   type ListSessionsQuery,
   type McpSummary,
   type ModelRef,
@@ -32,8 +33,11 @@ import {
   PROTOCOL_VERSION,
   type ProjectResponse,
   type PromptAck,
+  type ProviderAuthResponse,
+  type ProviderOAuthStatusResponse,
   type PtySummary,
   promptAckSchema,
+  type RespondProviderOAuthRequest,
   type RespondToApprovalAck,
   type RuntimeInfoAck,
   respondToApprovalAckSchema,
@@ -47,6 +51,7 @@ import {
   type SkillSummary,
   type SnapshotSummary,
   type StartMcpOAuthResponse,
+  type StartProviderOAuthResponse,
   type SubscribeAck,
   setModelAckSchema,
   setThinkingLevelAckSchema,
@@ -496,6 +501,59 @@ export class AgenaClient {
       `/v1/mcps/${encodeURIComponent(id)}/oauth/complete`,
       body,
     ) as Promise<{ mcp: McpSummary }>;
+  }
+
+  async listProviders(): Promise<ListProvidersResponse> {
+    return this.fetchJson(
+      "GET",
+      "/v1/providers",
+    ) as Promise<ListProvidersResponse>;
+  }
+
+  async saveProviderApiKey(
+    id: string,
+    body: { apiKey: string; env?: Record<string, string> },
+  ): Promise<ProviderAuthResponse> {
+    return this.fetchJson(
+      "PUT",
+      `/v1/providers/${encodeURIComponent(id)}/api-key`,
+      body,
+    ) as Promise<ProviderAuthResponse>;
+  }
+
+  async removeProviderAuth(id: string): Promise<ProviderAuthResponse> {
+    return this.fetchJson(
+      "DELETE",
+      `/v1/providers/${encodeURIComponent(id)}/auth`,
+    ) as Promise<ProviderAuthResponse>;
+  }
+
+  async startProviderOAuth(id: string): Promise<StartProviderOAuthResponse> {
+    return this.fetchJson(
+      "POST",
+      `/v1/providers/${encodeURIComponent(id)}/oauth/start`,
+      {},
+    ) as Promise<StartProviderOAuthResponse>;
+  }
+
+  async providerOAuthStatus(
+    flowId: string,
+  ): Promise<ProviderOAuthStatusResponse> {
+    return this.fetchJson(
+      "GET",
+      `/v1/providers/oauth/${encodeURIComponent(flowId)}`,
+    ) as Promise<ProviderOAuthStatusResponse>;
+  }
+
+  async respondProviderOAuth(
+    flowId: string,
+    body: RespondProviderOAuthRequest,
+  ): Promise<ProviderOAuthStatusResponse> {
+    return this.fetchJson(
+      "POST",
+      `/v1/providers/oauth/${encodeURIComponent(flowId)}/respond`,
+      body,
+    ) as Promise<ProviderOAuthStatusResponse>;
   }
 
   async importSkill(body: ImportSkillRequest): Promise<ImportSkillResponse> {

@@ -273,7 +273,7 @@ The normative on-disk tree (all other sections reference this; the daemon builds
     <sessionId>/<startedAt>.jsonl   # OPT-IN raw runtime event tee (P15) — files, never a table
   pi/
     sessions/                 #   Pi JSONL raw archive layer (SessionManager redirected here)
-    auth.json                 #   Pi AuthStorage, 0600, materialized from env at boot
+    auth.json                 #   Pi AuthStorage, 0600; Settings-managed API keys + OAuth tokens
   skills/                     #   Agena-managed skill packages; durable across image replacement
   raw-imports/
     claude/<machine-id>/<imported-at>/   # untouched import archives
@@ -306,7 +306,7 @@ Consequences, all load-bearing:
 - `/home/agena` is private to the workspace and excluded from workspace snapshots/exports. `HOME`, XDG data/config, npm, pnpm, pipx, Cargo, and Go paths are pinned there; caches default to `/tmp/agena-cache` so rebuildable bytes do not grow durable storage without bound.
 - `/workspace/.agena/environment.toml` is reproducible intent, not live package state. Its v1 grammar is deliberately only `[packages] system = ["debian-package", ...]`. Successful privileged `apt`/`apt-get` mutations update that list from `apt-mark showmanual`; the next workspace-image build uses the normalized list as a cached apt layer. Direct `/usr/bin/apt`, `dpkg -i`, `curl | sh`, and `/usr/local` mutations are not promised persistence.
 - Pi's home is redirected into daemon state (`PI_DIR=/var/lib/agena/pi`, verified at boot), so Pi's raw JSONL archive layer exists without polluting the workspace or snapshots.
-- **Secrets stance (decided):** provider keys live in process env (compose `provider.env`, 0600) with two permitted at-rest materializations under the state volume only: `config/secrets.env` (optional input) and `pi/auth.json` (Pi's AuthStorage, written from env at boot, 0600). Both are excluded from snapshots by construction, redacted in logs/diagnostics (presence booleans only), and never appear in `/workspace`, event payloads, frames, or captures. The earlier "never on any volume" absolute is superseded by this rule.
+- **Provider credentials (decided):** Pi's `pi/auth.json` (`AuthStorage`, 0600) is the single persistent credential source for Settings-managed API keys and subscription OAuth tokens. Process env and the optional `config/secrets.env` remain supported deployment inputs and are reported only as configured credential sources; Agena never copies their values into responses. Pi owns file locking, OAuth refresh, and provider-scoped configuration. The file and optional input are excluded from snapshots by construction, redacted in logs/diagnostics, and never appear in SQLite, `/workspace`, event payloads, frames, or captures.
 - **MCP credentials:** MCP definitions and import status are non-secret daemon state. Static API keys are imported only with explicit user consent and encrypted under `config/mcp-secrets.enc`; OAuth tokens are never copied from Claude or Codex. Agena starts a fresh authorization, owns that client registration and refresh-token family under `config/mcp-oauth/`, and persists every rotated refresh token before reuse. MCP secrets never enter SQLite, `/workspace`, renderer state, events, frames, captures, config responses, or logs.
 
 ## 3.4 Failure-mode stances (anticipated new problems)
@@ -1599,7 +1599,7 @@ const { session, extensionsResult, modelFallbackMessage } = await createAgentSes
   cwd: input.cwd,
   model: resolvedModel,               // resolved via ModelRegistry from the Agena ModelRef
   thinkingLevel: input.thinkingLevel ?? 'off',
-  authStorage,                        // /var/lib/agena/pi/auth.json, 0600, materialized from env
+  authStorage,                        // /var/lib/agena/pi/auth.json, 0600, Pi-owned credentials
   modelRegistry,
   customTools: input.tools.map(bridgeToDefineTool),
   resourceLoader: new DefaultResourceLoader({
@@ -1832,6 +1832,12 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
 | POST | `/v1/imports` | Import upload | tar stream + `{source, machineId}`; raw archive → normalize → summarize (§9.6) |
 | GET | `/v1/imports/:id` | Import status/stats | |
+| GET | `/v1/providers` | List Pi model providers and secret-free auth status | Provider/model availability comes from the pinned Pi registry; no credential values are returned. |
+| PUT | `/v1/providers/:id/api-key` | Save or replace a provider API key | Persists through Pi `AuthStorage`; accepts optional provider-scoped configuration values. |
+| DELETE | `/v1/providers/:id/auth` | Remove stored provider credentials | Ambient deployment credentials may still make the provider available and are never mutated. |
+| POST | `/v1/providers/:id/oauth/start` | Start Pi subscription OAuth | Returns a daemon-owned flow plus the current URL, device-code, prompt, selection, or progress interaction. |
+| GET | `/v1/providers/oauth/:flowId` | Read provider OAuth flow status | Secret-free pending/completed/failed/cancelled state. |
+| POST | `/v1/providers/oauth/:flowId/respond` | Answer or cancel an OAuth interaction | Handles Pi prompt, manual-code, and selection callbacks; auth URLs are opened by the desktop in the system browser. |
 | GET | `/v1/mcps` | List imported MCP definitions/status | Source-neutral; no secret values or source-harness provenance. |
 | POST | `/v1/mcps/import` | Import one normalized MCP | OAuth definitions become `needs_authorization`; static secrets are encrypted before registry commit. |
 | POST | `/v1/mcps/:id/oauth/start` | Start fresh Agena OAuth | Returns an authorization URL; PKCE/state and client registration stay daemon-owned. |
@@ -1846,6 +1852,8 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/ptys/:id/ws` | *(upgrade)* dedicated PTY WS | §9.5 |
 
 Global limits (`middleware/limits.ts`): JSON bodies 1 MiB except file routes; request timeout 30 s except streaming; oversized → `413 PAYLOAD_TOO_LARGE`; the store's post-spill cap is **128 KiB** (§7.7).
+
+Settings exposes these routes as a `Providers` section using the same list rows, status dots, badges, fields, and inline progress treatment as the other settings sections. API keys and provider-scoped settings are write-only; OAuth URLs and device verification open in the system browser, with loopback callbacks relayed by Electron to the daemon-owned flow. After every credential mutation the desktop refreshes loaded runtime info. The composer model picker is populated only from Pi's authenticated `ModelRegistry.getAvailable()` result and treats a disconnected current model as unavailable.
 
 Client HTTP typing: `packages/client/src/http.ts` is a small typed fetch wrapper bound to the per-route Zod schemas exported from `protocol/src/http.ts`. (The `hc<AgenaApiType>`/ToSchema conformance machinery from the client draft is dropped — one consumer doesn't justify it; revisit when a second HTTP client exists.)
 
@@ -1994,7 +2002,7 @@ Env overlay: `AGENA_HOST`, `AGENA_PORT`, `AGENA_AUTH_TOKEN`, `AGENA_STATE_DIR`, 
 
 **`GET /v1/diagnostics`** returns one JSON document — daemon/protocol/Node versions, runtime kind + pinned `PI_SDK_VERSION` + active runtime sessions, storage stats, gateway counters (`framesCoalesced`, `framesDropped`, `slowConsumerCloses`), generating/idle/pendingApprovals counts, live PTYs, **running processes and listening ports inside the container** (`procps`-derived — the direction-doc visibility item, consciously minimal), rawCapture status, secrets **presence booleans only**, redacted config, last-50 error ring buffer.
 
-**Secrets:** sources in precedence order: container env (compose `provider.env`) > `config/secrets.env` (0600). One module maintains the known-key list driving loading, redaction, diagnostics flags, and PTY env stripping. Keys never appear in command payloads, events, frames, config responses, or logs; there is no code path from a secret to `appendEvents`. Cloud future: the same bootstrap step swaps to a vault fetch behind the identical interface.
+**Secrets:** Pi resolves credentials in its documented order: runtime override > `pi/auth.json` > process environment > custom-model fallback. Settings writes only `pi/auth.json`; container env (`provider.env`) and `config/secrets.env` remain deployment-owned inputs. One module maintains the known-key list driving loading, redaction, diagnostics flags, and PTY env stripping. Keys never appear in command payloads, events, frames, config responses, or logs; there is no code path from a secret to `appendEvents`.
 
 **Auth:** `TokenVerifier` interface (`verify(req) → Promise<Principal | null>`), constant-time comparison, 100 ms throttle per remote address after failures; cloud swaps in a JWT/OIDC verifier with zero route changes. `/health` is the only unauthenticated route.
 
@@ -2095,7 +2103,7 @@ volumes:
   home:      { name: agena-home-${AGENA_WORKSPACE_ID} }
 ```
 
-Provider keys: `provider.env` (0600) holds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.; §3.3 secrets stance governs at-rest handling. Known v1 tradeoff: env visible via `docker inspect` locally; `agena shell` does **not** inherit keys by default (`pty.exposeProviderKeys: false`). Cloud replaces this with secret-manager injection.
+Provider keys may be entered through Settings into Pi's persistent `auth.json`; `provider.env` (0600) remains an optional deployment-owned input for `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc. §3.3 governs at-rest handling. Known local tradeoff: env inputs are visible via `docker inspect`; `agena shell` does **not** inherit provider credentials by default (`pty.exposeProviderKeys: false`).
 
 ## 10.4 Workspace lifecycle
 

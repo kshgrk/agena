@@ -1,0 +1,42 @@
+/*
+ * Dockview skin — every value routes through theme.css tokens (design.md §5):
+ * docks sit on bg-surface, one 1px subtle divider, 32px tabs at text-xs with
+ * the active tab carrying a 1px accent underline. No tab backgrounds.
+ */
+.dv-theme-agena {
+  --dv-group-view-background-color: var(--bg-canvas);
+  --dv-tabs-and-actions-container-background-color: var(--bg-surface);
+  --dv-tabs-and-actions-container-height: 32px;
+  --dv-tabs-and-actions-container-font-size: var(--text-xs);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg-surface);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-surface);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg-surface);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg-surface);
+  --dv-activegroup-visiblepanel-tab-color: var(--fg);
+  --dv-activegroup-hiddenpanel-tab-color: var(--fg-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--fg-muted);
+  --dv-tab-divider-color: transparent;
+  --dv-separator-border: var(--border-subtle);
+  --dv-paneview-header-border-color: var(--border-subtle);
+  --dv-active-sash-color: var(--accent);
+  --dv-icon-hover-background-color: var(--bg-raised);
+  --dv-scrollbar-background-color: var(--scrollbar-thumb);
+  --dv-tabs-container-scrollbar-color: var(--scrollbar-thumb);
+  --dv-drag-over-background-color: oklch(from var(--accent) l c h / 0.1);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-context-menu-background-color: var(--bg-raised);
+  --dv-context-menu-color: var(--fg);
+  --dv-floating-box-shadow: var(--shadow-raw-lg);
+}
+
+/* Active tab: 1px accent underline (2px looks heavy at 32px). */
+.dv-theme-agena .dv-tab.dv-active-tab {
+  box-shadow: inset 0 -1px 0 0 var(--accent);
+}
+
+/* Portal host for every dockview panel (see shell/layout.tsx createComponent). */
+.dv-agena-panel {
+  height: 100%;
+  overflow: hidden;
+}

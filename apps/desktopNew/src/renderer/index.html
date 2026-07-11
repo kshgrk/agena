@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en" style="background: oklch(0.155 0.005 270); color-scheme: dark">
+  <!-- Inline background = --bg-canvas from styles/theme.css, painted before any
+       CSS/JS loads so the window never flashes white. Keep in sync with the token. -->
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Dev CSP. 'unsafe-inline' script is required by the Vite React refresh
+         preamble; packaging rewrites this meta to the strict CSP (no inline
+         scripts, connect-src 'self') in scripts/bundle-main.mjs. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss: http: https:; worker-src 'self' blob:"
+    />
+    <title>Agena</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

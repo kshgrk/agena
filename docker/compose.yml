@@ -9,14 +9,14 @@ services:
       dockerfile: docker/Dockerfile
     image: agena-daemon:dev
     init: true # PID-1 signal forwarding without baking tini into the image
-    # Bind mounts may be created as root on Linux. Fix only the state root, then
-    # retain the image's normal non-root runtime for the daemon itself.
+    # Bind mounts may expose existing files as root. Normalize the whole state
+    # tree before retaining the image's normal non-root daemon runtime.
     user: root
     entrypoint:
       [
         "/bin/sh",
         "-c",
-        "chown node:node /var/lib/agena && exec runuser -u node -- node /app/apps/daemon/src/main.ts",
+        "chown -R node:node /var/lib/agena && exec runuser -u node -- node /app/apps/daemon/src/main.ts",
       ]
     restart: unless-stopped
     ports:

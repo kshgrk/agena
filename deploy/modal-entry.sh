@@ -59,7 +59,9 @@ export AGENA_SQLITE_JOURNAL=wal
 # models to Bedrock when it sees them (UnrecognizedClientException 403).
 # Anthropic API is our provider; Litestream uses explicit config-file creds.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION \
-  AWS_DEFAULT_REGION AWS_PROFILE AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE || true
+  AWS_DEFAULT_REGION AWS_PROFILE AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE \
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI \
+  AWS_BEARER_TOKEN_BEDROCK || true
 # Belt and braces: pin the default model to the Anthropic API regardless of
 # what Pi's own scan or a stale pi/auth.json thinks is available.
 export AGENA_PI_DEFAULT_MODEL="anthropic/claude-sonnet-5"

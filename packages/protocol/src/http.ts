@@ -137,6 +137,142 @@ export type CompleteMcpOAuthResponse = z.infer<
   typeof completeMcpOAuthResponseSchema
 >;
 
+// ---- model-provider authentication ----------------------------------------
+
+export const providerAuthMethodSchema = z.enum(["api_key", "oauth"]);
+export const providerAuthSourceSchema = z.enum([
+  "stored",
+  "runtime",
+  "environment",
+  "fallback",
+  "models_json_key",
+  "models_json_command",
+]);
+export const providerAuthSummarySchema = z.object({
+  id: z.string().min(1).max(128),
+  name: z.string().min(1).max(128),
+  modelCount: z.number().int().nonnegative(),
+  methods: z.array(providerAuthMethodSchema).min(1),
+  configured: z.boolean(),
+  credentialKind: providerAuthMethodSchema.optional(),
+  source: providerAuthSourceSchema.optional(),
+  /** Human-readable source label such as an environment-variable name; never a value. */
+  label: z.string().min(1).max(256).optional(),
+});
+export type ProviderAuthSummary = z.infer<typeof providerAuthSummarySchema>;
+export const listProvidersResponseSchema = z.object({
+  providers: z.array(providerAuthSummarySchema),
+});
+export type ListProvidersResponse = z.infer<typeof listProvidersResponseSchema>;
+export const providerIdParamsSchema = z.object({
+  id: z.string().min(1).max(128),
+});
+export const saveProviderApiKeyRequestSchema = z.object({
+  apiKey: z.string().min(1).max(65_536),
+  /** Provider-scoped values (for example Cloudflare account/gateway ids). */
+  env: z.record(z.string().min(1).max(128), z.string().max(4096)).optional(),
+});
+export type SaveProviderApiKeyRequest = z.infer<
+  typeof saveProviderApiKeyRequestSchema
+>;
+export const providerAuthResponseSchema = z.object({
+  provider: providerAuthSummarySchema,
+});
+export type ProviderAuthResponse = z.infer<typeof providerAuthResponseSchema>;
+
+export const providerOAuthStateSchema = z.enum([
+  "pending",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const providerOAuthOptionSchema = z.object({
+  id: z.string().min(1).max(256),
+  label: z.string().min(1).max(512),
+  description: z.string().max(1024).optional(),
+});
+export const providerOAuthInteractionSchema = z
+  .discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("auth_url"),
+      interactionId: z.string().min(1),
+      url: z.string().url(),
+      instructions: z.string().max(4096).optional(),
+    }),
+    z.object({
+      kind: z.literal("device_code"),
+      interactionId: z.string().min(1),
+      userCode: z.string().min(1).max(512),
+      verificationUri: z.string().url(),
+      intervalSeconds: z.number().positive().optional(),
+      expiresInSeconds: z.number().positive().optional(),
+    }),
+    z.object({
+      kind: z.literal("progress"),
+      interactionId: z.string().min(1),
+      message: z.string().min(1).max(4096),
+    }),
+    z.object({
+      kind: z.literal("prompt"),
+      interactionId: z.string().min(1),
+      inputKind: z.enum(["text", "secret", "select", "manual_code"]),
+      message: z.string().min(1).max(4096),
+      placeholder: z.string().max(1024).optional(),
+      options: z.array(providerOAuthOptionSchema).optional(),
+    }),
+  ])
+  .superRefine((value, ctx) => {
+    if (
+      value.kind === "prompt" &&
+      value.inputKind === "select" &&
+      !value.options?.length
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "select prompts require options",
+      });
+    }
+  });
+export type ProviderOAuthInteraction = z.infer<
+  typeof providerOAuthInteractionSchema
+>;
+export const startProviderOAuthResponseSchema = z.object({
+  flowId: z.string().min(1),
+  state: providerOAuthStateSchema,
+  interaction: providerOAuthInteractionSchema.optional(),
+});
+export type StartProviderOAuthResponse = z.infer<
+  typeof startProviderOAuthResponseSchema
+>;
+export const providerOAuthFlowParamsSchema = z.object({
+  flowId: z.string().min(1),
+});
+export const providerOAuthStatusResponseSchema = z.object({
+  flowId: z.string().min(1),
+  providerId: z.string().min(1),
+  state: providerOAuthStateSchema,
+  interaction: providerOAuthInteractionSchema.optional(),
+  error: z.string().min(1).max(4096).optional(),
+});
+export type ProviderOAuthStatusResponse = z.infer<
+  typeof providerOAuthStatusResponseSchema
+>;
+export const respondProviderOAuthRequestSchema = z.discriminatedUnion(
+  "action",
+  [
+    z.object({
+      action: z.literal("respond"),
+      interactionId: z.string().min(1),
+      value: z.string().max(65_536),
+    }),
+    z.object({ action: z.literal("cancel") }),
+  ],
+);
+export type RespondProviderOAuthRequest = z.infer<
+  typeof respondProviderOAuthRequestSchema
+>;
+
 export const sessionScopeSchema = z.enum(["project", "global", "control"]);
 export type SessionScope = z.infer<typeof sessionScopeSchema>;
 export const sessionStatusSchema = z.enum(["active", "idle", "archived"]);
@@ -630,6 +766,43 @@ export const PTY_HTTP_ROUTES = {
     path: "/v1/imports",
     query: listImportsQuerySchema,
     response: importsResponseSchema,
+  },
+  listProviders: {
+    method: "GET",
+    path: "/v1/providers",
+    response: listProvidersResponseSchema,
+  },
+  saveProviderApiKey: {
+    method: "PUT",
+    path: "/v1/providers/:id/api-key",
+    params: providerIdParamsSchema,
+    request: saveProviderApiKeyRequestSchema,
+    response: providerAuthResponseSchema,
+  },
+  removeProviderAuth: {
+    method: "DELETE",
+    path: "/v1/providers/:id/auth",
+    params: providerIdParamsSchema,
+    response: providerAuthResponseSchema,
+  },
+  startProviderOAuth: {
+    method: "POST",
+    path: "/v1/providers/:id/oauth/start",
+    params: providerIdParamsSchema,
+    response: startProviderOAuthResponseSchema,
+  },
+  providerOAuthStatus: {
+    method: "GET",
+    path: "/v1/providers/oauth/:flowId",
+    params: providerOAuthFlowParamsSchema,
+    response: providerOAuthStatusResponseSchema,
+  },
+  respondProviderOAuth: {
+    method: "POST",
+    path: "/v1/providers/oauth/:flowId/respond",
+    params: providerOAuthFlowParamsSchema,
+    request: respondProviderOAuthRequestSchema,
+    response: providerOAuthStatusResponseSchema,
   },
   diagnostics: {
     method: "GET",

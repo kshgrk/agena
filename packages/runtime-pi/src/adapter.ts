@@ -23,12 +23,12 @@ import type {
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
   type AgentSession,
-  AuthStorage,
+  type AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionFactory,
   getAgentDir,
-  ModelRegistry,
+  type ModelRegistry,
   SessionManager,
   SettingsManager,
   VERSION,
@@ -39,6 +39,7 @@ import {
   type MapperState,
   mapPiEvent,
 } from "./event-map.ts";
+import { PiProviderService } from "./provider-service.ts";
 import { sessionNameExtension } from "./session-name-extension.ts";
 import { createVisibleBrowserTool } from "./visible-browser-tool.ts";
 
@@ -175,6 +176,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly id = "pi" as const;
   readonly version = PI_SDK_VERSION;
   readonly piDir: string;
+  readonly providers: PiProviderService;
   #capturesDir: string;
   #defaultModel: string | undefined;
   #sessions = new Map<string, PiRuntimeSession>();
@@ -195,16 +197,17 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         `PI_DIR verification failed: Pi getAgentDir() resolved to "${resolved}", expected "${this.piDir}"`,
       );
     }
+    this.providers = new PiProviderService({
+      piDir: this.piDir,
+      onCredentialsChanged: () => this.reloadExtensions(),
+    });
   }
 
   async createSession(
     input: CreateRuntimeSessionInput,
   ): Promise<RuntimeSession> {
-    const authStorage = AuthStorage.create(join(this.piDir, "auth.json"));
-    const modelRegistry = ModelRegistry.create(
-      authStorage,
-      join(this.piDir, "models.json"),
-    );
+    const authStorage = this.providers.authStorage;
+    const modelRegistry = this.providers.modelRegistry;
     const want =
       input.model ??
       (!input.runtimeSessionRef && this.#defaultModel
@@ -280,6 +283,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       input.sessionId,
       session,
       modelRegistry,
+      authStorage,
       capture,
     );
     this.#sessions.set(input.sessionId, runtime);
@@ -305,6 +309,7 @@ class PiRuntimeSession implements RuntimeSession {
 
   #session: AgentSession;
   #modelRegistry: ModelRegistry;
+  #authStorage: AuthStorage;
 
   #map: MapperState = createMapperState(randomUUID);
   #queue: RuntimeEvent[] = [];
@@ -322,11 +327,13 @@ class PiRuntimeSession implements RuntimeSession {
     sessionId: string,
     session: AgentSession,
     modelRegistry: ModelRegistry,
+    authStorage: AuthStorage,
     capture: ((event: unknown) => void) | null,
   ) {
     this.sessionId = sessionId;
     this.#session = session;
     this.#modelRegistry = modelRegistry;
+    this.#authStorage = authStorage;
     const ref = session.sessionFile;
     if (!ref) {
       throw new Error(
@@ -446,6 +453,10 @@ class PiRuntimeSession implements RuntimeSession {
   }
 
   async info(): Promise<RuntimeInfoAck> {
+    // AuthStorage caches auth.json in memory at create; a session-lifetime
+    // registry otherwise serves the credential state frozen at session start
+    // (phantom bedrock catalogs after creds change). Reload before listing.
+    this.#authStorage.reload();
     return {
       ...(this.#session.model ? { model: modelRef(this.#session.model) } : {}),
       thinkingLevel: this.#session.thinkingLevel,

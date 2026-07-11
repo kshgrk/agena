@@ -13,3 +13,8 @@ export {
 } from "./event-map.ts";
 export type { PiMcpServerEntry } from "./mcp.ts";
 export { completeAuthFromInput, startAuth } from "./mcp.ts";
+export {
+  PiProviderService,
+  type PiProviderServiceOptions,
+  type PiProviderSummary,
+} from "./provider-service.ts";
