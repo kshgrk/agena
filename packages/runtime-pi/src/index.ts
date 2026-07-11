@@ -11,3 +11,5 @@ export {
   type MapperState,
   mapPiEvent,
 } from "./event-map.ts";
+export type { PiMcpServerEntry } from "./mcp.ts";
+export { completeAuthFromInput, startAuth } from "./mcp.ts";

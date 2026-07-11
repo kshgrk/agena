@@ -6,6 +6,13 @@
 # symlinked out to container-local disk.
 set -euo pipefail
 
+# Modal cannot mount a Volume over the image-owned /home/agena directory.
+# Keep HOME stable while the physical persistent mount stays under /mnt.
+rm -rf /home/agena
+ln -s /mnt/agena-home /home/agena
+chmod 700 /mnt/agena-home
+touch /run/agena-runtime
+
 LOCAL_DB_DIR=/root/agena-db
 DB_PATH="$LOCAL_DB_DIR/agena.db"
 mkdir -p "$LOCAL_DB_DIR"

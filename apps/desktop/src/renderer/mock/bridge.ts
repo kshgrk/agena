@@ -37,14 +37,18 @@ import {
   type ConnectedInfo,
   EMPTY_PERSISTED,
   type HostFolderFile,
+  type ImportedMcp,
+  type ImportedSkill,
   type ImportPlan,
   type ImportRunResult,
+  type McpImportRunResult,
   type OpenedProject,
   type PersistedState,
   type ProfileSummary,
   type ProjectGroup,
   type PtyHandle,
   type ReadEventsPage,
+  type SkillImportRunResult,
   type UiBatch,
 } from "../../shared/bridge.ts";
 import {
@@ -170,7 +174,6 @@ export function createMockBridge(): AgenaBridge {
     loading: false,
     canGoBack: false,
     canGoForward: false,
-    poppedOut: false,
   };
   const emitBrowser = (patch: Partial<BrowserState>): void => {
     browserState = { ...browserState, ...patch };
@@ -230,6 +233,53 @@ export function createMockBridge(): AgenaBridge {
         importedAt: "2026-07-09T08:00:01.000Z",
       }),
     ),
+  ];
+  const discoveredMcps = [
+    {
+      id: "harbor-local",
+      identity: "remote:https://mcp.tryharbor.ai/mcp",
+      name: "harbor-mcp",
+      transport: "http" as const,
+      target: "https://mcp.tryharbor.ai/mcp",
+      authKind: "oauth" as const,
+      authStatus: "needs_authorization" as const,
+    },
+    {
+      id: "filesystem-local",
+      identity: 'stdio:["npx","-y","@modelcontextprotocol/server-filesystem"]',
+      name: "filesystem",
+      transport: "stdio" as const,
+      target: "npx -y @modelcontextprotocol/server-filesystem",
+      authKind: "none" as const,
+      authStatus: "ready" as const,
+    },
+  ];
+  const importedMcps: ImportedMcp[] = [];
+  const discoveredSkills = [
+    {
+      id: "frontend-local",
+      identity: "local-skill:frontend",
+      contentHash: "sha256-frontend-v2",
+      name: "frontend-design",
+      description: "Build distinctive production interfaces.",
+      fileCount: 3,
+    },
+    {
+      id: "cloudflare-local",
+      identity: "local-skill:cloudflare",
+      contentHash: "sha256-cloudflare",
+      name: "cloudflare",
+      fileCount: 1,
+    },
+  ];
+  const importedSkills: ImportedSkill[] = [
+    {
+      id: "skill_frontend",
+      identity: "local-skill:frontend",
+      contentHash: "sha256-frontend-v1",
+      name: "frontend-design",
+      status: "ready",
+    },
   ];
 
   const snapshots: SnapshotSummary[] = [
@@ -863,6 +913,109 @@ export function createMockBridge(): AgenaBridge {
       return { imports: [...importLedger] };
     },
 
+    async mcpImportScan(opts?: { refresh?: boolean }) {
+      requireConnected();
+      if (opts?.refresh) await sleep(250);
+      return {
+        mcps: discoveredMcps.map((mcp) => ({ ...mcp })),
+        scannedAt: new Date().toISOString(),
+      };
+    },
+
+    async mcpImportRun(plan: { ids: string[] }): Promise<McpImportRunResult> {
+      requireConnected();
+      const mcps: McpImportRunResult["mcps"] = [];
+      for (const id of plan.ids) {
+        const found = discoveredMcps.find((mcp) => mcp.id === id);
+        if (!found) {
+          mcps.push({ id, status: "error", error: "MCP not found" });
+          continue;
+        }
+        const mcpId = `mcp_${id}`;
+        const status =
+          found.authKind === "oauth" ? "needs_authorization" : "imported";
+        importedMcps.push({
+          id: mcpId,
+          identity: found.identity,
+          name: found.name,
+          status,
+        });
+        mcps.push({
+          id,
+          mcpId,
+          status:
+            status === "needs_authorization"
+              ? "needs_authorization"
+              : "imported",
+        });
+      }
+      await sleep(250);
+      return { mcps };
+    },
+
+    async mcpImportStatus() {
+      requireConnected();
+      return { mcps: importedMcps.map((mcp) => ({ ...mcp })) };
+    },
+
+    async mcpAuthStart(mcpId: string) {
+      requireConnected();
+      const mcp = importedMcps.find((item) => item.id === mcpId);
+      if (mcp) mcp.status = "ready";
+    },
+
+    async skillImportScan(opts?: { refresh?: boolean }) {
+      requireConnected();
+      if (opts?.refresh) await sleep(250);
+      return {
+        skills: discoveredSkills.map((skill) => ({ ...skill })),
+        scannedAt: new Date().toISOString(),
+      };
+    },
+
+    async skillImportRun(plan: {
+      ids: string[];
+    }): Promise<SkillImportRunResult> {
+      requireConnected();
+      const skills: SkillImportRunResult["skills"] = [];
+      for (const id of plan.ids) {
+        const found = discoveredSkills.find((skill) => skill.id === id);
+        if (!found) {
+          skills.push({ id, status: "error", error: "Skill not found" });
+          continue;
+        }
+        const previous = importedSkills.find(
+          (skill) => skill.identity === found.identity,
+        );
+        if (previous) {
+          previous.contentHash = found.contentHash;
+          skills.push({ id, skillId: previous.id, status: "imported" });
+        } else {
+          const skillId = `skill_${id}`;
+          importedSkills.push({
+            id: skillId,
+            identity: found.identity,
+            contentHash: found.contentHash,
+            name: found.name,
+            status: "ready",
+          });
+          skills.push({ id, skillId, status: "imported" });
+        }
+      }
+      return { skills };
+    },
+
+    async skillImportStatus() {
+      requireConnected();
+      return { skills: importedSkills.map((skill) => ({ ...skill })) };
+    },
+
+    async skillUpdate(skillId: string) {
+      requireConnected();
+      const skill = importedSkills.find((item) => item.id === skillId);
+      if (skill) skill.status = "ready";
+    },
+
     // ---- streams -------------------------------------------------------------------
     onBatch(cb: (batch: UiBatch) => void): () => void {
       return world.onBatch(cb);
@@ -893,8 +1046,8 @@ export function createMockBridge(): AgenaBridge {
     async browserOpenDevTools(): Promise<void> {
       console.info("[mock] browserOpenDevTools — no-op in the browser mock");
     },
-    async browserPopOut(): Promise<void> {
-      emitBrowser({ poppedOut: !browserState.poppedOut });
+    async browserOpenExternal(): Promise<void> {
+      console.info("[mock] browserOpenExternal", browserState.url);
     },
     async browserClose(): Promise<void> {
       emitBrowser({
@@ -903,7 +1056,6 @@ export function createMockBridge(): AgenaBridge {
         loading: false,
         canGoBack: false,
         canGoForward: false,
-        poppedOut: false,
       });
     },
     onBrowserState(cb: (state: BrowserState) => void): () => void {

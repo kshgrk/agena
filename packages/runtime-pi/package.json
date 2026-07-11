@@ -12,6 +12,8 @@
     "@agena/protocol": "workspace:*",
     "@earendil-works/pi-ai": "0.80.3",
     "@earendil-works/pi-coding-agent": "0.80.3",
+    "jiti": "2.7.0",
+    "pi-mcp-adapter": "2.11.0",
     "typebox": "1.1.38"
   }
 }

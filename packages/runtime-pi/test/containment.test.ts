@@ -10,7 +10,7 @@
 // behavior.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   DefaultResourceLoader,
   SettingsManager,
@@ -34,6 +34,12 @@ function plantExtensions(): { cwd: string; agentDir: string } {
     join(cwd, ".pi", "extensions", "planted-project.ts"),
     EXTENSION_SOURCE,
   );
+  const skillDir = join(dirname(agentDir), "skills", "skill_test");
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(
+    join(skillDir, "SKILL.md"),
+    "---\nname: test-skill\ndescription: Imported test skill\n---\nUse it.\n",
+  );
   return { cwd, agentDir };
 }
 
@@ -52,12 +58,29 @@ it("M1-R2: contained loader loads no filesystem extensions", async () => {
     open.getExtensions().extensions.length + open.getExtensions().errors.length;
   expect(discovered).toBeGreaterThan(0);
 
-  // The adapter's configuration loads only its bundled session-name extension.
+  // Only Agena's explicit extensions load; planted filesystem extensions do not.
   const contained = containedResourceLoader(cwd, agentDir);
   await contained.reload();
-  expect(contained.getExtensions().extensions.map((e) => e.path)).toEqual([
-    "<inline:1>",
-  ]);
+  const paths = contained.getExtensions().extensions.map((e) => e.path);
+  expect(paths).toContain("<inline:1>");
+  expect(paths.some((path) => path.includes("pi-mcp-adapter"))).toBe(true);
+  expect(paths.some((path) => path.includes("planted-"))).toBe(false);
   expect(contained.getExtensions().errors).toEqual([]);
-  expect(contained.getSkills().skills).toEqual([]);
+  expect(contained.getSkills().skills.map((skill) => skill.name)).toEqual([
+    "test-skill",
+  ]);
+
+  const later = join(dirname(agentDir), "skills", "skill_later");
+  mkdirSync(later, { recursive: true });
+  writeFileSync(
+    join(later, "SKILL.md"),
+    "---\nname: later-skill\ndescription: Imported after startup\n---\nUse it.\n",
+  );
+  await contained.reload();
+  expect(
+    contained
+      .getSkills()
+      .skills.map((skill) => skill.name)
+      .sort(),
+  ).toEqual(["later-skill", "test-skill"]);
 });

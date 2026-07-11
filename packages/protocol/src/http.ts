@@ -1,6 +1,142 @@
 import { z } from "zod";
 import { approvalRequestedSchema } from "./events.ts";
 
+export const importSkillRequestSchema = z.object({
+  identity: z.string().min(1).max(2048),
+  name: z
+    .string()
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+    .max(64),
+  description: z.string().min(1).max(1024),
+  source: z
+    .object({
+      url: z.string().url(),
+      path: z.string().min(1).optional(),
+      revision: z.string().min(1).max(256).optional(),
+    })
+    .optional(),
+  files: z
+    .array(
+      z.object({
+        path: z.string().min(1).max(512),
+        contentBase64: z.string().max(14 * 1024 * 1024),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+export type ImportSkillRequest = z.infer<typeof importSkillRequestSchema>;
+export const skillSummarySchema = z.object({
+  id: z.string().min(1),
+  identity: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceUrl: z.string().optional(),
+  sourcePath: z.string().optional(),
+  sourceRevision: z.string().optional(),
+  status: z.enum(["ready", "update_available", "error"]),
+  importedAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SkillSummary = z.infer<typeof skillSummarySchema>;
+export const importSkillResponseSchema = z.object({
+  skill: skillSummarySchema,
+});
+export type ImportSkillResponse = z.infer<typeof importSkillResponseSchema>;
+export const listSkillsResponseSchema = z.object({
+  skills: z.array(skillSummarySchema),
+});
+export type ListSkillsResponse = z.infer<typeof listSkillsResponseSchema>;
+export const checkSkillUpdatesResponseSchema = listSkillsResponseSchema;
+export type CheckSkillUpdatesResponse = ListSkillsResponse;
+export const skillIdParamsSchema = z.object({ id: z.string().min(1) });
+export const updateSkillResponseSchema = z.object({
+  skill: skillSummarySchema,
+});
+export type UpdateSkillResponse = z.infer<typeof updateSkillResponseSchema>;
+
+export const mcpTransportSchema = z.enum(["stdio", "http", "sse"]);
+export const mcpAuthKindSchema = z.enum(["none", "oauth", "api_key"]);
+export const mcpStatusSchema = z.enum([
+  "imported",
+  "needs_auth",
+  "connected",
+  "error",
+]);
+const mcpStringMapSchema = z.record(z.string(), z.string());
+
+export const importMcpRequestSchema = z
+  .object({
+    identity: z.string().min(1).max(2048),
+    name: z.string().min(1).max(128),
+    transport: mcpTransportSchema,
+    command: z.string().min(1).optional(),
+    args: z.array(z.string()).optional(),
+    url: z.string().url().optional(),
+    env: mcpStringMapSchema.optional(),
+    headers: mcpStringMapSchema.optional(),
+    auth: z.object({
+      kind: mcpAuthKindSchema,
+      secretValues: mcpStringMapSchema.optional(),
+    }),
+  })
+  .superRefine((value, ctx) => {
+    if (value.transport === "stdio" && !value.command) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["command"],
+        message: "command is required for stdio",
+      });
+    }
+    if (value.transport !== "stdio" && !value.url) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["url"],
+        message: "url is required for remote MCPs",
+      });
+    }
+  });
+export type ImportMcpRequest = z.infer<typeof importMcpRequestSchema>;
+
+export const mcpSummarySchema = z.object({
+  id: z.string().min(1),
+  identity: z.string().min(1),
+  name: z.string().min(1),
+  transport: mcpTransportSchema,
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  url: z.string().optional(),
+  authKind: mcpAuthKindSchema,
+  status: mcpStatusSchema,
+  importedAt: z.string(),
+  updatedAt: z.string(),
+});
+export type McpSummary = z.infer<typeof mcpSummarySchema>;
+export const importMcpResponseSchema = z.object({ mcp: mcpSummarySchema });
+export type ImportMcpResponse = z.infer<typeof importMcpResponseSchema>;
+export const listMcpsResponseSchema = z.object({
+  mcps: z.array(mcpSummarySchema),
+});
+export type ListMcpsResponse = z.infer<typeof listMcpsResponseSchema>;
+export const mcpIdParamsSchema = z.object({ id: z.string().min(1) });
+export const startMcpOAuthResponseSchema = z.object({
+  authorizationUrl: z.string(),
+});
+export type StartMcpOAuthResponse = z.infer<typeof startMcpOAuthResponseSchema>;
+export const completeMcpOAuthRequestSchema = z.object({
+  redirectUrl: z.string().url(),
+});
+export type CompleteMcpOAuthRequest = z.infer<
+  typeof completeMcpOAuthRequestSchema
+>;
+export const completeMcpOAuthResponseSchema = z.object({
+  mcp: mcpSummarySchema,
+});
+export type CompleteMcpOAuthResponse = z.infer<
+  typeof completeMcpOAuthResponseSchema
+>;
+
 export const sessionScopeSchema = z.enum(["project", "global", "control"]);
 export type SessionScope = z.infer<typeof sessionScopeSchema>;
 export const sessionStatusSchema = z.enum(["active", "idle", "archived"]);

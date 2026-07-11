@@ -11,6 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -18,8 +19,14 @@ import { pipeline } from "node:stream/promises";
 import { AgenaClient, parsePtyExit, ulid } from "@agena/client";
 import { EMPTY_PERSISTED } from "../src/shared/bridge.ts";
 import { createBrowserHost } from "./browser-host.mjs";
+import { importMcps, scanMcps } from "./importer/mcp.mjs";
 import { runImport } from "./importer/run.mjs";
 import { scanImports } from "./importer/scan.mjs";
+import {
+  importSkills,
+  publicSkillIdentity,
+  scanSkills,
+} from "./importer/skills.mjs";
 import { createTunnelPool, parseLocalPort } from "./tunnel.mjs";
 
 const FLUSH_MS = 16; // one renderer frame per UiBatch (§5.1 of docs/desktop_plan.md)
@@ -32,6 +39,56 @@ export function createBridgeHost({
   getWindow,
 }) {
   let client = null;
+  let oauthServer = null;
+
+  const beginSystemOAuth = async (authorizationUrl, complete) => {
+    if (oauthServer)
+      throw new Error("another MCP authorization is in progress");
+    let resolveCompletion;
+    let rejectCompletion;
+    const completion = new Promise((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    oauthServer = createServer(async (req, res) => {
+      const redirectUrl = `http://127.0.0.1:19876${req.url ?? "/"}`;
+      try {
+        await complete(redirectUrl);
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          "<h1>Authorization complete</h1><p>This MCP is ready in Agena.</p>",
+        );
+        resolveCompletion();
+      } catch (error) {
+        res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+        res.end("Agena could not complete this authorization.");
+        rejectCompletion(error);
+      } finally {
+        oauthServer?.close();
+        oauthServer = null;
+      }
+    });
+    await new Promise((resolve, reject) => {
+      oauthServer.once("error", reject);
+      oauthServer.listen(19876, "127.0.0.1", resolve);
+    });
+    const { shell } = await import("electron");
+    await shell.openExternal(authorizationUrl);
+    return { completion };
+  };
+
+  const startMcpOAuth = async (mcpId) => {
+    const result = await need().startMcpOAuth(mcpId);
+    if (!result.authorizationUrl)
+      throw new Error("daemon did not return an authorization URL");
+    const { completion } = await beginSystemOAuth(
+      result.authorizationUrl,
+      (redirectUrl) => need().completeMcpOAuth(mcpId, { redirectUrl }),
+    );
+    void completion.catch((error) =>
+      console.error("MCP OAuth completion failed", error),
+    );
+  };
 
   // ---- embedded browser: tunnel pool + WebContentsView host -----------------
   const tunnelPool = createTunnelPool({ url, token });
@@ -202,6 +259,18 @@ export function createBridgeHost({
       schedule();
     };
     client.onVisibleBrowserRequest = async (action) => {
+      if (action.action === "openExternalOAuth") {
+        const listed = await need().listMcps();
+        const mcps = Array.isArray(listed) ? listed : listed.mcps;
+        const mcp = mcps.find((item) => item.name === action.serverName);
+        if (!mcp) throw new Error(`MCP "${action.serverName}" is not imported`);
+        const { completion } = await beginSystemOAuth(
+          action.url,
+          (redirectUrl) => need().completeMcpOAuth(mcp.id, { redirectUrl }),
+        );
+        await completion;
+        return { url: action.url, title: "OAuth complete", value: true };
+      }
       if (action.action === "open") {
         const target = await resolveBrowserUrl(action.url);
         return browserHost.agentRequest({ ...action, url: target });
@@ -422,8 +491,8 @@ export function createBridgeHost({
         return browserHost.setVisible(args[0]);
       case "browserOpenDevTools":
         return browserHost.openDevTools();
-      case "browserPopOut":
-        return browserHost.popOut();
+      case "browserOpenExternal":
+        return browserHost.openExternal();
       case "browserClose":
         return browserHost.close();
       case "importScan":
@@ -436,6 +505,60 @@ export function createBridgeHost({
         });
       case "importStatus":
         return need().listImports(await loadClientId());
+      case "mcpImportScan":
+        return scanMcps({ refresh: args[0]?.refresh });
+      case "mcpImportRun":
+        return importMcps(args[0], need());
+      case "mcpImportStatus": {
+        const result = await need().listMcps();
+        const mcps = Array.isArray(result) ? result : result.mcps;
+        return {
+          mcps: mcps.map((mcp) => ({
+            id: mcp.id,
+            identity: mcp.identity,
+            name: mcp.name,
+            status:
+              mcp.status === "needs_auth"
+                ? "needs_authorization"
+                : mcp.status === "error"
+                  ? "error"
+                  : mcp.status === "connected"
+                    ? "ready"
+                    : "imported",
+          })),
+        };
+      }
+      case "mcpAuthStart":
+        return startMcpOAuth(args[0]);
+      case "skillImportScan": {
+        const local = await scanImports({ userData });
+        return scanSkills({
+          refresh: args[0]?.refresh,
+          projectRoots: local.projects
+            .filter((project) => project.exists)
+            .map((project) => project.cwd),
+        });
+      }
+      case "skillImportRun":
+        return importSkills(args[0], need());
+      case "skillImportStatus": {
+        const listed = args[0]?.refresh
+          ? await need().checkSkillUpdates()
+          : await need().listSkills();
+        const skills = Array.isArray(listed) ? listed : listed.skills;
+        return {
+          skills: skills.map((skill) => {
+            const { sourceUrl, sourcePath, sourceRevision, ...safe } = skill;
+            void sourceUrl;
+            void sourcePath;
+            void sourceRevision;
+            return { ...safe, identity: publicSkillIdentity(skill.identity) };
+          }),
+        };
+      }
+      case "skillUpdate":
+        await need().updateSkill(args[0]);
+        return;
       default: {
         const err = new Error(`unknown bridge method "${method}"`);
         err.code = "INVALID_PAYLOAD";
@@ -447,6 +570,7 @@ export function createBridgeHost({
   return {
     call,
     dispose: async () => {
+      oauthServer?.close();
       browserHost.close();
       tunnelPool.closeAll();
       await client?.close().catch(() => {});

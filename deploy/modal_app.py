@@ -4,13 +4,14 @@
 #   - ONE container ever (max_containers=1): the daemon is the single writer.
 #   - SQLite on container-local disk, Litestream-replicated to Cloudflare R2
 #     (bucket "agena"); restored + integrity-checked at boot (modal-entry.sh).
-#   - /var/lib/agena (Pi session JSONL, config, imports) and /workspace on
-#     Modal Volumes — durable across restarts; db/ is symlinked off the volume.
+#   - State, workspace, and user home are separate Modal Volumes; the home
+#     volume mounts at /mnt/agena-home and the entrypoint links /home/agena.
 #   - Secrets: agena-daemon (AGENA_AUTH_TOKEN, ANTHROPIC_API_KEY),
 #     agena-r2 (LITESTREAM_* keys, R2_ENDPOINT, R2_BUCKET).
 import subprocess
 
 import modal
+from environment_manifest import system_packages
 
 LITESTREAM = "v0.3.13"
 LITESTREAM_DEB = (
@@ -20,6 +21,21 @@ LITESTREAM_DEB = (
 
 app = modal.App("agena")
 
+state = modal.Volume.from_name("agena-state", create_if_missing=True)
+workspace = modal.Volume.from_name("agena-workspace", create_if_missing=True)
+home = modal.Volume.from_name("agena-home", create_if_missing=True)
+
+
+def deployed_system_packages() -> tuple[str, ...]:
+    """Read the durable workspace intent before constructing the image graph."""
+    try:
+        raw = b"".join(workspace.read_file("/.agena/environment.toml"))
+    except FileNotFoundError:
+        return ()
+    return system_packages(raw)
+
+
+system = deployed_system_packages()
 image = (
     modal.Image.from_dockerfile("docker/Dockerfile", context_dir=".", add_python="3.12")
     .dockerfile_commands(
@@ -29,18 +45,26 @@ image = (
             " && rm -rf /var/lib/apt/lists/*",
             f"RUN wget -qO /tmp/litestream.deb {LITESTREAM_DEB}"
             " && dpkg -i /tmp/litestream.deb && rm /tmp/litestream.deb",
+            "RUN apt-mark showmanual | sort -u > /opt/agena/base-manual-packages",
         ]
     )
-    .add_local_file("deploy/modal-entry.sh", "/app/modal-entry.sh")
 )
-
-state = modal.Volume.from_name("agena-state", create_if_missing=True)
-workspace = modal.Volume.from_name("agena-workspace", create_if_missing=True)
+if system:
+    image = image.apt_install(*system)
+image = image.add_local_file(
+    "deploy/modal-entry.sh", "/app/modal-entry.sh"
+).add_local_file(
+    "deploy/environment_manifest.py", "/root/environment_manifest.py"
+)
 
 
 @app.function(
     image=image,
-    volumes={"/var/lib/agena": state, "/workspace": workspace},
+    volumes={
+        "/var/lib/agena": state,
+        "/workspace": workspace,
+        "/mnt/agena-home": home,
+    },
     secrets=[
         modal.Secret.from_name("agena-daemon"),
         modal.Secret.from_name("agena-r2"),

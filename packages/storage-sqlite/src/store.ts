@@ -1,5 +1,7 @@
 // SQLite-backed EventStore (§7.4/§7.5), first M2 slice: durable sessions,
 // append tx, paged replay, and post-commit fanout behind the existing core port.
+
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -27,8 +29,10 @@ import type {
   AgenaEvent,
   EventSource,
   ImportLedgerEntry,
+  McpSummary,
   SearchHit,
   SessionStatus,
+  SkillSummary,
   SnapshotSummary,
 } from "@agena/protocol";
 import { durableEventSchemas } from "@agena/protocol";
@@ -94,6 +98,40 @@ type ImportRow = {
   imported_at: string;
 };
 
+type McpRow = {
+  id: string;
+  identity: string;
+  name: string;
+  transport: McpSummary["transport"];
+  command: string | null;
+  args: string | null;
+  url: string | null;
+  auth_kind: McpSummary["authKind"];
+  status: McpSummary["status"];
+  config: string;
+  imported_at: string;
+  updated_at: string;
+};
+
+type SkillRow = {
+  id: string;
+  identity: string;
+  name: string;
+  description: string | null;
+  content_hash: string;
+  source_url: string | null;
+  source_path: string | null;
+  source_revision: string | null;
+  status: SkillSummary["status"];
+  imported_at: string;
+  updated_at: string;
+};
+
+export type McpRegistryRecord = McpSummary & {
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+};
+
 type CountRow = { count: number };
 type TableColumnRow = { name: string };
 type SearchRow = {
@@ -103,6 +141,48 @@ type SearchRow = {
   rank: number;
   seq: number | null;
 };
+
+function mcpFromRow(row: McpRow): McpRegistryRecord {
+  const config = JSON.parse(row.config) as {
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+  };
+  return {
+    id: row.id,
+    identity: row.identity,
+    name: row.name,
+    transport: row.transport,
+    ...(row.command ? { command: row.command } : {}),
+    ...(row.args ? { args: JSON.parse(row.args) as string[] } : {}),
+    ...(row.url ? { url: row.url } : {}),
+    authKind: row.auth_kind,
+    status: row.status,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+    ...(config.env && Object.keys(config.env).length
+      ? { env: config.env }
+      : {}),
+    ...(config.headers && Object.keys(config.headers).length
+      ? { headers: config.headers }
+      : {}),
+  };
+}
+
+function skillFromRow(row: SkillRow): SkillSummary {
+  return {
+    id: row.id,
+    identity: row.identity,
+    name: row.name,
+    ...(row.description ? { description: row.description } : {}),
+    contentHash: row.content_hash,
+    ...(row.source_url ? { sourceUrl: row.source_url } : {}),
+    ...(row.source_path ? { sourcePath: row.source_path } : {}),
+    ...(row.source_revision ? { sourceRevision: row.source_revision } : {}),
+    status: row.status,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
@@ -241,6 +321,35 @@ export class SqliteEventStore implements EventStore {
         UNIQUE (machine_id, harness, source_session_id)
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS mcps (
+        id          TEXT PRIMARY KEY,
+        identity    TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL UNIQUE,
+        transport   TEXT NOT NULL CHECK (transport IN ('stdio','http','sse')),
+        command     TEXT,
+        args        TEXT CHECK (args IS NULL OR json_valid(args)),
+        url         TEXT,
+        auth_kind   TEXT NOT NULL CHECK (auth_kind IN ('none','oauth','api_key')),
+        status      TEXT NOT NULL CHECK (status IN ('imported','needs_auth','connected','error')),
+        config      TEXT NOT NULL CHECK (json_valid(config)),
+        imported_at TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS skills (
+        id              TEXT PRIMARY KEY,
+        identity        TEXT NOT NULL UNIQUE,
+        name            TEXT NOT NULL UNIQUE,
+        description     TEXT,
+        content_hash    TEXT NOT NULL,
+        source_url      TEXT,
+        source_path     TEXT,
+        source_revision TEXT,
+        status          TEXT NOT NULL CHECK (status IN ('ready','update_available','error')),
+        imported_at     TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS snapshots (
         id           TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -255,6 +364,7 @@ export class SqliteEventStore implements EventStore {
       ) STRICT;
     `);
     this.#migrateSessionColumns();
+    this.#migrateMcpColumns();
     this.#db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_scope
         ON sessions(scope, project_id, updated_at);
@@ -628,6 +738,132 @@ export class SqliteEventStore implements EventStore {
     return rows.map(importFromRow);
   }
 
+  upsertMcp(
+    input: Omit<McpRegistryRecord, "id" | "importedAt" | "updatedAt">,
+  ): McpRegistryRecord {
+    const existing = this.#db
+      .prepare("SELECT id, imported_at FROM mcps WHERE identity = ?")
+      .get(input.identity) as { id: string; imported_at: string } | undefined;
+    const id = existing?.id ?? ulid();
+    const now = new Date().toISOString();
+    const importedAt = existing?.imported_at ?? now;
+    const config = JSON.stringify({
+      env: input.env ?? {},
+      headers: input.headers ?? {},
+    });
+    this.#db
+      .prepare(`INSERT INTO mcps
+      (id,identity,name,transport,command,args,url,auth_kind,status,config,imported_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(identity) DO UPDATE SET name=excluded.name,transport=excluded.transport,command=excluded.command,
+      args=excluded.args,url=excluded.url,auth_kind=excluded.auth_kind,status=excluded.status,
+      config=excluded.config,updated_at=excluded.updated_at`)
+      .run(
+        id,
+        input.identity,
+        input.name,
+        input.transport,
+        input.command ?? null,
+        input.args ? JSON.stringify(input.args) : null,
+        input.url ?? null,
+        input.authKind,
+        input.status,
+        config,
+        importedAt,
+        now,
+      );
+    const record = this.getMcp(id);
+    if (!record) throw new Error("failed to persist MCP registry record");
+    return record;
+  }
+
+  getMcp(id: string): McpRegistryRecord | null {
+    const row = this.#db.prepare("SELECT * FROM mcps WHERE id = ?").get(id) as
+      | McpRow
+      | undefined;
+    return row ? mcpFromRow(row) : null;
+  }
+
+  listMcps(): McpRegistryRecord[] {
+    return (
+      this.#db
+        .prepare("SELECT * FROM mcps ORDER BY name COLLATE NOCASE")
+        .all() as McpRow[]
+    ).map(mcpFromRow);
+  }
+
+  setMcpStatus(
+    id: string,
+    status: McpSummary["status"],
+  ): McpRegistryRecord | null {
+    this.#db
+      .prepare("UPDATE mcps SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), id);
+    return this.getMcp(id);
+  }
+
+  upsertSkill(
+    input: Omit<SkillSummary, "id" | "importedAt" | "updatedAt">,
+  ): SkillSummary {
+    const existing = this.#db
+      .prepare("SELECT id, imported_at FROM skills WHERE identity = ?")
+      .get(input.identity) as { id: string; imported_at: string } | undefined;
+    const id =
+      existing?.id ??
+      `skill_${createHash("sha256").update(input.identity).digest("hex").slice(0, 24)}`;
+    const now = new Date().toISOString();
+    const importedAt = existing?.imported_at ?? now;
+    this.#db
+      .prepare(`INSERT INTO skills
+      (id,identity,name,description,content_hash,source_url,source_path,source_revision,status,imported_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(identity) DO UPDATE SET name=excluded.name,description=excluded.description,
+      content_hash=excluded.content_hash,source_url=excluded.source_url,
+      source_path=excluded.source_path,source_revision=excluded.source_revision,
+      status=excluded.status,updated_at=excluded.updated_at`)
+      .run(
+        id,
+        input.identity,
+        input.name,
+        input.description ?? null,
+        input.contentHash,
+        input.sourceUrl ?? null,
+        input.sourcePath ?? null,
+        input.sourceRevision ?? null,
+        input.status,
+        importedAt,
+        now,
+      );
+    const skill = this.getSkill(id);
+    if (!skill) throw new Error("failed to persist skill registry record");
+    return skill;
+  }
+
+  getSkill(id: string): SkillSummary | null {
+    const row = this.#db.prepare("SELECT * FROM skills WHERE id = ?").get(id) as
+      | SkillRow
+      | undefined;
+    return row ? skillFromRow(row) : null;
+  }
+
+  listSkills(): SkillSummary[] {
+    return (
+      this.#db
+        .prepare("SELECT * FROM skills ORDER BY name COLLATE NOCASE")
+        .all() as SkillRow[]
+    ).map(skillFromRow);
+  }
+
+  setSkillStatus(
+    id: string,
+    status: SkillSummary["status"],
+  ): SkillSummary | null {
+    this.#db
+      .prepare("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), id);
+    return this.getSkill(id);
+  }
+
   /**
    * Full-teardown of a project: every row referencing it, in one tx. Returns
    * what the caller must remove from the filesystem (pi JSONLs, snapshot
@@ -803,6 +1039,20 @@ export class SqliteEventStore implements EventStore {
     this.#db
       .prepare("UPDATE sessions SET is_control = 1 WHERE scope = 'control'")
       .run();
+  }
+
+  #migrateMcpColumns(): void {
+    const columns = new Set(
+      (
+        this.#db.prepare("PRAGMA table_info(mcps)").all() as TableColumnRow[]
+      ).map((column) => column.name),
+    );
+    if (columns.has("identity")) return;
+    this.#db.exec("ALTER TABLE mcps ADD COLUMN identity TEXT");
+    this.#db.exec(
+      "UPDATE mcps SET identity = CASE WHEN url IS NOT NULL THEN 'remote:' || rtrim(url, '/') ELSE 'legacy:' || id END",
+    );
+    this.#db.exec("CREATE UNIQUE INDEX idx_mcps_identity ON mcps(identity)");
   }
 
   #transaction(fn: () => void): void {

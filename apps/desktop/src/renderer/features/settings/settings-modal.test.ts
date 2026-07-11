@@ -1,6 +1,12 @@
 import type { ImportLedgerEntry } from "@agena/protocol";
 import { describe, expect, it } from "vitest";
-import { humanBytes, importedCounts, shortenHome } from "./settings-modal.tsx";
+import {
+  humanBytes,
+  importedCounts,
+  mcpImportState,
+  shortenHome,
+  skillImportState,
+} from "./settings-modal.tsx";
 
 const CWD = "/Users/dev/Desktop/Rough/openwork";
 
@@ -59,5 +65,56 @@ describe("display helpers", () => {
     expect(humanBytes(512)).toBe("512 B");
     expect(humanBytes(72_704)).toBe("71 KB");
     expect(humanBytes(48_234_496)).toBe("46 MB");
+  });
+});
+
+describe("mcpImportState", () => {
+  const discovered = {
+    id: "local",
+    identity: "remote:https://mcp.example.com/mcp",
+    name: "example",
+    transport: "http" as const,
+    target: "https://mcp.example.com/mcp",
+    authKind: "oauth" as const,
+    authStatus: "needs_authorization" as const,
+  };
+
+  it("joins by normalized identity without source-harness data", () => {
+    expect(mcpImportState(discovered, [])).toBe("not_imported");
+    expect(
+      mcpImportState(discovered, [
+        {
+          id: "remote",
+          identity: discovered.identity,
+          name: "renamed",
+          status: "needs_authorization",
+        },
+      ]),
+    ).toBe("needs_authorization");
+  });
+});
+
+describe("skillImportState", () => {
+  const discovered = {
+    id: "local",
+    identity: "git:https://example.com/skills#review",
+    contentHash: "new",
+    name: "review",
+    fileCount: 2,
+  };
+
+  it("distinguishes imported content from an available update", () => {
+    expect(skillImportState(discovered, [])).toBe("not_imported");
+    expect(
+      skillImportState(discovered, [
+        {
+          id: "remote",
+          identity: discovered.identity,
+          contentHash: "old",
+          name: "review",
+          status: "ready",
+        },
+      ]),
+    ).toBe("update");
   });
 });

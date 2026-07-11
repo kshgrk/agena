@@ -162,6 +162,68 @@ export type ImportRunResult = {
   }>;
 };
 
+// ---- local MCP import ------------------------------------------------------
+
+export type McpAuthKind = "none" | "oauth" | "api_key" | "unknown";
+export type McpAuthStatus = "ready" | "needs_authorization" | "missing_secret";
+
+/** Source-neutral, secret-free view of one locally discovered MCP server. */
+export type DiscoveredMcp = {
+  id: string;
+  identity: string;
+  name: string;
+  transport: "stdio" | "http" | "sse";
+  target: string;
+  authKind: McpAuthKind;
+  authStatus: McpAuthStatus;
+};
+
+export type ImportedMcp = {
+  id: string;
+  identity: string;
+  name: string;
+  status: "imported" | "ready" | "needs_authorization" | "error";
+  error?: string;
+};
+
+export type McpImportRunResult = {
+  mcps: Array<{
+    id: string;
+    status: "imported" | "needs_authorization" | "error";
+    mcpId?: string;
+    error?: string;
+  }>;
+};
+
+// ---- local skill import ----------------------------------------------------
+
+export type DiscoveredSkill = {
+  id: string;
+  identity: string;
+  contentHash: string;
+  name: string;
+  description?: string;
+  fileCount: number;
+};
+
+export type ImportedSkill = {
+  id: string;
+  identity: string;
+  contentHash: string;
+  name: string;
+  status: "ready" | "update_available" | "error";
+  error?: string;
+};
+
+export type SkillImportRunResult = {
+  skills: Array<{
+    id: string;
+    status: "imported" | "error";
+    skillId?: string;
+    error?: string;
+  }>;
+};
+
 // ---- the bridge -------------------------------------------------------------
 
 export type ReadEventsPage = {
@@ -242,6 +304,22 @@ export type AgenaBridge = {
   /** The daemon import ledger for this machine (GET /v1/imports). */
   importStatus(): Promise<{ imports: ImportLedgerEntry[] }>;
 
+  // local MCP import (host discovery stays in Electron main; no secrets cross IPC)
+  mcpImportScan(opts?: {
+    refresh?: boolean;
+  }): Promise<{ mcps: DiscoveredMcp[]; scannedAt: string }>;
+  mcpImportRun(plan: { ids: string[] }): Promise<McpImportRunResult>;
+  mcpImportStatus(): Promise<{ mcps: ImportedMcp[] }>;
+  mcpAuthStart(mcpId: string): Promise<void>;
+  skillImportScan(opts?: {
+    refresh?: boolean;
+  }): Promise<{ skills: DiscoveredSkill[]; scannedAt: string }>;
+  skillImportRun(plan: { ids: string[] }): Promise<SkillImportRunResult>;
+  skillImportStatus(opts?: {
+    refresh?: boolean;
+  }): Promise<{ skills: ImportedSkill[] }>;
+  skillUpdate(skillId: string): Promise<void>;
+
   // streams
   onBatch(cb: (batch: UiBatch) => void): () => void;
   onStatus(
@@ -285,8 +363,8 @@ export type AgenaBridge = {
    */
   browserSetVisible(visible: boolean): Promise<void>;
   browserOpenDevTools(): Promise<void>;
-  /** Reparent the view into its own BrowserWindow; page state survives. */
-  browserPopOut(): Promise<void>;
+  /** Open the current page in the user's system browser. */
+  browserOpenExternal(): Promise<void>;
   browserClose(): Promise<void>;
   onBrowserState(cb: (state: BrowserState) => void): () => void;
 };
@@ -317,8 +395,6 @@ export type BrowserState = {
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
-  /** Popped out into its own window — the in-app pane is empty. */
-  poppedOut: boolean;
 };
 
 export type OpenedProject = {

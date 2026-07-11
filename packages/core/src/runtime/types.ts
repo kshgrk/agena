@@ -24,6 +24,8 @@ export interface RuntimeAdapter {
   readonly id: RuntimeId;
   readonly version: string; // the pinned Pi SDK version
   createSession(input: CreateRuntimeSessionInput): Promise<RuntimeSession>;
+  /** Reload runtime extensions after workspace-owned tool configuration changes. */
+  reloadExtensions?(): Promise<void>;
   dispose(): Promise<void>; // graceful-shutdown path
 }
 

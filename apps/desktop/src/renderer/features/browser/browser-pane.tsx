@@ -15,17 +15,15 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 import { peekBridge } from "../../lib/bridge.ts";
 import { hasOverlay, useUi } from "../../store/ui.ts";
-import { Button, EmptyState, IconButton, TextInput } from "../../ui/index.ts";
+import { EmptyState, IconButton, TextInput } from "../../ui/index.ts";
 import { useBrowser } from "./browser-store.ts";
 
 export function BrowserPane() {
   const address = useBrowser((s) => s.address);
   const loading = useBrowser((s) => s.loading);
   const url = useBrowser((s) => s.url);
-  const title = useBrowser((s) => s.title);
   const canGoBack = useBrowser((s) => s.canGoBack);
   const canGoForward = useBrowser((s) => s.canGoForward);
-  const poppedOut = useBrowser((s) => s.poppedOut);
   const focusNonce = useBrowser((s) => s.focusNonce);
   const navigate = useBrowser((s) => s.navigate);
   const setAddress = useBrowser((s) => s.setAddress);
@@ -64,9 +62,9 @@ export function BrowserPane() {
     };
   }, [reportBounds]);
 
-  // Visibility: hidden under any overlay or while popped out. Re-report bounds
+  // Visibility: hidden under any overlay. Re-report bounds
   // when re-shown (layout may have shifted while hidden). Hide on unmount.
-  const visible = !overlay && !poppedOut;
+  const visible = !overlay;
   useEffect(() => {
     void peekBridge()?.browserSetVisible(visible);
     if (visible) reportBounds();
@@ -132,8 +130,8 @@ export function BrowserPane() {
         </IconButton>
         <IconButton
           size="sm"
-          label={poppedOut ? "Bring back into app" : "Open in separate window"}
-          onClick={() => useBrowser.getState().popOut()}
+          label="Open in system browser"
+          onClick={() => useBrowser.getState().openExternal()}
         >
           <ExternalLink />
         </IconButton>
@@ -149,18 +147,7 @@ export function BrowserPane() {
       {/* The native WebContentsView composites over this rect. Keep it a plain
           positioned div — no children the view would hide, no layout shift. */}
       <div ref={placeholderRef} className="relative min-h-0 flex-1 bg-app">
-        {poppedOut ? (
-          <EmptyState
-            icon={ExternalLink}
-            title="Opened in a separate window"
-            hint={title ?? url ?? ""}
-            action={
-              <Button size="sm" onClick={() => useBrowser.getState().popOut()}>
-                Bring back
-              </Button>
-            }
-          />
-        ) : url === null ? (
+        {url === null ? (
           <EmptyState
             icon={Globe}
             title="No page open"

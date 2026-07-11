@@ -35,14 +35,6 @@ COPY packages/storage-sqlite/package.json packages/storage-sqlite/
 COPY packages/tui/package.json packages/tui/
 RUN pnpm install --frozen-lockfile --prod --filter @agena/daemon...
 
-# Only the daemon and its runtime deps reach the image (no CLI/TUI source).
-COPY apps/daemon apps/daemon
-COPY packages/protocol packages/protocol
-COPY packages/core packages/core
-COPY packages/importer packages/importer
-COPY packages/runtime-pi packages/runtime-pi
-COPY packages/storage-sqlite packages/storage-sqlite
-
 # Agent browser tool (opt-in at runtime via AGENA_BROWSER_TOOL=1; see
 # docs/agent-browser.md). The binaries live in the image but are inert unless
 # the env is set. Debian's system chromium is used directly via
@@ -57,10 +49,41 @@ RUN apt-get update \
     && npm cache clean --force
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Two roots, separate and never mixed (§3.3 / P1); state is 0700.
-RUN mkdir -p /var/lib/agena /workspace \
-    && chown node:node /var/lib/agena /workspace \
-    && chmod 700 /var/lib/agena
+# Only the daemon and its runtime deps reach the image (no CLI/TUI source).
+# Keep source after heavyweight dependency layers so ordinary edits rebuild fast.
+COPY apps/daemon apps/daemon
+COPY packages/protocol packages/protocol
+COPY packages/core packages/core
+COPY packages/importer packages/importer
+COPY packages/runtime-pi packages/runtime-pi
+COPY packages/storage-sqlite packages/storage-sqlite
+COPY deploy/environment_manifest.py deploy/apt-recording-wrapper.sh /opt/agena/
+
+# Runtime-only user environment. Keep this after all build-time package work so
+# /home/agena stays empty and can be replaced by the persistent Modal Volume.
+ENV HOME=/home/agena \
+    XDG_CONFIG_HOME=/home/agena/.config \
+    XDG_DATA_HOME=/home/agena/.local/share \
+    XDG_CACHE_HOME=/tmp/agena-cache \
+    NPM_CONFIG_PREFIX=/home/agena/.local \
+    PNPM_HOME=/home/agena/.local/share/pnpm \
+    PIPX_HOME=/home/agena/.local/share/pipx \
+    PIPX_BIN_DIR=/home/agena/.local/bin \
+    CARGO_HOME=/home/agena/.cargo \
+    GOPATH=/home/agena/.local/share/go
+ENV PATH=/home/agena/.local/bin:/home/agena/.local/share/pnpm:/home/agena/.cargo/bin:/home/agena/.local/share/go/bin:$PATH
+
+# The base package set lets the runtime wrappers persist only packages the user
+# explicitly added. The manifest is consumed as a cached image layer on deploy.
+RUN apt-mark showmanual | sort -u > /opt/agena/base-manual-packages \
+    && chmod 755 /opt/agena/environment_manifest.py /opt/agena/apt-recording-wrapper.sh \
+    && ln -s /opt/agena/apt-recording-wrapper.sh /usr/local/bin/apt \
+    && ln -s /opt/agena/apt-recording-wrapper.sh /usr/local/bin/apt-get
+
+# Three roots, separate and never mixed (§3.3 / P1); state and home are 0700.
+RUN mkdir -p /var/lib/agena /workspace /home/agena \
+    && chown node:node /var/lib/agena /workspace /home/agena \
+    && chmod 700 /var/lib/agena /home/agena
 
 USER node
 WORKDIR /workspace

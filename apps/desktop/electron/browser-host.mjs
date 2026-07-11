@@ -3,7 +3,7 @@
 // rect. Sandboxed, own persistent partition, deny-by-default permissions, no
 // webSecurity:false. D-INV-3: the view paints ABOVE all renderer DOM, so the
 // renderer hides it (setVisible) under any overlay incl. the approval modal.
-import { BrowserWindow, WebContentsView } from "electron";
+import { shell, WebContentsView } from "electron";
 
 const NAV_EVENTS = [
   "did-navigate",
@@ -22,8 +22,7 @@ const round = (b) => ({
 
 export function createBrowserHost({ getWindow, broadcast, partition }) {
   let view = null;
-  let popWin = null;
-  let attachedTo = null; // BrowserWindow the view is currently a child of
+  let attachedTo = null;
   let lastBounds = { x: 0, y: 0, width: 0, height: 0 };
 
   const live = () => view && !view.webContents.isDestroyed();
@@ -34,12 +33,11 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
     loading: false,
     canGoBack: false,
     canGoForward: false,
-    poppedOut: false,
   });
 
   const emit = () => {
     if (!live()) {
-      broadcast("agena:browser-state", { ...emptyState(), poppedOut: false });
+      broadcast("agena:browser-state", emptyState());
       return;
     }
     const c = view.webContents;
@@ -50,7 +48,6 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
       loading: c.isLoading(),
       canGoBack: nav.canGoBack(),
       canGoForward: nav.canGoForward(),
-      poppedOut: popWin !== null,
     });
   };
 
@@ -97,9 +94,7 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
     const win = getWindow();
     if (!win) throw new Error("browser window is not available");
     ensureView();
-    const host = popWin ?? win;
-    const bounds = popWin ? fullBounds(popWin) : lastBounds;
-    attach(host, bounds);
+    attach(win, lastBounds);
     view.setVisible(true);
     await view.webContents.loadURL(url);
     emit();
@@ -131,7 +126,7 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
 
   const setBounds = (b) => {
     lastBounds = b;
-    if (view && !popWin) view.setBounds(round(b));
+    if (view) view.setBounds(round(b));
   };
 
   const setVisible = (v) => {
@@ -162,47 +157,13 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
     attachedTo = null;
   };
 
-  const popOut = () => {
-    const win = getWindow();
-    if (!view || popWin || !win) return;
-    try {
-      win.contentView.removeChildView(view);
-    } catch {
-      /* window gone */
-    }
-    attachedTo = null;
-    popWin = new BrowserWindow({
-      width: 1024,
-      height: 768,
-      title: "Agena Browser",
-      backgroundColor: "#0c0e13",
-    });
-    attach(popWin, fullBounds(popWin));
-    view.setVisible(true);
-    const fit = () => {
-      if (view && popWin) view.setBounds(fullBounds(popWin));
-    };
-    popWin.on("resize", fit);
-    popWin.on("closed", () => {
-      // Electron destroys the child view's webContents with the window.
-      popWin = null;
-      destroyView();
-      emit();
-    });
-    emit();
+  const openExternal = async () => {
+    const url = live() ? view.webContents.getURL() : "";
+    if (url) await shell.openExternal(url);
   };
 
   const close = () => {
     destroyView();
-    if (popWin) {
-      const w = popWin;
-      popWin = null;
-      try {
-        w.destroy();
-      } catch {
-        /* already gone */
-      }
-    }
     emit();
   };
 
@@ -244,15 +205,10 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
     setBounds,
     setVisible,
     openDevTools,
-    popOut,
+    openExternal,
     close,
     agentRequest,
   };
-}
-
-function fullBounds(win) {
-  const [width, height] = win.getContentSize();
-  return { x: 0, y: 0, width, height };
 }
 
 function delay(ms) {

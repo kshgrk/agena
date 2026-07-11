@@ -26,6 +26,7 @@ import {
   AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
+  type ExtensionFactory,
   getAgentDir,
   ModelRegistry,
   SessionManager,
@@ -66,8 +67,11 @@ export interface PiRuntimeOptions {
 export function containedResourceLoader(
   cwd: string,
   agentDir: string,
+  visibleBrowser?: CreateRuntimeSessionInput["visibleBrowser"],
 ): DefaultResourceLoader {
   const browser = browserExtensionSource();
+  const mcp = mcpExtensionSource();
+  const skillRoot = join(dirname(agentDir), "skills");
   return new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -75,13 +79,58 @@ export function containedResourceLoader(
     // Opt-in agent browser tool only (AGENA_BROWSER_TOOL=1). additionalExtensionPaths
     // still load under noExtensions:true — only filesystem auto-discovery is disabled —
     // so containment is unchanged when the tool is off (browser === null → []).
-    additionalExtensionPaths: browser ? [browser] : [],
-    extensionFactories: [sessionNameExtension],
+    additionalExtensionPaths: [...(browser ? [browser] : []), mcp],
+    extensionFactories: [
+      sessionNameExtension,
+      ...(visibleBrowser ? [mcpSystemOAuthExtension(visibleBrowser)] : []),
+    ],
     noExtensions: true,
     noSkills: true,
+    // An explicit root remains contained under noSkills:true and lets reload()
+    // discover packages imported after this runtime session was created.
+    additionalSkillPaths: [skillRoot],
     noPromptTemplates: true,
     noThemes: true,
   });
+}
+
+function mcpSystemOAuthExtension(
+  browser: NonNullable<CreateRuntimeSessionInput["visibleBrowser"]>,
+): ExtensionFactory {
+  return (pi) => {
+    pi.on("tool_result", async (event) => {
+      if (event.toolName !== "mcp") return;
+      const details = event.details as
+        | { mode?: string; server?: string; authorizationUrl?: string }
+        | undefined;
+      if (
+        details?.mode !== "auth-start" ||
+        !details.server ||
+        !details.authorizationUrl
+      ) {
+        return;
+      }
+      await browser.request({
+        action: "openExternalOAuth",
+        url: details.authorizationUrl,
+        serverName: details.server,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `OAuth authentication completed for "${details.server}" in the system browser.`,
+          },
+        ],
+        details: { ...details, authenticated: true },
+      };
+    });
+  };
+}
+
+function mcpExtensionSource(): string {
+  const require = createRequire(import.meta.url);
+  return dirname(require.resolve("pi-mcp-adapter/package.json"));
 }
 
 /**
@@ -166,7 +215,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       throw new Error(`unknown model "${want.provider}/${want.id}"`);
     }
 
-    const resourceLoader = containedResourceLoader(input.cwd, this.piDir);
+    const resourceLoader = containedResourceLoader(
+      input.cwd,
+      this.piDir,
+      input.visibleBrowser,
+    );
     await resourceLoader.reload();
     const customTools = input.visibleBrowser
       ? [createVisibleBrowserTool(input.visibleBrowser, input.sessionId)]
@@ -198,10 +251,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           "ls",
           ...(input.visibleBrowser ? ["visible_browser"] : []),
           ...(browserExtensionSource() !== null ? ["agent_browser"] : []),
+          "mcp",
         ],
         customTools,
         ...(model ? { model } : {}), // absent → Pi settings default (§8.3 fallback)
       });
+    // SDK/headless callers must bind explicitly; this emits session_start so
+    // stateful extensions such as pi-mcp-adapter initialize before any prompt.
+    await session.bindExtensions({
+      mode: "rpc",
+      onError: (error) =>
+        console.warn("[agena-runtime-pi] extension error", error),
+    });
     // M1: extension-failed / model-changed RuntimeEvents are M2+ — log only.
     for (const e of extensionsResult.errors) {
       console.warn(
@@ -225,6 +286,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return runtime;
   }
 
+  async reloadExtensions(): Promise<void> {
+    await Promise.all(
+      [...this.#sessions.values()].map((session) => session.reloadExtensions()),
+    );
+  }
+
   async dispose(): Promise<void> {
     for (const s of this.#sessions.values()) await s.dispose();
     this.#sessions.clear();
@@ -238,10 +305,13 @@ class PiRuntimeSession implements RuntimeSession {
 
   #session: AgentSession;
   #modelRegistry: ModelRegistry;
+
   #map: MapperState = createMapperState(randomUUID);
   #queue: RuntimeEvent[] = [];
   #wake: (() => void) | null = null;
   #error: Error | null = null;
+  #reloadPending = false;
+  #reloadPromise: Promise<void> = Promise.resolve();
   #consuming = false;
   #unsubscribe: () => void;
   // Mirror in-flight buffer (§8.6-lite): built from our own mapped events.
@@ -293,6 +363,7 @@ class PiRuntimeSession implements RuntimeSession {
 
   /** Resolves on Pi preflight ACCEPT, not run completion (§8.2). */
   async prompt(input: { messageId: string; text: string }): Promise<void> {
+    await this.#reloadPromise.catch(() => {});
     if (this.state !== "idle") {
       throw new Error(`prompt while runtime session is ${this.state}`);
     }
@@ -309,7 +380,15 @@ class PiRuntimeSession implements RuntimeSession {
           })
           .then(() => {
             // the full run finished; agent_end already flowed through the mapper
-            if (this.state === "running") this.state = "idle";
+            if (this.state === "running") {
+              this.state = "idle";
+              void this.#applyPendingReload().catch((error) =>
+                console.warn(
+                  "[agena-runtime-pi] deferred reload failed",
+                  error,
+                ),
+              );
+            }
           })
           .catch((err: unknown) => {
             const error = err instanceof Error ? err : new Error(String(err));
@@ -335,7 +414,35 @@ class PiRuntimeSession implements RuntimeSession {
 
   async abort(): Promise<void> {
     await callPi(this.#session, "abort");
-    if (this.state === "running") this.state = "idle";
+    if (this.state === "running") {
+      this.state = "idle";
+      void this.#applyPendingReload().catch((error) =>
+        console.warn("[agena-runtime-pi] deferred reload failed", error),
+      );
+    }
+  }
+
+  async reloadExtensions(): Promise<void> {
+    if (this.state === "disposed" || this.state === "errored") return;
+    this.#reloadPending = true;
+    await this.#applyPendingReload();
+  }
+
+  async #applyPendingReload(): Promise<void> {
+    if (this.state !== "idle") return;
+    this.#reloadPromise = this.#reloadPromise
+      .catch(() => {})
+      .then(async () => {
+        if (!this.#reloadPending || this.state !== "idle") return;
+        this.#reloadPending = false;
+        try {
+          await this.#session.reload();
+        } catch (error) {
+          this.#reloadPending = true;
+          throw error;
+        }
+      });
+    await this.#reloadPromise;
   }
 
   async info(): Promise<RuntimeInfoAck> {

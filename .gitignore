@@ -10,5 +10,6 @@ coverage/
 dist-electron/
 release/
 .agena-dev-state/
+.agena/
 .local-inspect/
 __pycache__/

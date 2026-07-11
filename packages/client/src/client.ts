@@ -16,11 +16,16 @@ import {
   emptyAckSchema,
   type FileEntry,
   type FileUploadResponse,
+  type ImportMcpRequest,
+  type ImportMcpResponse,
   type ImportSessionRequest,
   type ImportSessionResponse,
+  type ImportSkillRequest,
+  type ImportSkillResponse,
   type ImportsResponse,
   type InFlightSnapshot,
   type ListSessionsQuery,
+  type McpSummary,
   type ModelRef,
   type PendingApprovalSummary,
   PING_INTERVAL_MS,
@@ -39,7 +44,9 @@ import {
   type SessionSummary,
   type SetModelAck,
   type SetThinkingLevelAck,
+  type SkillSummary,
   type SnapshotSummary,
+  type StartMcpOAuthResponse,
   type SubscribeAck,
   setModelAckSchema,
   setThinkingLevelAckSchema,
@@ -457,6 +464,64 @@ export class AgenaClient {
       "GET",
       `/v1/imports${qs}`,
     ) as Promise<ImportsResponse>;
+  }
+
+  async importMcp(body: ImportMcpRequest): Promise<ImportMcpResponse> {
+    return this.fetchJson(
+      "POST",
+      "/v1/mcps/import",
+      body,
+    ) as Promise<ImportMcpResponse>;
+  }
+
+  async listMcps(): Promise<McpSummary[]> {
+    const body = await this.fetchJson("GET", "/v1/mcps");
+    return (body as { mcps: McpSummary[] }).mcps;
+  }
+
+  async startMcpOAuth(id: string): Promise<StartMcpOAuthResponse> {
+    return this.fetchJson(
+      "POST",
+      `/v1/mcps/${encodeURIComponent(id)}/oauth/start`,
+      {},
+    ) as Promise<StartMcpOAuthResponse>;
+  }
+
+  async completeMcpOAuth(
+    id: string,
+    body: { redirectUrl: string },
+  ): Promise<{ mcp: McpSummary }> {
+    return this.fetchJson(
+      "POST",
+      `/v1/mcps/${encodeURIComponent(id)}/oauth/complete`,
+      body,
+    ) as Promise<{ mcp: McpSummary }>;
+  }
+
+  async importSkill(body: ImportSkillRequest): Promise<ImportSkillResponse> {
+    return this.fetchJson(
+      "POST",
+      "/v1/skills/import",
+      body,
+    ) as Promise<ImportSkillResponse>;
+  }
+
+  async listSkills(): Promise<SkillSummary[]> {
+    const body = await this.fetchJson("GET", "/v1/skills");
+    return (body as { skills: SkillSummary[] }).skills;
+  }
+
+  async checkSkillUpdates(): Promise<SkillSummary[]> {
+    const body = await this.fetchJson("POST", "/v1/skills/check-updates", {});
+    return (body as { skills: SkillSummary[] }).skills;
+  }
+
+  async updateSkill(id: string): Promise<{ skill: SkillSummary }> {
+    return this.fetchJson(
+      "POST",
+      `/v1/skills/${encodeURIComponent(id)}/update`,
+      {},
+    ) as Promise<{ skill: SkillSummary }>;
   }
 
   async uploadFiles(

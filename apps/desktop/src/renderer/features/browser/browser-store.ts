@@ -22,7 +22,7 @@ type BrowserStore = BrowserState & {
   open: (url: string, opts?: BrowserOpenOptions) => void;
   navigate: (action: BrowserNavAction) => void;
   openDevTools: () => void;
-  popOut: () => void;
+  openExternal: () => void;
   close: () => void;
 };
 
@@ -32,7 +32,6 @@ const initial: BrowserState & { address: string; focusNonce: number } = {
   loading: false,
   canGoBack: false,
   canGoForward: false,
-  poppedOut: false,
   address: "",
   focusNonce: 0,
 };
@@ -51,8 +50,8 @@ export const useBrowser = create<BrowserStore>((set) => ({
   openDevTools: () => {
     void peekBridge()?.browserOpenDevTools();
   },
-  popOut: () => {
-    void peekBridge()?.browserPopOut();
+  openExternal: () => {
+    void peekBridge()?.browserOpenExternal();
   },
   close: () => {
     useUi.getState().setBrowserOpen(false);

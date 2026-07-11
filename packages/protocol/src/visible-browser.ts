@@ -16,6 +16,13 @@ export const visibleBrowserActionSchema = z.discriminatedUnion("action", [
     .merge(browserBaseSchema),
   z
     .object({
+      action: z.literal("openExternalOAuth"),
+      url: z.string().url(),
+      serverName: z.string().min(1),
+    })
+    .merge(browserBaseSchema),
+  z
+    .object({
       action: z.literal("read"),
       includeHtml: z.boolean().optional(),
     })

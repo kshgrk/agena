@@ -5,9 +5,15 @@ import type { Harness, ImportLedgerEntry } from "@agena/protocol";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
+  DiscoveredMcp,
+  DiscoveredSkill,
+  ImportedMcp,
+  ImportedSkill,
   ImportPlan,
   ImportRunResult,
+  McpImportRunResult,
   ProjectGroup,
+  SkillImportRunResult,
 } from "../../../shared/bridge.ts";
 import { getBridge } from "../../lib/bridge.ts";
 import { errMsg } from "../../lib/errors.ts";
@@ -34,6 +40,26 @@ const HARNESS_LABEL: Record<Harness, string> = {
 /** "/Users/me/Desktop/x" → "~/Desktop/x" (display only; main owns real paths). */
 export function shortenHome(path: string): string {
   return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+export function mcpImportState(
+  mcp: DiscoveredMcp,
+  imported: readonly ImportedMcp[],
+): "not_imported" | "imported" | "ready" | "needs_authorization" | "error" {
+  const found = imported.find((item) => item.identity === mcp.identity);
+  if (!found) return "not_imported";
+  return found.status;
+}
+
+export function skillImportState(
+  skill: DiscoveredSkill,
+  imported: readonly ImportedSkill[],
+): "not_imported" | "imported" | "update" | "error" {
+  const found = imported.find((item) => item.identity === skill.identity);
+  if (!found) return "not_imported";
+  if (found.status === "error") return "error";
+  if (found.status === "update_available") return "update";
+  return found.contentHash === skill.contentHash ? "imported" : "update";
 }
 
 export function humanBytes(n: number | null): string {
@@ -403,11 +429,374 @@ function ImportSection() {
   );
 }
 
+function McpImportSection() {
+  const setSettingsOpen = useUi((state) => state.setSettingsOpen);
+  const [mcps, setMcps] = useState<DiscoveredMcp[] | null>(null);
+  const [imported, setImported] = useState<ImportedMcp[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<McpImportRunResult["mcps"] | null>(
+    null,
+  );
+
+  const load = useCallback(async (refresh: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [scan, status] = await Promise.all([
+        getBridge().mcpImportScan({ refresh }),
+        getBridge().mcpImportStatus(),
+      ]);
+      setMcps(scan.mcps);
+      setImported(status.mcps);
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => void load(false), [load]);
+
+  const run = async () => {
+    if (selected.size === 0 || running) return;
+    setRunning(true);
+    setResults(null);
+    try {
+      const result = await getBridge().mcpImportRun({ ids: [...selected] });
+      setResults(result.mcps);
+      setSelected(new Set());
+      await load(false);
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const authorize = async (mcpId: string) => {
+    try {
+      await getBridge().mcpAuthStart(mcpId);
+      setSettingsOpen(false);
+      toast("Authorization opened in Agena's browser.");
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    }
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between pb-2">
+        <div>
+          <div className="text-xs font-medium text-ink">
+            MCPs found on this machine
+          </div>
+          <div className="text-[11px] text-ink-mute">
+            OAuth connections authorize Agena separately. API keys are copied
+            securely.
+          </div>
+        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<RefreshCw />}
+          disabled={loading || running}
+          onClick={() => void load(true)}
+        >
+          Refresh
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto rounded border border-border">
+        {loading && mcps === null ? (
+          <div className="flex h-24 items-center justify-center">
+            <Spinner />
+          </div>
+        ) : error ? (
+          <div className="p-3 text-xs text-err">{error}</div>
+        ) : mcps && mcps.length > 0 ? (
+          mcps.map((mcp) => {
+            const state = mcpImportState(mcp, imported);
+            const record = imported.find(
+              (item) => item.identity === mcp.identity,
+            );
+            return (
+              <div
+                key={mcp.id}
+                className="flex items-center gap-2 border-b border-border px-2 py-2 last:border-b-0"
+              >
+                <input
+                  type="checkbox"
+                  className="accent-accent"
+                  checked={selected.has(mcp.id)}
+                  disabled={
+                    state !== "not_imported" ||
+                    mcp.authStatus === "missing_secret"
+                  }
+                  onChange={() =>
+                    setSelected((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(mcp.id)) next.delete(mcp.id);
+                      else next.add(mcp.id);
+                      return next;
+                    })
+                  }
+                  aria-label={`Import ${mcp.name}`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-ink">
+                    {mcp.name}
+                  </div>
+                  <div
+                    className="truncate font-mono text-[10px] text-ink-mute"
+                    title={mcp.target}
+                  >
+                    {mcp.target}
+                  </div>
+                </div>
+                <Badge tone="neutral">{mcp.transport}</Badge>
+                {state === "imported" ? (
+                  <Badge tone="neutral">imported · not verified</Badge>
+                ) : null}
+                {state === "ready" ? (
+                  <Badge tone="ok">ready · connects on use</Badge>
+                ) : null}
+                {state === "not_imported" &&
+                mcp.authStatus !== "missing_secret" ? (
+                  <Badge tone="neutral">not imported</Badge>
+                ) : null}
+                {mcp.authStatus === "missing_secret" ? (
+                  <Badge tone="warn">missing API key</Badge>
+                ) : null}
+                {state === "needs_authorization" ? (
+                  <Button
+                    size="sm"
+                    onClick={() => record && void authorize(record.id)}
+                  >
+                    Authorize
+                  </Button>
+                ) : null}
+                {state === "error" ? <Badge tone="err">error</Badge> : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="p-3 text-xs text-ink-mute">
+            No local MCP servers found.
+          </div>
+        )}
+      </div>
+      {results ? (
+        <div className="max-h-24 shrink-0 overflow-y-auto py-2 text-[11px] text-ink-dim">
+          {results.map((result) => (
+            <div key={result.id}>
+              {result.status === "error" ? result.error : result.status}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="flex shrink-0 items-center justify-end border-t border-border pt-3">
+        <Button
+          size="sm"
+          disabled={running || selected.size === 0}
+          onClick={() => void run()}
+        >
+          {running
+            ? "Importing…"
+            : `Import selected${selected.size ? ` (${selected.size})` : ""}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function SkillImportSection() {
+  const [skills, setSkills] = useState<DiscoveredSkill[] | null>(null);
+  const [imported, setImported] = useState<ImportedSkill[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<SkillImportRunResult["skills"] | null>(
+    null,
+  );
+
+  const load = useCallback(async (refresh: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [scan, status] = await Promise.all([
+        getBridge().skillImportScan({ refresh }),
+        getBridge().skillImportStatus({ refresh }),
+      ]);
+      setSkills(scan.skills);
+      setImported(status.skills);
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => void load(false), [load]);
+
+  const run = async () => {
+    if (selected.size === 0 || running) return;
+    setRunning(true);
+    setResults(null);
+    try {
+      const result = await getBridge().skillImportRun({ ids: [...selected] });
+      setResults(result.skills);
+      setSelected(new Set());
+      await load(false);
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const update = async (skillId: string) => {
+    if (running) return;
+    setRunning(true);
+    try {
+      await getBridge().skillUpdate(skillId);
+      await load(false);
+    } catch (err) {
+      toast(errMsg(err), { tone: "err" });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between pb-2">
+        <div>
+          <div className="text-xs font-medium text-ink">
+            Skills found on this machine
+          </div>
+          <div className="text-[11px] text-ink-mute">
+            Skill folders, scripts, references, and assets are copied together.
+          </div>
+        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<RefreshCw />}
+          disabled={loading || running}
+          onClick={() => void load(true)}
+        >
+          Refresh
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto rounded border border-border">
+        {loading && skills === null ? (
+          <div className="flex h-24 items-center justify-center">
+            <Spinner />
+          </div>
+        ) : error ? (
+          <div className="p-3 text-xs text-err">{error}</div>
+        ) : skills && skills.length > 0 ? (
+          skills.map((skill) => {
+            const state = skillImportState(skill, imported);
+            const record = imported.find(
+              (item) => item.identity === skill.identity,
+            );
+            return (
+              <div
+                key={skill.id}
+                className="flex items-center gap-2 border-b border-border px-2 py-2 last:border-b-0"
+              >
+                <input
+                  type="checkbox"
+                  className="accent-accent"
+                  checked={selected.has(skill.id)}
+                  disabled={state === "imported"}
+                  onChange={() =>
+                    setSelected((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(skill.id)) next.delete(skill.id);
+                      else next.add(skill.id);
+                      return next;
+                    })
+                  }
+                  aria-label={`Import ${skill.name}`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-ink">
+                    {skill.name}
+                  </div>
+                  <div className="truncate text-[10px] text-ink-mute">
+                    {skill.description ??
+                      `${skill.fileCount} file${skill.fileCount === 1 ? "" : "s"}`}
+                  </div>
+                </div>
+                <span className="text-[10px] text-ink-mute">
+                  {skill.fileCount} files
+                </span>
+                {state === "imported" ? (
+                  <Badge tone="ok">imported ✓</Badge>
+                ) : null}
+                {state === "not_imported" ? (
+                  <Badge tone="neutral">not imported</Badge>
+                ) : null}
+                {state === "update" ? (
+                  record ? (
+                    <Button
+                      size="sm"
+                      disabled={running}
+                      onClick={() => void update(record.id)}
+                    >
+                      Update
+                    </Button>
+                  ) : (
+                    <Badge tone="warn">update available</Badge>
+                  )
+                ) : null}
+                {state === "error" ? <Badge tone="err">error</Badge> : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="p-3 text-xs text-ink-mute">
+            No local skills found.
+          </div>
+        )}
+      </div>
+      {results ? (
+        <div className="max-h-24 shrink-0 overflow-y-auto py-2 text-[11px] text-ink-dim">
+          {results.map((result) => (
+            <div key={result.id}>
+              {result.status === "error" ? result.error : result.status}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="flex shrink-0 items-center justify-end border-t border-border pt-3">
+        <Button
+          size="sm"
+          disabled={running || selected.size === 0}
+          onClick={() => void run()}
+        >
+          {running
+            ? "Importing…"
+            : `Import selected${selected.size ? ` (${selected.size})` : ""}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // ---- the modal --------------------------------------------------------------
 
 export function SettingsModal() {
   const open = useUi((s) => s.settingsOpen);
   const setOpen = useUi((s) => s.setSettingsOpen);
+  const [section, setSection] = useState<"sessions" | "mcps" | "skills">(
+    "sessions",
+  );
 
   return (
     <Modal
@@ -417,8 +806,57 @@ export function SettingsModal() {
       className="flex h-[540px] max-h-[85vh] flex-col"
     >
       <ModalTitle>Settings</ModalTitle>
-      <div className="mt-3 flex min-h-0 flex-1 flex-col">
-        <ImportSection />
+      <div className="mt-3 flex min-h-0 flex-1 gap-4">
+        <nav
+          className="w-32 shrink-0 space-y-1 border-r border-border pr-3"
+          aria-label="Settings sections"
+        >
+          <button
+            type="button"
+            onClick={() => setSection("sessions")}
+            className={cx(
+              "w-full rounded px-2 py-1.5 text-left text-xs",
+              section === "sessions"
+                ? "bg-surface-raised text-ink"
+                : "text-ink-mute hover:text-ink",
+            )}
+          >
+            Session import
+          </button>
+          <button
+            type="button"
+            onClick={() => setSection("mcps")}
+            className={cx(
+              "w-full rounded px-2 py-1.5 text-left text-xs",
+              section === "mcps"
+                ? "bg-surface-raised text-ink"
+                : "text-ink-mute hover:text-ink",
+            )}
+          >
+            MCP import
+          </button>
+          <button
+            type="button"
+            onClick={() => setSection("skills")}
+            className={cx(
+              "w-full rounded px-2 py-1.5 text-left text-xs",
+              section === "skills"
+                ? "bg-surface-raised text-ink"
+                : "text-ink-mute hover:text-ink",
+            )}
+          >
+            Skill import
+          </button>
+        </nav>
+        <div className="flex min-w-0 flex-1 flex-col">
+          {section === "sessions" ? (
+            <ImportSection />
+          ) : section === "mcps" ? (
+            <McpImportSection />
+          ) : (
+            <SkillImportSection />
+          )}
+        </div>
       </div>
     </Modal>
   );

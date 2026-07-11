@@ -44,6 +44,7 @@ import {
 import { synthesizeEvents } from "@agena/importer";
 import {
   type CreateSessionRequest,
+  completeMcpOAuthRequestSchema,
   createProjectRequestSchema,
   createPtyRequestSchema,
   createSessionRequestSchema,
@@ -55,7 +56,9 @@ import {
   fileContentQuerySchema,
   fileUploadQuerySchema,
   type ImportLedgerEntry,
+  importMcpRequestSchema,
   importSessionRequestSchema,
+  importSkillRequestSchema,
   type ListSessionsQuery,
   listApprovalsQuerySchema,
   listFilesQuerySchema,
@@ -73,7 +76,9 @@ import { type Context, Hono } from "hono";
 import type { DaemonConfig } from "./config.ts";
 import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
+import { McpService } from "./mcp-service.ts";
 import { PtyManager } from "./pty-manager.ts";
+import { SkillService } from "./skill-service.ts";
 import { SnapshotManager } from "./snapshots.ts";
 import { TunnelManager } from "./tunnel-manager.ts";
 
@@ -315,10 +320,14 @@ export async function startDaemon(
   config: DaemonConfig,
   adapter: RuntimeAdapter,
 ): Promise<Daemon> {
-  const store: EventStore =
+  const sqlite =
     config.storage === "sqlite"
       ? new SqliteEventStore(join(config.stateDir, "db", "agena.db"))
-      : new InMemoryEventStore();
+      : null;
+  const store: EventStore = sqlite ?? new InMemoryEventStore();
+  const mcps = sqlite ? new McpService(sqlite, config.stateDir) : null;
+  const skills = sqlite ? new SkillService(sqlite, config.stateDir) : null;
+  await mcps?.initialize();
   // `gateway` is initialized before any frame can be published (frames only
   // flow after a prompt), so the closure is safe.
   let gateway: Gateway;
@@ -379,6 +388,188 @@ export async function startDaemon(
       discovery: await discoverAgena(config.workspaceDir),
     }),
   );
+  app.get("/v1/mcps", (c) => c.json({ mcps: mcps?.list() ?? [] }));
+  app.get("/v1/skills", (c) => c.json({ skills: skills?.list() ?? [] }));
+  app.post("/v1/skills/check-updates", async (c) => {
+    if (!skills)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "skill updates require SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    return c.json({ skills: await skills.checkAll() });
+  });
+  app.post("/v1/skills/import", async (c) => {
+    if (!skills)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "skill import requires SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    const parsed = importSkillRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid skill import request",
+          retryable: false,
+        },
+        400,
+      );
+    try {
+      const skill = await skills.import(parsed.data);
+      await adapter.reloadExtensions?.();
+      return c.json({ skill });
+    } catch (error) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message:
+            error instanceof Error ? error.message : "skill import failed",
+          retryable: false,
+        },
+        400,
+      );
+    }
+  });
+  app.post("/v1/skills/:id/update", async (c) => {
+    if (!skills)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "skill updates require SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    try {
+      const skill = await skills.update(c.req.param("id"));
+      await adapter.reloadExtensions?.();
+      return c.json({ skill });
+    } catch (error) {
+      return c.json(
+        {
+          code: "SKILL_UPDATE_FAILED",
+          message:
+            error instanceof Error ? error.message : "skill update failed",
+          retryable: true,
+        },
+        400,
+      );
+    }
+  });
+  app.post("/v1/mcps/import", async (c) => {
+    if (!mcps)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "MCP import requires SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    const parsed = importMcpRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid MCP import request",
+          retryable: false,
+        },
+        400,
+      );
+    try {
+      const mcp = await mcps.import(parsed.data);
+      await adapter.reloadExtensions?.();
+      return c.json({ mcp });
+    } catch (error) {
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: error instanceof Error ? error.message : "MCP import failed",
+          retryable: false,
+        },
+        500,
+      );
+    }
+  });
+  app.post("/v1/mcps/:id/oauth/start", async (c) => {
+    if (!mcps)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "MCP OAuth requires SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    try {
+      return c.json({
+        authorizationUrl: await mcps.startOAuth(c.req.param("id")),
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "MCP OAuth failed";
+      return c.json(
+        {
+          code: message === "MCP not found" ? "NOT_FOUND" : "MCP_AUTH_FAILED",
+          message,
+          retryable: false,
+        },
+        message === "MCP not found" ? 404 : 400,
+      );
+    }
+  });
+  app.post("/v1/mcps/:id/oauth/complete", async (c) => {
+    if (!mcps)
+      return c.json(
+        {
+          code: "NOT_SUPPORTED",
+          message: "MCP OAuth requires SQLite",
+          retryable: false,
+        },
+        501,
+      );
+    const parsed = completeMcpOAuthRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid MCP OAuth callback",
+          retryable: false,
+        },
+        400,
+      );
+    try {
+      return c.json({
+        mcp: await mcps.completeOAuth(
+          c.req.param("id"),
+          parsed.data.redirectUrl,
+        ),
+      });
+    } catch (error) {
+      return c.json(
+        {
+          code: "MCP_AUTH_FAILED",
+          message: error instanceof Error ? error.message : "MCP OAuth failed",
+          retryable: false,
+        },
+        400,
+      );
+    }
+  });
   app.post("/v1/projects", async (c) => {
     const parsed = createProjectRequestSchema.safeParse(
       await c.req.json().catch(() => null),

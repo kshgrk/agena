@@ -9,6 +9,15 @@ services:
       dockerfile: docker/Dockerfile
     image: agena-daemon:dev
     init: true # PID-1 signal forwarding without baking tini into the image
+    # Bind mounts may be created as root on Linux. Fix only the state root, then
+    # retain the image's normal non-root runtime for the daemon itself.
+    user: root
+    entrypoint:
+      [
+        "/bin/sh",
+        "-c",
+        "chown node:node /var/lib/agena && exec runuser -u node -- node /app/apps/daemon/src/main.ts",
+      ]
     restart: unless-stopped
     ports:
       - "127.0.0.1:${AGENA_HOST_PORT:-7700}:7777" # loopback-only publish, always (§3.2)
@@ -17,9 +26,11 @@ services:
       AGENA_AUTH_TOKEN: ${AGENA_TOKEN:?set AGENA_TOKEN (daemon bearer token) in the host environment}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AGENA_RUNTIME: ${AGENA_RUNTIME:-pi}
-    volumes: # two named volumes, separate roots, never mixed (§3.3 / P1)
+    volumes: # three persistent roots, separate and never mixed (§3.3 / P1)
       - workspace:/workspace
-      - state:/var/lib/agena
+      # Host-visible so SQLite can be inspected directly with Beekeeper Studio.
+      - ${AGENA_LOCAL_STATE_DIR:-../.agena/docker-state}:/var/lib/agena
+      - home:/home/agena
     healthcheck:
       test:
         [
@@ -34,4 +45,4 @@ services:
     stop_grace_period: 30s # SIGTERM budget (§3.2)
 volumes:
   workspace:
-  state:
+  home:

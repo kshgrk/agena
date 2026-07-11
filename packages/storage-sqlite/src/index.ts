@@ -1,1 +1,1 @@
-export { SqliteEventStore } from "./store.ts";
+export { type McpRegistryRecord, SqliteEventStore } from "./store.ts";

@@ -167,7 +167,7 @@ type EventSource = {
 ```
 (P3)
 
-**INV-10 — Daemon state is separate from the workspace.** Daemon state under `/var/lib/agena`, user extensibility only under `/workspace/.agena/` (plus the one documented carve-out: the daemon-regenerated `.agena/.types/` ambient typings, §12), snapshots capture `/workspace` only, snapshot restore never touches the event store. (P1)
+**INV-10 — Daemon state, workspace files, and user environment are separate.** Daemon state lives under `/var/lib/agena`; project files and reproducible environment intent live under `/workspace` (including `/workspace/.agena/environment.toml`); user-level tools, dotfiles, and CLI credentials live under `/home/agena`. Workspace snapshots capture `/workspace` only, so restore never touches the event store or credentials. (P1)
 
 **INV-11 — Branch replay contract.** Branch is a column on events; each branch records `parent_branch_id` and `forked_from_seq`. Replaying a branch walks the parent chain root-ward, taking each ancestor's events up to that ancestor's `forked_from_seq`, then the branch's own events, in `seq` order. v1 ships single-branch sessions on this exact model. (P10)
 
@@ -229,7 +229,7 @@ Every other section references these values; **no section may restate different 
 | PTY WS endpoint | `GET /v1/ptys/:id/ws` |
 | Auth token env | `AGENA_AUTH_TOKEN` |
 | Token file (daemon side) | `/var/lib/agena/config/token` (0600) |
-| State/workspace env | `AGENA_STATE_DIR=/var/lib/agena`, `AGENA_WORKSPACE_DIR=/workspace` |
+| State/workspace/home env | `AGENA_STATE_DIR=/var/lib/agena`, `AGENA_WORKSPACE_DIR=/workspace`, `HOME=/home/agena` |
 | Raw-capture switch | `rawCapture.enabled` in `daemon.json` / env `AGENA_RAW_CAPTURE=1` — the only v1 switches; no CLI verb (§1.5 owns the verb list) |
 | Client config root | `~/.config/agena/` (XDG); profiles in `config.json`, tokens in `credentials.json` (0600) |
 | Profile selector flag | `--profile <name>` |
@@ -252,7 +252,7 @@ Every other section references these values; **no section may restate different 
 | Protocol upcast module | `packages/protocol/src/upcasts.ts` |
 | HTTP schema module | `packages/protocol/src/http.ts` |
 
-## 3.3 Storage geography — two roots, never mixed (solves P1)
+## 3.3 Storage geography — three roots, never mixed (solves P1)
 
 The normative on-disk tree (all other sections reference this; the daemon builds every path through one `paths.ts` module):
 
@@ -262,6 +262,9 @@ The normative on-disk tree (all other sections reference this; the daemon builds
     daemon.json               #   daemon config incl. workspaceId (Zod-validated)
     token                     #   bearer token, 0600 (persisted from AGENA_AUTH_TOKEN)
     secrets.env               #   optional provider keys file, 0600 (env takes precedence)
+    mcp.json                  #   normalized source-neutral MCP definitions; never secrets
+    mcp-secrets.enc           #   encrypted static MCP API keys/tokens
+    mcp-oauth/                #   Agena-owned OAuth client registrations + rotating tokens
   db/
     agena.db                  #   SQLite event store (+ -wal, -shm)
   blobs/
@@ -271,6 +274,7 @@ The normative on-disk tree (all other sections reference this; the daemon builds
   pi/
     sessions/                 #   Pi JSONL raw archive layer (SessionManager redirected here)
     auth.json                 #   Pi AuthStorage, 0600, materialized from env at boot
+  skills/                     #   Agena-managed skill packages; durable across image replacement
   raw-imports/
     claude/<machine-id>/<imported-at>/   # untouched import archives
     codex/<machine-id>/<imported-at>/
@@ -285,16 +289,25 @@ The normative on-disk tree (all other sections reference this; the daemon builds
 /workspace/                   # WORKSPACE — named volume "agena-ws-<workspaceId>"
   <repo / user files>         #   repo root IS the workspace root
   .agena/                     # user-authored extensibility (P20)
-    config.json  tools/  skills/  hooks/
+    config.json  environment.toml  tools/  skills/  hooks/
     .types/agena.d.ts         #   the ONE daemon-regenerated exception (documented carve-out, §12)
+
+/home/agena/                  # USER ENVIRONMENT — named volume "agena-home-<workspaceId>"
+  .config/                    #   gh and other non-provider CLI config/credentials
+  .local/bin/                #   user-installed binaries
+  .local/share/              #   pnpm, pipx, Go, and tool data
+  .cargo/                    #   Cargo-installed tools
 ```
 
 Consequences, all load-bearing:
 
 - Snapshots capture `/workspace` and therefore mechanically exclude the DB, captures, Pi's JSONL, logs, and secrets — structural, not an exclude-list. Restore swaps files; session history is untouchable by it. (P1)
-- Both roots are named Docker volumes; the container image is disposable, the volumes are not. `docker rm` + recreate loses nothing.
+- All three roots are named Docker volumes; the container image is disposable, the volumes are not. `docker rm` + recreate loses nothing.
+- `/home/agena` is private to the workspace and excluded from workspace snapshots/exports. `HOME`, XDG data/config, npm, pnpm, pipx, Cargo, and Go paths are pinned there; caches default to `/tmp/agena-cache` so rebuildable bytes do not grow durable storage without bound.
+- `/workspace/.agena/environment.toml` is reproducible intent, not live package state. Its v1 grammar is deliberately only `[packages] system = ["debian-package", ...]`. Successful privileged `apt`/`apt-get` mutations update that list from `apt-mark showmanual`; the next workspace-image build uses the normalized list as a cached apt layer. Direct `/usr/bin/apt`, `dpkg -i`, `curl | sh`, and `/usr/local` mutations are not promised persistence.
 - Pi's home is redirected into daemon state (`PI_DIR=/var/lib/agena/pi`, verified at boot), so Pi's raw JSONL archive layer exists without polluting the workspace or snapshots.
 - **Secrets stance (decided):** provider keys live in process env (compose `provider.env`, 0600) with two permitted at-rest materializations under the state volume only: `config/secrets.env` (optional input) and `pi/auth.json` (Pi's AuthStorage, written from env at boot, 0600). Both are excluded from snapshots by construction, redacted in logs/diagnostics (presence booleans only), and never appear in `/workspace`, event payloads, frames, or captures. The earlier "never on any volume" absolute is superseded by this rule.
+- **MCP credentials:** MCP definitions and import status are non-secret daemon state. Static API keys are imported only with explicit user consent and encrypted under `config/mcp-secrets.enc`; OAuth tokens are never copied from Claude or Codex. Agena starts a fresh authorization, owns that client registration and refresh-token family under `config/mcp-oauth/`, and persists every rotated refresh token before reuse. MCP secrets never enter SQLite, `/workspace`, renderer state, events, frames, captures, config responses, or logs.
 
 ## 3.4 Failure-mode stances (anticipated new problems)
 
@@ -306,7 +319,7 @@ Consequences, all load-bearing:
 | **WS backpressure under fast deltas** | Frames are droppable/coalescible per connection; durable events are never dropped — bounded backlog (16 MiB / 15 s stall) then close `4429`; client heals via `subscribe {fromSeq}` replay. |
 | **Oversized payloads** | 64 KiB inline cap with blob spill (`BlobRef`), 128 KiB post-spill hard reject, 1 MiB envelope cap, edge caps on HTTP bodies. |
 | **Malformed data** | Zod validation at every boundary; invalid Pi data → capture tee + warn, never appended raw. |
-| **Container restart / volume persistence** | Both roots are named volumes; container is cattle. Losing `agena-state` loses history — v1 mitigation: documented `sqlite3 .backup` guidance; offsite backup post-v1. |
+| **Container restart / volume persistence** | All three roots are named volumes; container is cattle. Losing `agena-state` loses history; losing `agena-home` loses user-installed tools and CLI logins — v1 mitigation: documented backup guidance; offsite backup post-v1. |
 | **Secrets / provider keys** | §3.3 secrets stance. PTY shells do not inherit provider keys unless `pty.exposeProviderKeys: true`. |
 | **Pi version churn** | Exact-version pin; recorded JSONL fixtures replayed through the `runtime-pi` mapper in CI; nightly canary vs `@latest`; upgrade playbook. (P16) |
 | **Multi-workspace** | v1: one container = one workspace = one daemon = one event store. CLI profiles (`agena --profile <name>` → URL + token in `~/.config/agena/`) select daemons client-side. Boot-fatal `workspaceId` mismatch check catches mis-wired volumes. |
@@ -1819,6 +1832,14 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
 | POST | `/v1/imports` | Import upload | tar stream + `{source, machineId}`; raw archive → normalize → summarize (§9.6) |
 | GET | `/v1/imports/:id` | Import status/stats | |
+| GET | `/v1/mcps` | List imported MCP definitions/status | Source-neutral; no secret values or source-harness provenance. |
+| POST | `/v1/mcps/import` | Import one normalized MCP | OAuth definitions become `needs_authorization`; static secrets are encrypted before registry commit. |
+| POST | `/v1/mcps/:id/oauth/start` | Start fresh Agena OAuth | Returns an authorization URL; PKCE/state and client registration stay daemon-owned. |
+| POST | `/v1/mcps/:id/oauth/complete` | Complete OAuth callback relay | Electron relays the localhost redirect; daemon validates state and stores rotated credentials. |
+| GET | `/v1/skills` | List Agena-managed skills | Source-neutral metadata; package bytes stay under daemon state. |
+| POST | `/v1/skills/import` | Import one normalized skill package | Validates paths/frontmatter, deduplicates, installs atomically, then reloads idle runtimes. |
+| POST | `/v1/skills/check-updates` | Check managed Git sources | Updates status only; unmanaged/local-only skills remain usable. |
+| POST | `/v1/skills/:id/update` | Install the current upstream revision | Staged validation + atomic swap; previous package remains active on failure. |
 | POST | `/v1/admin/rebuild` | Rebuild projections + FTS | backs `agena rebuild` (P7) |
 | GET | `/v1/diagnostics` | Deep diagnostics | §9.9; the remote half of `agena info` |
 | GET | `/v1/ws` | *(upgrade)* main multiplexed WS | §5 |
@@ -1864,6 +1885,45 @@ The import pipeline (three layers from the direction doc) is owned here; the CLI
 - **Read-only enforcement:** sessions with `source != 'native'` reject `prompt/steer/followUp/abort/setModel/setThinkingLevel/compact` with `SESSION_READ_ONLY`; `agena resume <imported>` starts a **new native session** seeded with the continuation prompt.
 - Importer event ids: pre-supplied `NewEvent.id` ULIDs derived from `(source_ref, position)` make event-level re-import dedupe cheap (unique `idx_events_id`).
 - The importer writes nothing to `/workspace` (P1).
+
+### MCP import
+
+The desktop main process scans Claude Code and Codex MCP configuration, normalizes and deduplicates it, and exposes one source-neutral list to the renderer. Harness names and source paths are diagnostic-only local data and never become product identity. Remote identity is the canonical MCP URL; stdio identity is the normalized command, arguments, and non-secret environment-variable names.
+
+- Settings has sibling `Session import` and `MCP import` entries. MCP rows show `not imported`, `imported · not verified`, `changed`, `needs authorization`, `ready`, or `error`; `ready` means credentials are usable, while the adapter connects lazily on first use.
+- OAuth imports copy definitions only, then perform a fresh Agena OAuth authorization. Claude/Codex tokens and refresh tokens remain untouched.
+- Desktop OAuth always opens in the user's system browser so existing passkeys, password managers, and browser sessions work. Electron main first binds the loopback callback, then opens the URL and relays the complete redirect to the daemon without exposing the authorization code to renderer state. This applies equally to Settings and model-triggered `mcp` authentication. The embedded browser's external-link action opens its current URL in the system browser; it does not create a second Electron window.
+- Static API-key/header/env credentials may be copied only after explicit consent, through Electron main directly to the authenticated daemon; secret values never cross renderer state.
+- Pi has no built-in MCP. Agena pins and explicitly loads the audited `pi-mcp-adapter` extension while filesystem extension discovery remains disabled. Agena owns registry, secret storage, OAuth callback relay, refresh persistence, and policy; the adapter supplies protocol/transport and the token-efficient `mcp` tool bridge behind `RuntimeAdapter`.
+- A successful MCP import reloads extensions in every idle runtime session before the route returns. Busy sessions mark the reload pending and apply it immediately after their current run, so existing chats adopt new MCP definitions without being recreated.
+- The default model-facing surface is one discovery proxy tool; explicitly promoted direct tools are an opt-in optimization. MCP connection/auth status is workspace state, not session history.
+
+### Skill import
+
+Electron main scans the enabled Claude Code and Codex skill roots, including
+project-local and installed plugin skill directories, and exposes one source-neutral list. Exact
+copies are deduplicated before they reach the renderer. A stable upstream Git
+URL plus repository-relative skill path is identity when available; otherwise
+the canonical package-content hash is identity. A name match alone never merges
+different content.
+
+- Settings adds `Skill import` beside session and MCP import. Import is a
+  one-time migration: the complete package (`SKILL.md` plus scripts, references,
+  templates, and assets) is copied atomically to `/var/lib/agena/skills`, while
+  SQLite records identity, content hash, provenance, installed revision, update
+  status, and timestamps.
+- Skill packages are daemon state on the existing `agena-state` Modal Volume,
+  so application image replacement neither removes nor reinstalls them.
+  `environment.toml` remains the apt/system-package reconstruction manifest and
+  does not duplicate skill state.
+- Agena checks recorded Git provenance directly for updates. A failed or
+  unavailable upstream check never disables the installed package. Updates are
+  staged and validated before the active directory is atomically replaced.
+- Pi filesystem discovery stays disabled. `runtime-pi` passes only the
+  Agena-managed skill root as an explicit SDK skill path, so imported project or
+  harness directories cannot become instructions merely by existing.
+- Skill import/update uses the same idle-now, busy-after-turn runtime reload seam
+  as MCP import.
 
 ## 9.7 Graceful shutdown (SIGTERM/SIGINT) — P2 shutdown case
 
@@ -1942,18 +2002,19 @@ Env overlay: `AGENA_HOST`, `AGENA_PORT`, `AGENA_AUTH_TOKEN`, `AGENA_STATE_DIR`, 
 
 # 10. Docker, Filesystem & Cloud Path
 
-## 10.1 The two-volume rule (P1)
+## 10.1 The three-volume rule (P1)
 
-Daemon state and workspace live on **separate named Docker volumes at separate mount points** — snapshot exclusion of daemon state is structural, not an exclude-list. (This corrects the ancestor plans that placed `sessions.db` under `/workspace/.agena/`.)
+Daemon state, workspace files, and the user environment live on **separate named Docker volumes at separate mount points**. Snapshot exclusion of daemon state and credentials is structural, not an exclude-list.
 
 | Mount point | Volume name | Owner | Contents |
 |---|---|---|---|
 | `/workspace` | `agena-ws-<workspaceId>` | user + agent | repo tree + `.agena/` |
 | `/var/lib/agena` | `agena-state-<workspaceId>` | daemon only | §3.3 tree |
+| `/home/agena` | `agena-home-<workspaceId>` | user + agent | dotfiles, user-level tools, CLI configuration/credentials |
 
 **Host bind mounts of `/workspace` are not supported in v1** (uid mapping, snapshot semantics, and cloud parity all break); `--from-local` seeds via tar upload, `--git` clones. A `--mount-host` escape hatch is a possible future.
 
-`/workspace` rules: repo root IS the workspace root; `.agena/` may be committed or gitignored (user's choice; fully captured by snapshots); Pi's `.pi/` auto-discovery is disabled (§8.3); nothing daemon-generated is written under `/workspace` **except** the one-time `.agena/` scaffold and the regenerated `.agena/.types/agena.d.ts` (both documented, §12). `/var/lib/agena` rules: 0700, owned by the container user; blobs immutable, no GC in v1. Known v1 limitation: `agena shell` PTYs run as the same uid and could technically touch state — documented; split-uid hardening is post-v1.
+`/workspace` rules: repo root IS the workspace root; `.agena/` may be committed or gitignored and is fully captured by snapshots; Pi's `.pi/` auto-discovery is disabled (§8.3). Agena may scaffold `.agena/`, regenerate `.types/`, and update `environment.toml` after successful package-manager mutations (§12). `/var/lib/agena` and `/home/agena` are 0700 and excluded from workspace snapshots. Known v1 limitation: `agena shell` PTYs run as the same uid and could technically touch daemon state; split-uid hardening is post-v1.
 
 ## 10.2 Dockerfile
 
@@ -1985,12 +2046,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN userdel -r node && useradd -m -u 1000 -s /bin/bash agena
 COPY --from=build /out /opt/agena
-ENV NODE_ENV=production AGENA_STATE_DIR=/var/lib/agena AGENA_WORKSPACE_DIR=/workspace AGENA_PORT=7777
-RUN mkdir -p /var/lib/agena /workspace && chown agena:agena /var/lib/agena /workspace \
+ENV NODE_ENV=production AGENA_STATE_DIR=/var/lib/agena AGENA_WORKSPACE_DIR=/workspace \
+    HOME=/home/agena XDG_CONFIG_HOME=/home/agena/.config AGENA_PORT=7777
+RUN mkdir -p /var/lib/agena /workspace /home/agena && chown agena:agena /var/lib/agena /workspace /home/agena \
     && chmod 700 /var/lib/agena
 USER agena
 WORKDIR /workspace
-VOLUME ["/workspace", "/var/lib/agena"]
+VOLUME ["/workspace", "/var/lib/agena", "/home/agena"]
 EXPOSE 7777
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s \
   CMD curl -fsS http://127.0.0.1:7777/health || exit 1
@@ -2023,19 +2085,21 @@ services:
     volumes:
       - workspace:/workspace
       - state:/var/lib/agena
+      - home:/home/agena
     mem_limit: 4g
     pids_limit: 2048
     stop_grace_period: 30s
 volumes:
   workspace: { name: agena-ws-${AGENA_WORKSPACE_ID} }
   state:     { name: agena-state-${AGENA_WORKSPACE_ID} }
+  home:      { name: agena-home-${AGENA_WORKSPACE_ID} }
 ```
 
 Provider keys: `provider.env` (0600) holds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.; §3.3 secrets stance governs at-rest handling. Known v1 tradeoff: env visible via `docker inspect` locally; `agena shell` does **not** inherit keys by default (`pty.exposeProviderKeys: false`). Cloud replaces this with secret-manager injection.
 
 ## 10.4 Workspace lifecycle
 
-**v1 stance: one workspace = one container = one daemon = one DB = one volume pair.** `sessions.workspace_id` always equals `AGENA_WORKSPACE_ID`; mismatch is boot-fatal. The client-side registry, not the daemon, knows about multiple workspaces.
+**v1 stance: one workspace = one container = one daemon = one DB = one three-volume set.** `sessions.workspace_id` always equals `AGENA_WORKSPACE_ID`; mismatch is boot-fatal. The client-side registry, not the daemon, knows about multiple workspaces.
 
 Client-side profile registry lives in `~/.config/agena/config.json` (the ONE location — `~/.agena/*` variants are dead):
 
@@ -2056,7 +2120,7 @@ Client-side profile registry lives in `~/.config/agena/config.json` (the ONE loc
 5. Daemon first boot (§9.2): validate ids, migrations, sweeps, control session + `workspace.initialized`, `.agena/` scaffold, listen.
 6. CLI verifies `/health`, then an authed `GET /v1/diagnostics`, prints the summary.
 
-`agena workspace open` = `compose start` + wait healthy + attach; image upgrade = `compose pull && up -d` (migrations at boot; refuse-to-boot on schema downgrade). `stop` = `compose stop` (SIGTERM → §9.7). `rm` removes container + profile; **volumes survive** unless `--purge` (typed-name confirmation — the only operation that destroys the event store).
+`agena workspace open` = `compose start` + wait healthy + attach. Image upgrade normalizes `.agena/environment.toml`, builds or reuses the derived layer keyed by `(Agena base image digest, system package list)`, then replaces the container and reattaches all three volumes (migrations at boot; refuse-to-boot on schema downgrade). `stop` = `compose stop` (SIGTERM → §9.7). `rm` removes container + profile; **volumes survive** unless `--purge` (typed-name confirmation — the only operation that destroys the event store or persistent home).
 
 ## 10.5 Snapshots
 
@@ -2104,9 +2168,9 @@ Violations → `403 PATH_ESCAPES_WORKSPACE`, logged with the raw path. The prope
 
 ## 10.7 Cloud migration path
 
-The v1 container **is** the cloud artifact: same OCI image on a VM/devbox/microVM with two persistent disks at the same two mount points.
+The v1 container **is** the cloud artifact: same OCI base image on a VM/devbox/microVM with three persistent disks at the same three mount points. A workspace may add one deterministic derived image layer for declared system packages; Agena application releases never write into that layer at runtime.
 
-**Unchanged:** wire protocol (same WS + HTTP + PTY WS, same auth header), storage layout, snapshot format, path-safety rules, `.agena/` surface, boot sequence, one-daemon-per-workspace shape. Migrating a local workspace = tar both volumes → untar onto cloud disks → start the same image (`agena workspace migrate`, post-v1). The client-side profile `url` field is the only moving part (`https://…`).
+**Unchanged:** wire protocol (same WS + HTTP + PTY WS, same auth header), storage layout, snapshot format, path-safety rules, `.agena/` surface, boot sequence, one-daemon-per-workspace shape. Migrating a local workspace = copy all three volumes → start the same base plus normalized environment manifest (`agena workspace migrate`, post-v1). The client-side profile `url` field is the only moving part (`https://…`).
 
 **Changed (all in front of the daemon):** (1) TLS terminated by a proxy/LB — the daemon speaks plain HTTP/WS forever; (2) token **provisioning** moves from CLI-generated env to control-plane-issued per-workspace tokens (same bearer check — this is why localhost auth was non-negotiable); (3) secret-manager injection of provider keys + an egress policy layer at the network level. Isolation class (container vs microVM) is a deployment decision, not a design change.
 
@@ -2286,13 +2350,23 @@ Any red release-matrix item unfixable in ≤2 days of spike work triggers the fa
 ```text
 /workspace/.agena/
 ├── config.json          # workspace-scoped user settings: default model, tool allowlist
+├── environment.toml     # reproducible system packages; credentials never belong here
 ├── tools/               # *.ts default-exporting defineTool(...)   → tools/db/query.ts ⇒ "db_query"
 ├── skills/              # *.md with YAML frontmatter (name from path)   → release.md ⇒ "release"
 ├── hooks/               # *.ts default-exporting defineHook(...)
 └── .types/agena.d.ts    # DAEMON-REGENERATED ambient types — the documented carve-out
 ```
 
-**The `.types/` carve-out (stated once, honored by §3.3/§10.1):** the daemon may (a) scaffold the `.agena/` skeleton once at first boot when absent, and (b) regenerate `.agena/.types/agena.d.ts` so editors resolve the bare `"agena"` specifier. `.types/` is gitignored by the scaffold, captured harmlessly by snapshots, and regenerated at boot after any restore that staled it. Nothing else daemon-generated ever lands under `/workspace`.
+**The two generated carve-outs (stated once, honored by §3.3/§10.1):** the daemon may scaffold `.agena/` once and regenerate `.agena/.types/agena.d.ts`; the package recorder may atomically replace `.agena/environment.toml` after a successful apt mutation. `.types/` is gitignored by the scaffold and regenerated after restore. `environment.toml` is ordinary workspace intent: it may be committed, snapshotted, edited by the user, and is never allowed to contain credentials.
+
+`environment.toml` v1 intentionally has one shape:
+
+```toml
+[packages]
+system = ["gh", "jq"]
+```
+
+Names are validated as Debian package names, deduplicated, and sorted before they enter an image cache key. The Modal deployment reads this file from the durable workspace before constructing the image, so unchanged `(base image, package list)` reuses the cached layer. Package binaries are replaced on upgrade; CLI state such as `gh auth login` remains under `/home/agena` and is immediately reused.
 
 **Path-derived naming:** identity = relative path minus extension, `/` → `_`, must match `^[a-z0-9_]{1,64}$`. An explicit `name` is allowed only if it equals the derived name; mismatch is a diagnostic error; colliding names disable both files with a reported collision.
 
