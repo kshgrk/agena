@@ -58,6 +58,11 @@ import {
   Textarea,
 } from "../../ui/index.ts";
 import {
+  nestedSessionRows,
+  projectSidebarAgentTasks,
+  type SidebarAgentTask,
+} from "../agents/tasks.ts";
+import {
   createGlobalSessionInput,
   createProjectSessionInput,
   cycleOrder,
@@ -149,9 +154,17 @@ function CountedContextMenu({ children }: { children: ReactNode }) {
 const SessionRow = memo(function SessionRow({
   session,
   active,
+  task,
+  childCount = 0,
+  childrenOpen = false,
+  onToggleChildren,
 }: {
   session: SessionSummary;
   active: boolean;
+  task?: SidebarAgentTask | undefined;
+  childCount?: number;
+  childrenOpen?: boolean;
+  onToggleChildren?: (() => void) | undefined;
 }) {
   // features.md §5.1: origin badge for imported sessions, read from the loaded
   // transcript's session.created row (present once history is paged to seq 1).
@@ -177,42 +190,98 @@ const SessionRow = memo(function SessionRow({
     const state = s.bySession[session.sessionId]?.runtimeStatus?.state;
     return state && state !== "idle" ? state : null;
   });
+  const taskActive = task?.status === "created" || task?.status === "running";
+  const taskLabel =
+    task && session.title && session.title !== task.role
+      ? session.title
+      : task?.role || session.title || "untitled";
+  const taskStatus =
+    task?.status === "completed"
+      ? "finished"
+      : task?.status === "cancelled"
+        ? "stopped"
+        : task?.status;
 
   return (
     <CountedContextMenu>
       <ContextMenuTrigger>
-        <button
-          type="button"
-          onClick={() => activate(session.sessionId)}
-          className={cx(
-            "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left transition-colors",
-            active ? "bg-raised" : "hover:bg-raised/60",
-            archived && "opacity-60",
-          )}
-        >
-          <span
-            title={pendingCount > 0 ? "Approval needed" : (activity ?? "Idle")}
+        <div className="flex items-center">
+          {onToggleChildren ? (
+            <button
+              type="button"
+              aria-label={`${childrenOpen ? "Collapse" : "Expand"} ${childCount} subagents`}
+              aria-expanded={childrenOpen}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleChildren();
+              }}
+              className="flex size-6 shrink-0 items-center justify-center rounded text-fg-faint hover:bg-raised hover:text-fg-secondary"
+            >
+              {childrenOpen ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => activate(session.sessionId)}
             className={cx(
-              "size-1.5 shrink-0 rounded-full",
-              pendingCount > 0
-                ? "bg-warn"
-                : activity
-                  ? "bg-accent animate-pulse-soft"
-                  : "bg-fg-faint",
-            )}
-          />
-          <span
-            className={cx(
-              "min-w-0 flex-1 truncate text-sm",
-              active ? "font-medium text-fg" : "text-fg-secondary",
-              !session.title && "text-fg-muted",
+              "flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left transition-colors",
+              active ? "bg-raised" : "hover:bg-raised/60",
+              archived && "opacity-60",
             )}
           >
-            {session.title || "untitled"}
-          </span>
-          {importOrigin ? <Badge>{importOrigin}</Badge> : null}
-          {pendingCount > 0 ? <Badge tone="warn">{pendingCount}</Badge> : null}
-        </button>
+            <span
+              title={
+                pendingCount > 0
+                  ? "Approval needed"
+                  : (taskStatus ?? activity ?? "Idle")
+              }
+              className={cx(
+                "size-1.5 shrink-0 rounded-full",
+                pendingCount > 0
+                  ? "bg-warn"
+                  : taskActive || activity
+                    ? "bg-accent animate-pulse-soft"
+                    : task?.status === "completed"
+                      ? "bg-success"
+                      : task?.status === "failed"
+                        ? "bg-danger"
+                        : "bg-fg-faint",
+              )}
+            />
+            <span
+              className={cx(
+                "min-w-0 flex-1 truncate text-sm",
+                active ? "font-medium text-fg" : "text-fg-secondary",
+                !session.title && !task && "text-fg-muted",
+              )}
+            >
+              {taskLabel}
+            </span>
+            {taskStatus ? (
+              <span
+                className={cx(
+                  "shrink-0 text-2xs",
+                  taskActive
+                    ? "text-accent"
+                    : task?.status === "failed"
+                      ? "text-danger"
+                      : "text-fg-faint",
+                )}
+              >
+                {taskStatus}
+              </span>
+            ) : null}
+            {childCount > 0 ? <Badge>{childCount}</Badge> : null}
+            {importOrigin ? <Badge>{importOrigin}</Badge> : null}
+            {pendingCount > 0 ? (
+              <Badge tone="warn">{pendingCount}</Badge>
+            ) : null}
+          </button>
+        </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => activate(session.sessionId)}>
@@ -250,11 +319,15 @@ export function SessionsRail() {
   const activeSessionId = useSessions((s) => s.activeSessionId);
   const loading = useSessions((s) => s.loading);
   const error = useSessions((s) => s.error);
+  const transcripts = useTranscripts((s) => s.bySession);
 
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"projects" | "tasks">("projects");
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [expandedAgentParents, setExpandedAgentParents] = useState<
+    ReadonlySet<string>
+  >(new Set());
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(new Set());
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
@@ -398,11 +471,47 @@ export function SessionsRail() {
     () => splitSessionSections(byId, order, query),
     [byId, order, query],
   );
+  const agentTasks = useMemo(
+    () => projectSidebarAgentTasks(transcripts, byId),
+    [byId, transcripts],
+  );
+  const agentChildren = useMemo(() => {
+    const children = new Map<string, SidebarAgentTask[]>();
+    for (const task of agentTasks) {
+      const rows = children.get(task.parentSessionId) ?? [];
+      rows.push(task);
+      children.set(task.parentSessionId, rows);
+    }
+    return children;
+  }, [agentTasks]);
   const dialogGroups = useMemo(
     () => splitSessionSections(byId, order).projectGroups,
     [byId, order],
   );
   const filtered = query.trim().length > 0;
+  const isAgentParentOpen = useCallback(
+    (sessionId: string) => {
+      const children = agentChildren.get(sessionId) ?? [];
+      return (
+        expandedAgentParents.has(sessionId) ||
+        children.some(
+          (task) =>
+            task.childSessionId === activeSessionId ||
+            task.status === "created" ||
+            task.status === "running",
+        )
+      );
+    },
+    [activeSessionId, agentChildren, expandedAgentParents],
+  );
+  const toggleAgentChildren = useCallback((sessionId: string) => {
+    setExpandedAgentParents((previous) => {
+      const next = new Set(previous);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }, []);
   const tabVisibleCount =
     tab === "projects"
       ? sections.projectGroups.reduce(
@@ -525,9 +634,12 @@ export function SessionsRail() {
                     .find((s) => s !== undefined);
                   const groupCollapsed = collapsed.has(group.key);
                   const allVisible = showAll.has(group.key);
-                  const visibleIds = allVisible
-                    ? group.ids
-                    : group.ids.slice(0, 5);
+                  const rows = nestedSessionRows(group.ids, agentTasks).filter(
+                    (row) =>
+                      row.depth === 0 ||
+                      isAgentParentOpen(row.task?.parentSessionId ?? ""),
+                  );
+                  const visibleRows = allVisible ? rows : rows.slice(0, 5);
                   const FolderIcon = groupCollapsed ? Folder : FolderOpen;
                   const header = (
                     <div className="flex h-8 items-center pr-1">
@@ -596,17 +708,32 @@ export function SessionsRail() {
                       )}
                       {groupCollapsed ? null : (
                         <div className="space-y-0.5 pl-5">
-                          {visibleIds.map((id) => {
-                            const s = byId[id];
+                          {visibleRows.map((row) => {
+                            const s = byId[row.id];
                             return s ? (
-                              <SessionRow
-                                key={id}
-                                session={s}
-                                active={id === activeSessionId}
-                              />
+                              <div
+                                key={row.id}
+                                className={row.depth === 1 ? "pl-3" : undefined}
+                              >
+                                <SessionRow
+                                  session={s}
+                                  active={row.id === activeSessionId}
+                                  {...(row.task ? { task: row.task } : {})}
+                                  childCount={
+                                    agentChildren.get(row.id)?.length ?? 0
+                                  }
+                                  childrenOpen={isAgentParentOpen(row.id)}
+                                  {...(agentChildren.has(row.id)
+                                    ? {
+                                        onToggleChildren: () =>
+                                          toggleAgentChildren(row.id),
+                                      }
+                                    : {})}
+                                />
+                              </div>
                             ) : null;
                           })}
-                          {group.ids.length > 5 ? (
+                          {rows.length > 5 ? (
                             <button
                               type="button"
                               className="h-8 w-full rounded-md px-2 text-left text-xs text-fg-muted hover:bg-raised/60 hover:text-fg-secondary"
@@ -622,7 +749,7 @@ export function SessionsRail() {
                             >
                               {allVisible
                                 ? "Show less"
-                                : `Show ${group.ids.length - 5} more`}
+                                : `Show ${rows.length - 5} more`}
                             </button>
                           ) : null}
                         </div>
@@ -634,16 +761,35 @@ export function SessionsRail() {
 
             {tab === "tasks" && sections.globalIds.length > 0 ? (
               <div className="space-y-0.5">
-                {sections.globalIds.map((id) => {
-                  const s = byId[id];
-                  return s ? (
-                    <SessionRow
-                      key={id}
-                      session={s}
-                      active={id === activeSessionId}
-                    />
-                  ) : null;
-                })}
+                {nestedSessionRows(sections.globalIds, agentTasks)
+                  .filter(
+                    (row) =>
+                      row.depth === 0 ||
+                      isAgentParentOpen(row.task?.parentSessionId ?? ""),
+                  )
+                  .map((row) => {
+                    const s = byId[row.id];
+                    return s ? (
+                      <div
+                        key={row.id}
+                        className={row.depth === 1 ? "pl-3" : undefined}
+                      >
+                        <SessionRow
+                          session={s}
+                          active={row.id === activeSessionId}
+                          {...(row.task ? { task: row.task } : {})}
+                          childCount={agentChildren.get(row.id)?.length ?? 0}
+                          childrenOpen={isAgentParentOpen(row.id)}
+                          {...(agentChildren.has(row.id)
+                            ? {
+                                onToggleChildren: () =>
+                                  toggleAgentChildren(row.id),
+                              }
+                            : {})}
+                        />
+                      </div>
+                    ) : null;
+                  })}
                 <button
                   type="button"
                   className="mt-1 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-fg-muted hover:bg-raised/60 hover:text-fg-secondary"

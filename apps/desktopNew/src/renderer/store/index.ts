@@ -14,8 +14,8 @@ export {
   useCommands,
 } from "./commands.ts";
 export {
-  connectAndBootstrap,
   type ConnectionStore,
+  connectAndBootstrap,
   useConnection,
 } from "./connection.ts";
 export { ensureSubscribed, ingestBatch, resetSubscriptions } from "./ingest.ts";
@@ -26,6 +26,7 @@ export {
   applySnapshot,
   getBridge,
   markSynced,
+  needsRecentHistory,
   prependOlderEvents,
   type TranscriptsStore,
   useTranscripts,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,5 +46,14 @@ test("persists a secret-free MCP registry and encrypted API-key material", async
   expect(statSync(join(state, "config", "mcp-secrets.key")).mode & 0o777).toBe(
     0o600,
   );
+  const envName = `AGENA_MCP_${createHash("sha256")
+    .update("example\0API_KEY")
+    .digest("hex")
+    .slice(0, 20)
+    .toUpperCase()}`;
+  expect(process.env[envName]).toBe("top-secret-value");
+  await service.remove(imported.id);
+  expect(process.env[envName]).toBeUndefined();
+  expect(service.list()).toEqual([]);
   store.close();
 });

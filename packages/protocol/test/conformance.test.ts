@@ -23,10 +23,41 @@ import {
   projectResponseSchema,
   ptyClientControlFrameSchema,
   ptyDaemonControlFrameSchema,
+  sessionSummarySchema,
+  visibleBrowserActionSchema,
+  visibleBrowserResultSchema,
   type WireEnvelope,
   WS_CLOSE_CODES,
   wireEnvelopeSchema,
 } from "../src/index.ts";
+
+it("visible browser actions and results carry deterministic tab identity", () => {
+  expect(
+    visibleBrowserActionSchema.parse({
+      action: "navigate",
+      tabId: "tab-1",
+      kind: "reload",
+    }),
+  ).toMatchObject({ tabId: "tab-1" });
+  expect(() => visibleBrowserActionSchema.parse({ action: "close" })).toThrow();
+  expect(
+    visibleBrowserResultSchema.parse({
+      tabId: "tab-1",
+      url: "https://example.com",
+      title: "Example",
+      tabs: [
+        {
+          tabId: "tab-1",
+          url: "https://example.com",
+          title: "Example",
+          loading: false,
+          canGoBack: false,
+          canGoForward: false,
+        },
+      ],
+    }),
+  ).toMatchObject({ tabId: "tab-1" });
+});
 
 const source = { kind: "user", clientId: "01CLIENT" } as const;
 
@@ -380,6 +411,37 @@ describe("M4 session HTTP scope schemas", () => {
     expect(listSessionsQuerySchema.parse({ allProjects: "true" })).toEqual({
       allProjects: true,
     });
+  });
+});
+
+it("accepts compact durable subagent metadata in a session summary", () => {
+  expect(
+    sessionSummarySchema.parse({
+      sessionId: "child-1",
+      workspaceId: "workspace-1",
+      rootBranchId: "branch-1",
+      lastSeq: 1,
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:01.000Z",
+      scope: "project",
+      status: "active",
+      cwd: ".",
+      sessionKind: "subagent",
+      parentSessionId: "parent-1",
+      parentTaskId: "task-1",
+      subagent: {
+        taskId: "task-1",
+        role: "security",
+        status: "completed",
+        createdAt: "2026-07-12T00:00:00.000Z",
+        startedAt: "2026-07-12T00:00:00.000Z",
+        finishedAt: "2026-07-12T00:00:01.000Z",
+      },
+    }),
+  ).toMatchObject({
+    parentSessionId: "parent-1",
+    parentTaskId: "task-1",
+    subagent: { taskId: "task-1", status: "completed" },
   });
 });
 

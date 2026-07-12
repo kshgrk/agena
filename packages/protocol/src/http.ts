@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { approvalRequestedSchema } from "./events.ts";
+import { modelRefSchema } from "./content.ts";
+import {
+  agentTaskSummarySchema,
+  approvalRequestedSchema,
+  sessionOriginSchema,
+} from "./events.ts";
 
 export const importSkillRequestSchema = z.object({
   identity: z.string().min(1).max(2048),
@@ -135,6 +140,61 @@ export const completeMcpOAuthResponseSchema = z.object({
 });
 export type CompleteMcpOAuthResponse = z.infer<
   typeof completeMcpOAuthResponseSchema
+>;
+
+// ---- curated plugins ------------------------------------------------------
+
+export const pluginKindSchema = z.enum([
+  "integration",
+  "mcp",
+  "extension",
+  "skill",
+]);
+export const pluginCategorySchema = z.enum([
+  "developer_tools",
+  "productivity",
+  "data",
+  "automation",
+]);
+export const pluginStatusSchema = z.enum([
+  "available",
+  "installed",
+  "disabled",
+  "needs_auth",
+  "ready",
+  "error",
+  "update_available",
+]);
+export const pluginSummarySchema = z.object({
+  id: z.string().min(1).max(128),
+  name: z.string().min(1).max(128),
+  description: z.string().min(1).max(1024),
+  publisher: z.string().min(1).max(128),
+  kind: pluginKindSchema,
+  category: pluginCategorySchema,
+  status: pluginStatusSchema,
+  authKind: mcpAuthKindSchema,
+  featured: z.boolean(),
+  capabilities: z.array(z.string().min(1).max(128)),
+  enabled: z.boolean(),
+  version: z.string().min(1).max(128).optional(),
+  homepage: z.string().url().optional(),
+  resourceId: z.string().min(1).optional(),
+  error: z.string().min(1).max(1024).optional(),
+});
+export type PluginSummary = z.infer<typeof pluginSummarySchema>;
+export const listPluginsResponseSchema = z.object({
+  plugins: z.array(pluginSummarySchema),
+});
+export type ListPluginsResponse = z.infer<typeof listPluginsResponseSchema>;
+export const pluginIdParamsSchema = z.object({
+  id: z.string().min(1).max(128),
+});
+export const pluginResponseSchema = z.object({ plugin: pluginSummarySchema });
+export type PluginResponse = z.infer<typeof pluginResponseSchema>;
+export const setPluginEnabledRequestSchema = z.object({ enabled: z.boolean() });
+export type SetPluginEnabledRequest = z.infer<
+  typeof setPluginEnabledRequestSchema
 >;
 
 // ---- model-provider authentication ----------------------------------------
@@ -342,6 +402,21 @@ export const searchResponseSchema = z.object({
 });
 export type SearchResponse = z.infer<typeof searchResponseSchema>;
 
+export const userMessageAnchorSchema = z.object({
+  messageId: z.string().min(1),
+  seq: z.number().int().positive(),
+  preview: z.string(),
+  createdAt: z.string(),
+});
+export type UserMessageAnchor = z.infer<typeof userMessageAnchorSchema>;
+
+export const userMessageAnchorsResponseSchema = z.object({
+  messages: z.array(userMessageAnchorSchema),
+});
+export type UserMessageAnchorsResponse = z.infer<
+  typeof userMessageAnchorsResponseSchema
+>;
+
 export const sessionSummarySchema = z.object({
   sessionId: z.string().min(1),
   workspaceId: z.string().min(1),
@@ -356,6 +431,20 @@ export const sessionSummarySchema = z.object({
   projectRoot: z.string().min(1).optional(),
   cwd: z.string().min(1),
   hostCwdHint: z.string().min(1).optional(),
+  origin: sessionOriginSchema.optional(),
+  sessionKind: z.enum(["primary", "subagent"]).optional(),
+  parentSessionId: z.string().min(1).optional(),
+  parentTaskId: z.string().min(1).optional(),
+  subagent: agentTaskSummarySchema
+    .pick({
+      taskId: true,
+      role: true,
+      status: true,
+      createdAt: true,
+      startedAt: true,
+      finishedAt: true,
+    })
+    .optional(),
 });
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 
@@ -603,6 +692,17 @@ export const importSessionRequestSchema = z.object({
   projectRoot: z.string().min(1),
   title: z.string().optional(),
   sourceFingerprint: sourceFingerprintSchema,
+  /** Present only for a historically recorded child agent. */
+  subagent: z
+    .object({
+      parentSourceSessionId: z.string().min(1),
+      agentId: z.string().min(1),
+      role: z.string().min(1),
+      task: z.string().min(1),
+      execution: z.enum(["foreground", "background"]),
+      model: modelRefSchema,
+    })
+    .optional(),
   /** pi v3 JSONL, converted client-side. ≤ ~13 MB per session — plain JSON body. */
   piSession: z.string().min(1),
 });
@@ -664,6 +764,12 @@ export const PTY_HTTP_ROUTES = {
     path: "/v1/search",
     query: searchQuerySchema,
     response: searchResponseSchema,
+  },
+  listUserMessages: {
+    method: "GET",
+    path: "/v1/sessions/:id/user-messages",
+    params: sessionIdParamsSchema,
+    response: userMessageAnchorsResponseSchema,
   },
   updateSessionStatus: {
     method: "PATCH",
@@ -803,6 +909,36 @@ export const PTY_HTTP_ROUTES = {
     params: providerOAuthFlowParamsSchema,
     request: respondProviderOAuthRequestSchema,
     response: providerOAuthStatusResponseSchema,
+  },
+  listPlugins: {
+    method: "GET",
+    path: "/v1/plugins",
+    response: listPluginsResponseSchema,
+  },
+  installPlugin: {
+    method: "POST",
+    path: "/v1/plugins/:id/install",
+    params: pluginIdParamsSchema,
+    response: pluginResponseSchema,
+  },
+  updatePlugin: {
+    method: "POST",
+    path: "/v1/plugins/:id/update",
+    params: pluginIdParamsSchema,
+    response: pluginResponseSchema,
+  },
+  setPluginEnabled: {
+    method: "PATCH",
+    path: "/v1/plugins/:id",
+    params: pluginIdParamsSchema,
+    request: setPluginEnabledRequestSchema,
+    response: pluginResponseSchema,
+  },
+  removePlugin: {
+    method: "DELETE",
+    path: "/v1/plugins/:id",
+    params: pluginIdParamsSchema,
+    response: pluginResponseSchema,
   },
   diagnostics: {
     method: "GET",

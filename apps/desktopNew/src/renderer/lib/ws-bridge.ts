@@ -499,6 +499,7 @@ export function createWsBridge(
     updateSessionStatus: (sessionId, status) =>
       need().updateSessionStatus(sessionId, status),
     readEvents: (sessionId, o) => need().readEvents(sessionId, o ?? {}),
+    listUserMessages: (sessionId) => need().listUserMessages(sessionId),
     search: (query, o) => need().search(query, o ?? {}),
     listApprovals: () => need().listApprovals(),
     listFiles: (o) => need().listFiles(o ?? {}),
@@ -510,6 +511,12 @@ export function createWsBridge(
     deleteSnapshot: (snapshotId) => need().deleteSnapshot(snapshotId),
     diagnostics: () => need().diagnostics(),
     listPtys: () => need().listPtys(),
+    listPlugins: async () => (await need().listPlugins()).plugins,
+    installPlugin: async (id) => (await need().installPlugin(id)).plugin,
+    updatePlugin: async (id) => (await need().updatePlugin(id)).plugin,
+    setPluginEnabled: async (id, enabled) =>
+      (await need().setPluginEnabled(id, enabled)).plugin,
+    removePlugin: async (id) => (await need().removePlugin(id)).plugin,
     listProviders: async () => (await need().listProviders()).providers,
     saveProviderApiKey: async (id, input) =>
       (await need().saveProviderApiKey(id, input)).provider,

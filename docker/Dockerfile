@@ -10,6 +10,8 @@ ENV NODE_ENV=production \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       bash \
+      ca-certificates \
+      curl \
       g++ \
       git \
       less \

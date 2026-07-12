@@ -3,12 +3,16 @@
 // ponytail: branch APIs and NewEvent.id land when branching/importer dedupe do.
 import type {
   AgenaEvent,
+  AgentTaskCreated,
+  AgentTaskSummary,
   ApprovalRequested,
   ContentBlock,
   EventSource,
   SearchHit,
+  SessionOrigin,
   SessionStatus,
   SnapshotSummary,
+  UserMessageAnchor,
 } from "@agena/protocol";
 
 export type SessionScope = "project" | "global" | "control";
@@ -48,7 +52,7 @@ export interface CreateSessionInput {
   title?: string;
   source?: EventSource; // defaults to { kind: "user" } (§5.5 session.created)
   /** session.created provenance; defaults to "native" ("control" for control scope). */
-  origin?: "import.claude" | "import.codex";
+  origin?: Extract<SessionOrigin, "import.claude" | "import.codex">;
   scope?: SessionScope;
   projectId?: string;
   projectRoot?: string;
@@ -71,6 +75,22 @@ export interface SessionRecord {
   projectRoot?: string;
   cwd: string;
   hostCwdHint?: string;
+  origin: SessionOrigin;
+  sessionKind?: "primary" | "subagent";
+  parentSessionId?: string;
+  parentTaskId?: string;
+}
+
+export interface AgentTaskStore {
+  createSubagentSession(input: {
+    parentSessionId: string;
+    title?: string;
+    source: EventSource;
+    origin?: Extract<SessionOrigin, "import.claude" | "import.codex">;
+    task: Omit<AgentTaskCreated, "parentSessionId" | "childSessionId">;
+  }): Promise<{ session: SessionRecord; task: AgentTaskSummary }>;
+  getAgentTask(taskId: string): AgentTaskSummary | null;
+  listAgentTasks(parentSessionId?: string): AgentTaskSummary[];
 }
 
 export interface SessionFilter {
@@ -195,6 +215,10 @@ export interface SearchStore {
       limit?: number;
     },
   ): Promise<SearchHit[]>;
+}
+
+export interface MessageQueryStore {
+  listUserMessages(sessionId: string): Promise<UserMessageAnchor[]>;
 }
 
 export interface ProjectionStore {

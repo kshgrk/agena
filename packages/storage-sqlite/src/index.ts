@@ -1,1 +1,5 @@
-export { type McpRegistryRecord, SqliteEventStore } from "./store.ts";
+export {
+  type CreateSubagentSessionInput,
+  type McpRegistryRecord,
+  SqliteEventStore,
+} from "./store.ts";

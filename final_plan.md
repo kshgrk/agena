@@ -488,6 +488,7 @@ Allowed edges — anything not listed is forbidden:
 | `@agena/storage-sqlite` | core, protocol | Implements core's `EventStore`. Drizzle + better-sqlite3. |
 | `@agena/client` | protocol | No core import — clients never see domain internals. |
 | `@agena/tui` | client, protocol | **Only** package importing `@earendil-works/pi-tui`. |
+| `@agena/desktop-new` | client, importer, protocol | Electron UI; never imports core, storage, or runtime-pi. |
 | `apps/daemon` | core, protocol, runtime-pi, storage-sqlite | Composition root; Hono, node-pty live here. |
 | `apps/cli` | client, tui, protocol | Never imports core, storage, or runtime-pi. |
 

@@ -3,11 +3,12 @@ import {
   ArrowRight,
   ExternalLink,
   Globe,
+  Plus,
   RotateCw,
   SquareCode,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { peekBridge } from "../../lib/bridge.ts";
 import { EmptyState, IconButton, Input, Panel } from "../../ui/index.ts";
 import { useBrowser } from "./store.ts";
@@ -16,6 +17,8 @@ import { normalizeBrowserUrl } from "./url.ts";
 export function BrowserPane() {
   const address = useBrowser((s) => s.address);
   const loading = useBrowser((s) => s.loading);
+  const tabs = useBrowser((s) => s.tabs);
+  const activeTabId = useBrowser((s) => s.activeTabId);
   const url = useBrowser((s) => s.url);
   const canGoBack = useBrowser((s) => s.canGoBack);
   const canGoForward = useBrowser((s) => s.canGoForward);
@@ -24,6 +27,7 @@ export function BrowserPane() {
   const setAddress = useBrowser((s) => s.setAddress);
   const placeholderRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [newTab, setNewTab] = useState(false);
 
   const reportBounds = useCallback(() => {
     const rect = placeholderRef.current?.getBoundingClientRect();
@@ -68,6 +72,46 @@ export function BrowserPane() {
 
   return (
     <Panel>
+      <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b border-border-subtle px-1.5">
+        {tabs.map((tab) => (
+          <div
+            key={tab.tabId}
+            className={`flex h-6 w-36 shrink-0 items-center rounded-md ${
+              tab.tabId === activeTabId
+                ? "bg-raised text-fg"
+                : "text-fg-muted hover:bg-raised/60 hover:text-fg-secondary"
+            }`}
+          >
+            <button
+              type="button"
+              className="min-w-0 flex-1 truncate px-2 text-left text-xs"
+              title={tab.title || tab.url}
+              onClick={() => navigate({ kind: "activate", tabId: tab.tabId })}
+            >
+              {tab.title || tab.url || "New tab"}
+            </button>
+            <button
+              type="button"
+              className="mr-1 rounded p-0.5 hover:bg-fg/10"
+              aria-label={`Close ${tab.title || "browser tab"}`}
+              onClick={() => navigate({ kind: "close", tabId: tab.tabId })}
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+        ))}
+        <IconButton
+          size="sm"
+          label="New browser tab"
+          onClick={() => {
+            setNewTab(true);
+            setAddress("");
+            useBrowser.getState().requestAddressFocus();
+          }}
+        >
+          <Plus />
+        </IconButton>
+      </div>
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border-subtle px-2">
         <IconButton
           size="sm"
@@ -104,7 +148,8 @@ export function BrowserPane() {
             if (event.key !== "Enter") return;
             const resolved = normalizeBrowserUrl(address);
             if (!resolved) return;
-            useBrowser.getState().open(resolved, { source: "user" });
+            useBrowser.getState().open(resolved, { source: "user", newTab });
+            setNewTab(false);
             event.currentTarget.blur();
           }}
           onFocus={(event) => event.currentTarget.select()}

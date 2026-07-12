@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { fallbackSessionTitle } from "@agena/core";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type {
   ExtensionAPI,
@@ -67,10 +68,16 @@ export function sessionNameExtension(pi: ExtensionAPI) {
     started = true;
 
     void (async () => {
-      if (!ctx.model) return;
+      if (!ctx.model) {
+        console.warn("agena title generation skipped: model_unavailable");
+        return;
+      }
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-      if (!auth.ok) return;
+      if (!auth.ok) {
+        console.warn("agena title generation skipped: auth_unavailable");
+        return;
+      }
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -98,13 +105,17 @@ export function sessionNameExtension(pi: ExtensionAPI) {
           const part = response.content
             .toReversed()
             .find((p) => p.type === "text");
-          if (!part) return;
+          if (!part) {
+            console.warn("agena title generation skipped: empty_response");
+            return;
+          }
 
           pi.setSessionName(titleFromResponse(part.text, firstPrompt));
           syncTitle(ctx);
           return;
         } catch {
-          // Match pi-session-name: title failures are silent and leave unnamed.
+          // A fallback title is already durable; retain only a safe diagnostic.
+          console.warn("agena title generation failed: request_failed");
         }
       }
     })();
@@ -139,12 +150,5 @@ function looksLikeAssistantReply(title: string): boolean {
 }
 
 function fallbackTitle(prompt: string): string {
-  const cleaned = cleanTitle(prompt).replace(/[^\w\s-]/g, " ");
-  const words = cleaned.split(/\s+/).filter(Boolean).slice(0, 8);
-  const title = words
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ")
-    .slice(0, 60)
-    .trim();
-  return title || "New Session";
+  return fallbackSessionTitle([{ type: "text", text: prompt }]);
 }

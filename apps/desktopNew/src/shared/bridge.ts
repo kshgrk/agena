@@ -19,6 +19,7 @@ import type {
   ListSessionsQuery,
   ModelRef,
   PendingApprovalSummary,
+  PluginSummary,
   PromptAck,
   ProviderAuthSummary,
   ProviderOAuthStatusResponse,
@@ -35,6 +36,7 @@ import type {
   StartProviderOAuthResponse,
   SubscribeAck,
   ThinkingLevel,
+  UserMessageAnchor,
 } from "@agena/protocol";
 
 // ---- connection -------------------------------------------------------------
@@ -278,6 +280,7 @@ export type AgenaBridge = {
     sessionId: string,
     opts?: { fromSeq?: number; limit?: number },
   ): Promise<ReadEventsPage>;
+  listUserMessages(sessionId: string): Promise<UserMessageAnchor[]>;
   search(
     query: string,
     opts?: { sessionId?: string; allProjects?: boolean; limit?: number },
@@ -299,6 +302,13 @@ export type AgenaBridge = {
   deleteSnapshot(snapshotId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticsResponse>;
   listPtys(): Promise<PtySummary[]>;
+
+  // curated plugins (artifacts/auth remain owned by their existing services)
+  listPlugins(): Promise<PluginSummary[]>;
+  installPlugin(id: string): Promise<PluginSummary>;
+  updatePlugin(id: string): Promise<PluginSummary>;
+  setPluginEnabled(id: string, enabled: boolean): Promise<PluginSummary>;
+  removePlugin(id: string): Promise<PluginSummary>;
 
   // Pi model-provider authentication (credentials never return to renderer)
   listProviders(): Promise<ProviderAuthSummary[]>;
@@ -392,14 +402,18 @@ export type AgenaBridge = {
 export type BrowserOpenOptions = {
   /** Provenance for routing/telemetry; does not change behavior in v1. */
   source?: "user" | "agent" | "terminal";
+  /** Create a tab instead of navigating the active one. */
+  newTab?: boolean;
 };
 
 export type BrowserNavAction =
-  | { kind: "back" }
-  | { kind: "forward" }
-  | { kind: "reload" }
-  | { kind: "stop" }
-  | { kind: "url"; url: string };
+  | { kind: "back"; tabId?: string }
+  | { kind: "forward"; tabId?: string }
+  | { kind: "reload"; tabId?: string }
+  | { kind: "stop"; tabId?: string }
+  | { kind: "url"; url: string; tabId?: string }
+  | { kind: "activate"; tabId: string }
+  | { kind: "close"; tabId: string };
 
 export type BrowserBounds = {
   x: number;
@@ -409,9 +423,20 @@ export type BrowserBounds = {
 };
 
 export type BrowserState = {
+  tabs: BrowserTabState[];
+  activeTabId: string | null;
   /** Absent until a page loads; null when the pane is closed/empty. */
   url: string | null;
   title: string | null;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+};
+
+export type BrowserTabState = {
+  tabId: string;
+  url: string;
+  title: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;

@@ -31,8 +31,10 @@ import type {
   RuntimeAdapter,
   RuntimeEvent,
   RuntimeSession,
+  SubagentController,
   VisibleBrowserController,
 } from "../runtime/types.ts";
+import { fallbackSessionTitle } from "./title.ts";
 
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
@@ -48,6 +50,7 @@ export interface SessionOrchestratorOptions {
   /** Ephemeral frame sink (P12) — the daemon points this at FanoutHub.publishFrame. */
   publishFrame?: (frame: AgenaFrame) => void;
   visibleBrowser?: VisibleBrowserController;
+  subagents?: SubagentController;
 }
 
 interface SessionState {
@@ -67,6 +70,7 @@ export class SessionOrchestrator {
   #workspaceDir: string;
   #publishFrame: (frame: AgenaFrame) => void;
   #visibleBrowser: VisibleBrowserController | undefined;
+  #subagents: SubagentController | undefined;
   #runtimeSource: EventSource;
   #sessions = new Map<string, SessionState>();
 
@@ -80,6 +84,7 @@ export class SessionOrchestrator {
     this.#workspaceDir = options.workspaceDir ?? "/workspace";
     this.#publishFrame = options.publishFrame ?? (() => {});
     this.#visibleBrowser = options.visibleBrowser;
+    this.#subagents = options.subagents;
     // P3 provenance: runtime-derived events are stamped runtime:'pi'; the fake
     // adapter is not 'pi', so the optional field stays absent.
     this.#runtimeSource =
@@ -367,6 +372,12 @@ export class SessionOrchestrator {
         ? { runtimeSessionRef: s.record.runtimeSessionRef }
         : {}),
       ...(this.#visibleBrowser ? { visibleBrowser: this.#visibleBrowser } : {}),
+      ...(!s.record.parentSessionId && this.#subagents
+        ? { subagents: this.#subagents }
+        : {}),
+      ...(s.record.parentSessionId
+        ? { toolNames: ["read", "grep", "find", "ls"] }
+        : {}),
     });
     const runtimeRefs = runtimeSessionRefs(this.#store);
     if (
@@ -571,7 +582,7 @@ export class SessionOrchestrator {
       const source: EventSource = clientId
         ? { kind: "user", clientId }
         : { kind: "user" };
-      const { lastSeq } = await this.#append(s, [
+      const events: NewEvent[] = [
         {
           type: "message.user.created",
           v: 1,
@@ -582,7 +593,22 @@ export class SessionOrchestrator {
             ...(trigger === "prompt" ? {} : { queued: trigger }),
           },
         },
-      ]);
+      ];
+      if (trigger === "prompt" && !s.record.title && s.lastSeq === 1) {
+        events.push({
+          type: "session.title.changed",
+          v: 1,
+          source,
+          payload: { title: fallbackSessionTitle(content) },
+        });
+      }
+      const appended = await this.#append(s, events);
+      const messageSeq =
+        appended.events.find(
+          (event) =>
+            event.type === "message.user.created" &&
+            (event.payload as { messageId?: unknown }).messageId === messageId,
+        )?.seq ?? appended.lastSeq;
       try {
         const runtime = await this.#runtime(s);
         const input = { messageId, text: textContent(content) };
@@ -600,7 +626,7 @@ export class SessionOrchestrator {
         }
         throw err;
       }
-      return { messageId, seq: lastSeq };
+      return { messageId, seq: messageSeq };
     } catch (err) {
       if (trigger === "prompt") s.busy = false;
       throw err;

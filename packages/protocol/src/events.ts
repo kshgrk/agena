@@ -21,6 +21,14 @@ export const eventSourceSchema = z.object({
 });
 export type EventSource = z.infer<typeof eventSourceSchema>;
 
+export const sessionOriginSchema = z.enum([
+  "native",
+  "import.claude",
+  "import.codex",
+  "control",
+]);
+export type SessionOrigin = z.infer<typeof sessionOriginSchema>;
+
 // ---- M1 durable payloads, exactly per §5.5 (every payload is v: 1) ----
 // ponytail: the rest of the §5.5 catalog lands with the milestones that emit it (M2+)
 
@@ -29,7 +37,7 @@ export const sessionCreatedSchema = z
     workspaceId: z.string().min(1),
     title: z.string().optional(),
     runtime: z.literal("pi"),
-    origin: z.enum(["native", "import.claude", "import.codex", "control"]),
+    origin: sessionOriginSchema,
     scope: z.enum(["project", "global", "control"]),
     projectId: z.string().min(1).optional(),
     projectRoot: z.string().min(1).optional(),
@@ -191,6 +199,78 @@ export const toolCallDeniedSchema = z.object({
 });
 export type ToolCallDenied = z.infer<typeof toolCallDeniedSchema>;
 
+export const agentTaskCreatedSchema = z.object({
+  taskId: z.string().min(1),
+  parentSessionId: z.string().min(1),
+  childSessionId: z.string().min(1),
+  parentRunId: z.string().min(1),
+  parentMessageId: z.string().min(1),
+  parentToolCallId: z.string().min(1),
+  role: z.string().min(1),
+  task: z.string().min(1),
+  execution: z.enum(["foreground", "background"]),
+  context: z.enum(["fresh", "fork"]),
+  workspaceMode: z.enum([
+    "shared_readonly",
+    "shared_serial_writer",
+    "isolated_worktree",
+  ]),
+  requestedModel: modelRefSchema.optional(),
+  resolvedModel: modelRefSchema,
+  retryOfTaskId: z.string().min(1).optional(),
+});
+export type AgentTaskCreated = z.infer<typeof agentTaskCreatedSchema>;
+
+export const agentTaskStartedSchema = z.object({
+  taskId: z.string().min(1),
+  startedAt: z.string().min(1),
+});
+export type AgentTaskStarted = z.infer<typeof agentTaskStartedSchema>;
+
+export const agentTaskCompletedSchema = z.object({
+  taskId: z.string().min(1),
+  resultMessageId: z.string().min(1),
+  summary: z.array(contentBlockSchema),
+  usage: usageTotalsSchema.optional(),
+});
+export type AgentTaskCompleted = z.infer<typeof agentTaskCompletedSchema>;
+
+export const agentTaskFailedSchema = z.object({
+  taskId: z.string().min(1),
+  error: z.object({ code: z.string().min(1), message: z.string() }),
+  summary: z.array(contentBlockSchema).optional(),
+});
+export type AgentTaskFailed = z.infer<typeof agentTaskFailedSchema>;
+
+export const agentTaskCancelledSchema = z.object({
+  taskId: z.string().min(1),
+  reason: z.enum([
+    "user",
+    "parent_aborted",
+    "daemon_shutdown",
+    "daemon_restart",
+  ]),
+});
+export type AgentTaskCancelled = z.infer<typeof agentTaskCancelledSchema>;
+
+export const agentTaskMessageSentSchema = z.object({
+  taskId: z.string().min(1),
+  direction: z.enum(["parent_to_child", "child_to_parent"]),
+  messageId: z.string().min(1),
+});
+export type AgentTaskMessageSent = z.infer<typeof agentTaskMessageSentSchema>;
+
+export const agentTaskSummarySchema = agentTaskCreatedSchema.extend({
+  status: z.enum(["created", "running", "completed", "failed", "cancelled"]),
+  summary: z.array(contentBlockSchema).optional(),
+  error: z.object({ code: z.string().min(1), message: z.string() }).optional(),
+  usage: usageTotalsSchema.optional(),
+  createdAt: z.string().min(1),
+  startedAt: z.string().min(1).optional(),
+  finishedAt: z.string().min(1).optional(),
+});
+export type AgentTaskSummary = z.infer<typeof agentTaskSummarySchema>;
+
 export const terminalSessionStartedSchema = z.object({
   terminalId: z.string().min(1),
   shell: z.string().min(1),
@@ -345,6 +425,12 @@ export const durableEventSchemas = {
   "tool.call.failed": toolCallFailedSchema,
   "tool.call.aborted": toolCallAbortedSchema,
   "tool.call.denied": toolCallDeniedSchema,
+  "agent.task.created": agentTaskCreatedSchema,
+  "agent.task.started": agentTaskStartedSchema,
+  "agent.task.completed": agentTaskCompletedSchema,
+  "agent.task.failed": agentTaskFailedSchema,
+  "agent.task.cancelled": agentTaskCancelledSchema,
+  "agent.task.message.sent": agentTaskMessageSentSchema,
   "terminal.session.started": terminalSessionStartedSchema,
   "terminal.session.ended": terminalSessionEndedSchema,
   "model.changed": modelChangedSchema,
@@ -484,6 +570,42 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("tool.call.denied"),
     payload: toolCallDeniedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.created"),
+    payload: agentTaskCreatedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.started"),
+    payload: agentTaskStartedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.completed"),
+    payload: agentTaskCompletedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.failed"),
+    payload: agentTaskFailedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.cancelled"),
+    payload: agentTaskCancelledSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("agent.task.message.sent"),
+    payload: agentTaskMessageSentSchema,
   }),
   z.object({
     ...eventBase,

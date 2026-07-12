@@ -5,6 +5,7 @@ export const VISIBLE_BROWSER_CAPABILITY = "visible_browser" as const;
 const browserBaseSchema = z.object({
   sessionId: z.string().min(1).optional(),
   toolCallId: z.string().min(1).optional(),
+  tabId: z.string().min(1).optional(),
 });
 
 export const visibleBrowserActionSchema = z.discriminatedUnion("action", [
@@ -21,6 +22,21 @@ export const visibleBrowserActionSchema = z.discriminatedUnion("action", [
       serverName: z.string().min(1),
     })
     .merge(browserBaseSchema),
+  z.object({ action: z.literal("list") }).merge(browserBaseSchema),
+  browserBaseSchema.merge(
+    z.object({
+      action: z.literal("close"),
+      tabId: z.string().min(1),
+    }),
+  ),
+  browserBaseSchema.merge(
+    z.object({
+      action: z.literal("navigate"),
+      tabId: z.string().min(1),
+      kind: z.enum(["back", "forward", "reload", "stop", "url"]),
+      url: z.string().min(1).optional(),
+    }),
+  ),
   z
     .object({
       action: z.literal("read"),
@@ -68,9 +84,21 @@ export type VisibleBrowserScreenshot = z.infer<
   typeof visibleBrowserScreenshotSchema
 >;
 
-export const visibleBrowserResultSchema = z.object({
+export const visibleBrowserTabSchema = z.object({
+  tabId: z.string().min(1),
   url: z.string(),
   title: z.string(),
+  loading: z.boolean(),
+  canGoBack: z.boolean(),
+  canGoForward: z.boolean(),
+});
+export type VisibleBrowserTab = z.infer<typeof visibleBrowserTabSchema>;
+
+export const visibleBrowserResultSchema = z.object({
+  tabId: z.string().min(1).optional(),
+  url: z.string(),
+  title: z.string(),
+  tabs: z.array(visibleBrowserTabSchema).optional(),
   text: z.string().optional(),
   html: z.string().optional(),
   value: z.unknown().optional(),

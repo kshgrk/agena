@@ -11,6 +11,7 @@ import type { ImportMcpRequest, McpSummary } from "@agena/protocol";
 import {
   completeAuthFromInput,
   type PiMcpServerEntry,
+  removeMcpAuth,
   startAuth,
 } from "@agena/runtime-pi";
 import type {
@@ -43,6 +44,10 @@ export class McpService {
 
   list(): McpSummary[] {
     return this.#store.listMcps().map(toSummary);
+  }
+
+  findByIdentity(identity: string): McpRegistryRecord | undefined {
+    return this.#store.listMcps().find((mcp) => mcp.identity === identity);
   }
 
   async import(input: ImportMcpRequest): Promise<McpSummary> {
@@ -91,6 +96,28 @@ export class McpService {
     const updated = this.#store.setMcpStatus(id, "connected");
     if (!updated) throw new Error("MCP not found");
     return toSummary(updated);
+  }
+
+  async setEnabled(id: string, enabled: boolean): Promise<McpSummary> {
+    const updated = this.#store.setMcpEnabled(id, enabled);
+    if (!updated) throw new Error("MCP not found");
+    await this.#writeAdapterConfig();
+    return toSummary(updated);
+  }
+
+  async remove(id: string): Promise<void> {
+    const mcp = this.#required(id);
+    if (mcp.authKind === "oauth") await removeMcpAuth(mcp.name);
+    if (mcp.authKind === "api_key") {
+      const secrets = await this.#readSecrets();
+      for (const name of secretReferences(mcp)) {
+        delete secrets[name];
+        delete process.env[name];
+      }
+      await this.#writeSecrets(secrets);
+    }
+    this.#store.deleteMcp(id);
+    await this.#writeAdapterConfig();
   }
 
   #required(id: string): McpRegistryRecord {
@@ -169,7 +196,10 @@ export class McpService {
 
   async #writeAdapterConfig(): Promise<void> {
     const mcpServers = Object.fromEntries(
-      this.#store.listMcps().map((mcp) => [mcp.name, toServerEntry(mcp)]),
+      this.#store
+        .listMcps()
+        .filter((mcp) => mcp.enabled)
+        .map((mcp) => [mcp.name, toServerEntry(mcp)]),
     );
     await mkdir(join(this.#piConfigPath, ".."), {
       recursive: true,
@@ -220,6 +250,19 @@ function toServerEntry(mcp: McpRegistryRecord): PiMcpServerEntry {
 }
 
 function toSummary(mcp: McpRegistryRecord): McpSummary {
-  const { env: _env, headers: _headers, ...summary } = mcp;
+  const { enabled: _enabled, env: _env, headers: _headers, ...summary } = mcp;
   return summary;
+}
+
+function secretReferences(mcp: McpRegistryRecord): Set<string> {
+  const names = new Set<string>();
+  for (const value of Object.values({
+    ...(mcp.env ?? {}),
+    ...(mcp.headers ?? {}),
+  })) {
+    for (const match of value.matchAll(/\$\{(AGENA_MCP_[A-Z0-9_]+)\}/g)) {
+      if (match[1]) names.add(match[1]);
+    }
+  }
+  return names;
 }

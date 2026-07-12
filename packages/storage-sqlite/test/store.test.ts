@@ -93,6 +93,24 @@ test("persists sessions and events across store reopen", async () => {
   second.close();
 });
 
+test("lists user-message anchors in sequence order", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [userMessage("first prompt"), userMessage("second prompt")],
+  });
+
+  await expect(
+    store.listUserMessages(session.sessionId),
+  ).resolves.toMatchObject([
+    { seq: 2, preview: "first prompt" },
+    { seq: 3, preview: "second prompt" },
+  ]);
+  store.close();
+});
+
 test("persists runtime session refs across store reopen", async () => {
   const path = dbPath();
   const first = new SqliteEventStore(path);
@@ -113,6 +131,152 @@ test("persists runtime session refs across store reopen", async () => {
     runtimeSessionRef: "/var/lib/agena/pi/s.jsonl",
   });
   second.close();
+});
+
+test("atomically creates a linked subagent session and rebuildable task projection", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const parent = await store.createSession({ workspaceId: "ws-1" });
+  const taskId = ulid();
+  const created = await store.createSubagentSession({
+    parentSessionId: parent.sessionId,
+    title: "Security review",
+    source: pi,
+    task: {
+      taskId,
+      parentRunId: ulid(),
+      parentMessageId: ulid(),
+      parentToolCallId: ulid(),
+      role: "security-reviewer",
+      task: "Review the auth boundary",
+      execution: "background",
+      context: "fresh",
+      workspaceMode: "shared_readonly",
+      resolvedModel: { provider: "fake", id: "reviewer" },
+    },
+  });
+
+  expect(created.session).toMatchObject({
+    sessionKind: "subagent",
+    origin: "native",
+    parentSessionId: parent.sessionId,
+    parentTaskId: taskId,
+    projectId: "default",
+  });
+  expect(store.getAgentTask(taskId)).toMatchObject({
+    status: "created",
+    childSessionId: created.session.sessionId,
+    parentSessionId: parent.sessionId,
+  });
+
+  await store.appendEvents({
+    sessionId: parent.sessionId,
+    branchId: parent.rootBranchId,
+    events: [
+      {
+        type: "agent.task.started",
+        v: 1,
+        source: pi,
+        payload: { taskId, startedAt: "2026-07-12T00:00:00.000Z" },
+      },
+      {
+        type: "agent.task.completed",
+        v: 1,
+        source: pi,
+        payload: {
+          taskId,
+          resultMessageId: ulid(),
+          summary: [{ type: "text", text: "No issues" }],
+          usage: { inputTokens: 12, outputTokens: 4, costUsd: 0.01 },
+        },
+      },
+    ],
+  });
+  expect(store.getAgentTask(taskId)).toMatchObject({
+    status: "completed",
+    summary: [{ type: "text", text: "No issues" }],
+    usage: { inputTokens: 12, outputTokens: 4, costUsd: 0.01 },
+  });
+
+  await store.rebuildProjections(parent.sessionId);
+  expect(store.getAgentTask(taskId)).toMatchObject({
+    status: "completed",
+    childSessionId: created.session.sessionId,
+  });
+  store.close();
+});
+
+test("preserves imported harness origin on child sessions", async () => {
+  const path = dbPath();
+  const store = new SqliteEventStore(path);
+  const parent = await store.createSession({
+    workspaceId: "ws-1",
+    origin: "import.codex",
+  });
+  const created = await store.createSubagentSession({
+    parentSessionId: parent.sessionId,
+    source: pi,
+    origin: "import.codex",
+    task: {
+      taskId: ulid(),
+      parentRunId: ulid(),
+      parentMessageId: ulid(),
+      parentToolCallId: ulid(),
+      role: "worker",
+      task: "Inspect the repository",
+      execution: "foreground",
+      context: "fork",
+      workspaceMode: "shared_readonly",
+      resolvedModel: { provider: "openai", id: "gpt-5" },
+    },
+  });
+
+  expect(created.session.origin).toBe("import.codex");
+  expect(await store.getSession(created.session.sessionId)).toMatchObject({
+    origin: "import.codex",
+  });
+  store.close();
+
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE sessions SET origin = 'native' WHERE id = ?").run(
+    created.session.sessionId,
+  );
+  db.close();
+  const reopened = new SqliteEventStore(path);
+  expect(await reopened.getSession(created.session.sessionId)).toMatchObject({
+    origin: "import.codex",
+  });
+  reopened.close();
+});
+
+test("rolls back the child session when task creation fails", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const parent = await store.createSession({ workspaceId: "ws-1" });
+  const task = {
+    taskId: ulid(),
+    parentRunId: ulid(),
+    parentMessageId: ulid(),
+    parentToolCallId: ulid(),
+    role: "reviewer",
+    task: "Review",
+    execution: "foreground" as const,
+    context: "fresh" as const,
+    workspaceMode: "shared_readonly" as const,
+    resolvedModel: { provider: "fake", id: "reviewer" },
+  };
+  await store.createSubagentSession({
+    parentSessionId: parent.sessionId,
+    source: pi,
+    task,
+  });
+  await expect(
+    store.createSubagentSession({
+      parentSessionId: parent.sessionId,
+      source: pi,
+      task,
+    }),
+  ).rejects.toThrow();
+  expect((await store.listSessions({ allProjects: true })).length).toBe(2);
+  store.close();
 });
 
 test("stores M4 project scope and filters project/global sessions", async () => {

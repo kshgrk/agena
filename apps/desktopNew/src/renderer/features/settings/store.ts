@@ -6,6 +6,7 @@ import { useUi } from "../../store/index.ts";
 export type SettingsSection =
   | "connection"
   | "providers"
+  | "plugins"
   | "mcp"
   | "skills"
   | "import"

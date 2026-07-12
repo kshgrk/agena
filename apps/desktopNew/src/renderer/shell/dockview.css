@@ -35,6 +35,21 @@
   box-shadow: inset 0 -1px 0 0 var(--accent);
 }
 
+/* Fixed-width tabs keep long session titles from consuming the whole bar. */
+.dv-theme-agena .dv-tab {
+  flex: 0 0 9rem;
+  width: 9rem;
+  min-width: 0;
+  max-width: 9rem;
+}
+
+.dv-theme-agena .dv-default-tab-content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Portal host for every dockview panel (see shell/layout.tsx createComponent). */
 .dv-agena-panel {
   height: 100%;

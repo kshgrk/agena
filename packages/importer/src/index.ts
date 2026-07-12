@@ -94,6 +94,13 @@ export type SourceSession = {
   skippedEntries: number;
   mtimeMs: number;
   size: number;
+  /** Codex thread-spawn lineage recorded in the rollout header. */
+  codexSubagent?: {
+    parentSourceSessionId: string;
+    agentPath?: string;
+    nickname?: string;
+    role?: string;
+  };
   /** pi sources only: original JSONL, so convertToPi is a cwd rewrite (plan §5). */
   piJsonl?: string;
 };
@@ -144,6 +151,12 @@ function deriveUuid(seed: string): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function asNumber(value: unknown): number {
@@ -252,9 +265,10 @@ export function messageCountOf(entries: SourceEntry[]): number {
  * this function only sees top-level session files. Sidechain (embedded
  * subagent) and meta lines are skipped.
  */
-export function parseClaudeSession(
+function parseClaudeTranscript(
   content: string,
   sourcePath: string,
+  includeSidechain: boolean,
 ): SourceSession | null {
   const lines = parseJsonLines(content);
   if (lines.length === 0) return null;
@@ -279,7 +293,10 @@ export function parseClaudeSession(
       skipped += 1;
       continue;
     }
-    if (line.isSidechain === true || line.isMeta === true) {
+    if (
+      (!includeSidechain && line.isSidechain === true) ||
+      line.isMeta === true
+    ) {
       skipped += 1;
       continue;
     }
@@ -383,6 +400,137 @@ export function parseClaudeSession(
   };
 }
 
+/** One top-level Claude session; embedded sidechain records are excluded. */
+export function parseClaudeSession(
+  content: string,
+  sourcePath: string,
+): SourceSession | null {
+  return parseClaudeTranscript(content, sourcePath, false);
+}
+
+export type ClaudeSubagentTask = {
+  title: string;
+  role?: string;
+};
+
+export type ClaudeSubagent = {
+  parentSourceSessionId: string;
+  sourceSessionId: string;
+  agentId: string;
+  title: string;
+  model?: ModelRef;
+  startedAt: string;
+  endedAt?: string;
+  task?: ClaudeSubagentTask;
+  transcript: SourceSession;
+};
+
+export type ClaudeSubagentCandidate = {
+  sourcePath: string;
+  content: string;
+};
+
+function claudeSourceIdFromPath(path: string): string {
+  const name = path.split(/[\\/]/u).at(-1) ?? "";
+  return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+}
+
+function certainClaudeTask(
+  parentContent: string | undefined,
+  agentId: string,
+): ClaudeSubagentTask | undefined {
+  if (!parentContent) return undefined;
+  const matches: ClaudeSubagentTask[] = [];
+  for (const line of parseJsonLines(parentContent)) {
+    const message = line.message as Record<string, unknown> | undefined;
+    const blocks = Array.isArray(message?.content) ? message.content : [];
+    for (const block of blocks) {
+      if (!block || typeof block !== "object") continue;
+      const tool = block as Record<string, unknown>;
+      if (
+        tool.type !== "tool_use" ||
+        (tool.name !== "Agent" && tool.name !== "Task")
+      ) {
+        continue;
+      }
+      const input = tool.input as Record<string, unknown> | undefined;
+      if (!input || Object.values(input).every((value) => value !== agentId))
+        continue;
+      const title = asString(input.description) ?? asString(input.prompt);
+      if (!title) continue;
+      const role = asString(input.subagent_type);
+      matches.push({
+        title: title.split("\n", 1)[0]?.slice(0, 80) ?? title.slice(0, 80),
+        ...(role ? { role } : {}),
+      });
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * Parse one Claude `subagents/agent-*.jsonl` transcript. Parent/child nesting
+ * is path-derived; task data is exposed only when the parent explicitly names
+ * the child agent id, never guessed from time or ordering.
+ */
+export function parseClaudeSubagent(
+  content: string,
+  sourcePath: string,
+  parentSourcePath: string,
+  parentContent?: string,
+): ClaudeSubagent | null {
+  const transcript = parseClaudeTranscript(content, sourcePath, true);
+  if (!transcript) return null;
+  const lines = parseJsonLines(content);
+  const first = lines[0];
+  const agentId = asString(first?.agentId);
+  if (!agentId) return null;
+  const parentSourceSessionId = claudeSourceIdFromPath(parentSourcePath);
+  const recordedParentId = asString(first?.sessionId);
+  if (recordedParentId && recordedParentId !== parentSourceSessionId)
+    return null;
+  const timestamps = lines.flatMap((line) => {
+    const timestamp = asString(line.timestamp);
+    return timestamp ? [timestamp] : [];
+  });
+  const model = transcript.entries.find(
+    (entry) =>
+      entry.kind === "message" && entry.role === "assistant" && entry.model,
+  );
+  const task = certainClaudeTask(parentContent, agentId);
+  const endedAt = timestamps.at(-1);
+  return {
+    parentSourceSessionId,
+    sourceSessionId: agentId,
+    agentId,
+    title:
+      (task?.title ?? titleFromEntries(transcript.entries)) ||
+      "Claude subagent",
+    ...(model?.kind === "message" && model.model ? { model: model.model } : {}),
+    startedAt: timestamps[0] ?? transcript.timestamp,
+    ...(endedAt ? { endedAt } : {}),
+    ...(task ? { task } : {}),
+    transcript: { ...transcript, sourceSessionId: agentId },
+  };
+}
+
+/** Parse child files under one Claude parent; malformed/journal files drop out. */
+export function discoverClaudeSubagents(
+  parentSourcePath: string,
+  children: ClaudeSubagentCandidate[],
+  parentContent?: string,
+): ClaudeSubagent[] {
+  return children.flatMap((child) => {
+    const parsed = parseClaudeSubagent(
+      child.content,
+      child.sourcePath,
+      parentSourcePath,
+      parentContent,
+    );
+    return parsed ? [parsed] : [];
+  });
+}
+
 // Codex bootstrap preambles (plan §2 fix 4): dropped per text block, so a user
 // message mixing bootstrap with real text keeps the real text.
 const CODEX_BOOTSTRAP_PREFIXES = [
@@ -484,6 +632,7 @@ export function parseCodexRollout(
   let sessionId: string | undefined;
   let cwd: string | undefined;
   let timestamp: string | undefined;
+  let codexSubagent: SourceSession["codexSubagent"];
   let currentModel = "gpt-5";
   const entries: SourceEntry[] = [];
   let skipped = 0;
@@ -491,7 +640,32 @@ export function parseCodexRollout(
   for (const line of lines) {
     const payload = line.payload as Record<string, unknown> | undefined;
     if (line.type === "session_meta" && payload) {
-      sessionId ??= asString(payload.id);
+      if (!sessionId) {
+        sessionId = asString(payload.id);
+        const spawn = asRecord(asRecord(payload.source)?.subagent);
+        const threadSpawn = asRecord(spawn?.thread_spawn);
+        const parentSourceSessionId =
+          asString(payload.parent_thread_id) ??
+          asString(threadSpawn?.parent_thread_id);
+        const agentPath =
+          asString(payload.agent_path) ?? asString(threadSpawn?.agent_path);
+        const nickname =
+          asString(payload.agent_nickname) ??
+          asString(threadSpawn?.agent_nickname);
+        const role =
+          asString(payload.agent_role) ?? asString(threadSpawn?.agent_role);
+        if (
+          asString(payload.thread_source) === "subagent" &&
+          parentSourceSessionId
+        ) {
+          codexSubagent = {
+            parentSourceSessionId,
+            ...(agentPath ? { agentPath } : {}),
+            ...(nickname ? { nickname } : {}),
+            ...(role ? { role } : {}),
+          };
+        }
+      }
       cwd ??= asString(payload.cwd);
       timestamp ??= asString(payload.timestamp) ?? asString(line.timestamp);
       continue;
@@ -595,6 +769,7 @@ export function parseCodexRollout(
     skippedEntries: skipped,
     mtimeMs: 0,
     size: Buffer.byteLength(content),
+    ...(codexSubagent ? { codexSubagent } : {}),
   };
 }
 

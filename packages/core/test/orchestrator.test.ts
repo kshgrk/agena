@@ -60,12 +60,13 @@ test("happy path: prompt yields the exact durable sequence plus delta frames", a
   expect(events.map((e) => e.type)).toEqual([
     "session.created",
     "message.user.created",
+    "session.title.changed",
     "run.started",
     "message.assistant.started",
     "message.assistant.completed",
     "run.completed",
   ]);
-  expect(events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
   const userEvent = events[1];
   expect(userEvent?.source).toEqual({ kind: "user", clientId: "client-1" });
@@ -73,9 +74,10 @@ test("happy path: prompt yields the exact durable sequence plus delta frames", a
     messageId: ack.messageId,
     content: [{ type: "text", text: "hi" }],
   });
-  expect(events[2]?.source).toEqual({ kind: "runtime" }); // fake adapter: no 'pi' stamp
-  expect(events[3]?.payload).toMatchObject({ inResponseTo: ack.messageId });
-  expect(events[4]?.payload).toMatchObject({
+  expect(events[2]?.payload).toEqual({ title: "Hi" });
+  expect(events[3]?.source).toEqual({ kind: "runtime" }); // fake adapter: no 'pi' stamp
+  expect(events[4]?.payload).toMatchObject({ inResponseTo: ack.messageId });
+  expect(events[5]?.payload).toMatchObject({
     content: [{ type: "text", text: "Hello, world" }],
     stopReason: "end_turn",
   });
@@ -88,8 +90,8 @@ test("happy path: prompt yields the exact durable sequence plus delta frames", a
     "Hello, ",
     "world",
   ]);
-  // deltas stream after message.assistant.started (seq 4) committed
-  expect(frames.map((f) => f.afterSeq)).toEqual([4, 4]);
+  // deltas stream after message.assistant.started (seq 5) committed
+  expect(frames.map((f) => f.afterSeq)).toEqual([5, 5]);
   expect(frames.every((f) => f.branchId === session.rootBranchId)).toBe(true);
 });
 
@@ -247,6 +249,7 @@ test("fake runtime manual approval blocks the turn until answered", async () => 
   expect(events.map((e) => e.type)).toEqual([
     "session.created",
     "message.user.created",
+    "session.title.changed",
     "run.started",
     "approval.requested",
     "approval.responded",
@@ -254,7 +257,7 @@ test("fake runtime manual approval blocks the turn until answered", async () => 
     "message.assistant.completed",
     "run.completed",
   ]);
-  expect(events[6]?.payload).toMatchObject({
+  expect(events[7]?.payload).toMatchObject({
     content: [{ type: "text", text: "approval response: selected two" }],
   });
 });

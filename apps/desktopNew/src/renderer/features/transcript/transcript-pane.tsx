@@ -9,12 +9,22 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, MessageSquare } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useTranscripts, useUi } from "../../store/index.ts";
+import {
+  needsRecentHistory,
+  useSessions,
+  useTranscripts,
+  useUi,
+} from "../../store/index.ts";
 import type { Block } from "../../store/types.ts";
 import { cx, EmptyState, Spinner } from "../../ui/index.ts";
 import { BlockView } from "./blocks.tsx";
+import {
+  isCodexImportedSubagent,
+  visibleCodexSubagentBlocks,
+} from "./codex-subagent.ts";
 import { rowMeta } from "./layout.ts";
 import { TailView } from "./tail.tsx";
+import { UserMessageRail } from "./user-message-rail.tsx";
 
 const NO_BLOCKS: readonly Block[] = [];
 
@@ -52,9 +62,18 @@ function DayChip({ label }: { label: string }) {
   );
 }
 
-export function Transcript({ sessionId }: { sessionId: string }) {
+export function Transcript({
+  sessionId,
+  workspaceGrid = false,
+}: {
+  sessionId: string;
+  workspaceGrid?: boolean;
+}) {
   const transcript = useTranscripts((s) => s.bySession[sessionId]);
-  const loadingOlder = useTranscripts((s) => s.loadingOlder[sessionId] ?? false);
+  const session = useSessions((s) => s.byId[sessionId]);
+  const loadingOlder = useTranscripts(
+    (s) => s.loadingOlder[sessionId] ?? false,
+  );
   const jump = useUi((s) => s.jump);
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -69,8 +88,12 @@ export function Transcript({ sessionId }: { sessionId: string }) {
   const [unpinned, setUnpinned] = useState(false);
   const [flashSeq, setFlashSeq] = useState<number | null>(null);
 
-  const blocks = transcript?.blocks ?? NO_BLOCKS;
-  const hasTail = transcript?.inFlight != null;
+  const isOutputOnly = isCodexImportedSubagent(session);
+  const blocks = visibleCodexSubagentBlocks(
+    session,
+    transcript?.blocks ?? NO_BLOCKS,
+  );
+  const hasTail = !isOutputOnly && transcript?.inFlight != null;
   const count = blocks.length + (hasTail ? 1 : 0);
 
   animRef.current ??= {
@@ -95,13 +118,40 @@ export function Transcript({ sessionId }: { sessionId: string }) {
     paddingEnd: 16,
     getItemKey: (i) => blocks[i]?.seq ?? "tail",
   });
+  const totalSize = virtualizer.getTotalSize();
 
   const scrollToBottom = () => {
+    if (count === 0) return;
     requestAnimationFrame(() => {
-      const el = parentRef.current;
-      if (el) el.scrollTop = el.scrollHeight; // instant, never smooth
+      virtualizer.scrollToIndex(count - 1, { align: "end" });
+      // Dynamic rows settle after the virtualizer's first measurement.
+      requestAnimationFrame(() => {
+        const el = parentRef.current;
+        if (el) el.scrollTop = el.scrollHeight; // exact bottom, never smooth
+      });
     });
   };
+
+  // Dock splits resize this element without resizing the window. Remeasure the
+  // wrapped rows and keep following only when the user was already at latest.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: virtualizer is the observer target
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      virtualizer.measure();
+      if (pinnedRef.current) scrollToBottom();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [virtualizer]);
+
+  // Measurements can change after the first paint (history fill, wrapping,
+  // fonts). A pinned transcript must follow the measured bottom, not estimates.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: size/count are the triggers
+  useLayoutEffect(() => {
+    if (pinnedRef.current) scrollToBottom();
+  }, [count, totalSize]);
 
   // reset per session
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId is the trigger
@@ -126,10 +176,7 @@ export function Transcript({ sessionId }: { sessionId: string }) {
   // prependOlder when there's nothing to scroll. Load the newest page once.
   // Keyed on rawEvents (not blocks): a fetched page with zero visible blocks
   // (e.g. session.created only) still counts as filled.
-  const needsInitialFill =
-    transcript?.live === true &&
-    transcript.rawEvents.length === 0 &&
-    transcript.lastSeq > 0;
+  const needsInitialFill = needsRecentHistory(transcript);
   useEffect(() => {
     if (!needsInitialFill) return;
     void useTranscripts.getState().prependOlder(sessionId);
@@ -178,7 +225,7 @@ export function Transcript({ sessionId }: { sessionId: string }) {
     if (pinned && !pinnedRef.current) setNewCount(0);
     pinnedRef.current = pinned;
     setUnpinned(!pinned);
-    if (el.scrollTop < 80) {
+    if (!isOutputOnly && el.scrollTop < 80) {
       const oldestSeq =
         useTranscripts.getState().bySession[sessionId]?.rawEvents[0]?.seq;
       if (oldestSeq !== undefined && oldestSeq > 1) {
@@ -192,110 +239,180 @@ export function Transcript({ sessionId }: { sessionId: string }) {
     needsInitialFill || // history page in flight — not "No messages yet"
     (!transcript.live && blocks.length === 0 && !hasTail)
   ) {
-    return <Skeleton />;
+    return (
+      <div
+        className={cx(
+          "min-h-0",
+          workspaceGrid && "col-start-1 row-start-2 lg:col-start-2",
+        )}
+      >
+        <Skeleton />
+      </div>
+    );
+  }
+  if (isOutputOnly && blocks.length === 0) {
+    return (
+      <div
+        className={cx(
+          "min-h-0",
+          workspaceGrid && "col-start-1 row-start-2 lg:col-start-2",
+        )}
+      >
+        <EmptyState
+          icon={MessageSquare}
+          title="No final response captured"
+          hint="The full imported Codex context is retained for continuation."
+        />
+      </div>
+    );
   }
   if (blocks.length === 0 && !hasTail) {
     return (
-      <EmptyState
-        icon={MessageSquare}
-        title="No messages yet"
-        hint="Prompt below to start"
-      />
+      <div
+        className={cx(
+          "min-h-0",
+          workspaceGrid && "col-start-1 row-start-2 lg:col-start-2",
+        )}
+      >
+        <EmptyState
+          icon={MessageSquare}
+          title="No messages yet"
+          hint="Prompt below to start"
+        />
+      </div>
     );
   }
 
   // visible while scrolled up during a stream OR when settled blocks arrived
   const showPill = unpinned && (hasTail || newCount > 0);
   const anim = animRef.current;
+  const virtualItems = virtualizer.getVirtualItems();
+  const visibleUserSeqs = new Set(
+    virtualItems.flatMap((item) => {
+      const block = blocks[item.index];
+      return block?.kind === "user" ? [block.seq] : [];
+    }),
+  );
+  const userVersion = transcript.rawEvents.reduce(
+    (latest, event) =>
+      event.type === "message.user.created"
+        ? Math.max(latest, event.seq)
+        : latest,
+    0,
+  );
 
   return (
-    <div className="relative h-full min-h-0 bg-canvas">
+    <div
+      className={
+        workspaceGrid
+          ? "contents"
+          : "relative grid h-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] bg-canvas lg:grid-cols-[28px_minmax(0,1fr)]"
+      }
+    >
+      {!isOutputOnly ? (
+        <UserMessageRail
+          sessionId={sessionId}
+          userVersion={userVersion}
+          visibleSeqs={visibleUserSeqs}
+          className={workspaceGrid ? "row-span-2 row-start-2" : undefined}
+        />
+      ) : null}
       <div
-        ref={parentRef}
-        onScroll={handleScroll}
-        className="h-full overflow-y-auto"
+        className={cx(
+          "relative min-h-0 min-w-0",
+          workspaceGrid
+            ? "col-start-1 row-start-2 lg:col-start-2"
+            : "col-start-1 lg:col-start-2",
+        )}
       >
         <div
-          className="relative w-full"
-          style={{ height: virtualizer.getTotalSize() }}
+          ref={parentRef}
+          onScroll={handleScroll}
+          className="h-full overflow-y-auto"
         >
-          {virtualizer.getVirtualItems().map((vi) => {
-            const block = blocks[vi.index];
-            const meta = block ? rowMeta(blocks, vi.index) : null;
-            let animate = false;
-            if (block && anim) {
-              animate = block.seq > anim.mountSeq && !anim.seen.has(block.seq);
-              if (animate) anim.seen.add(block.seq);
-            }
-            return (
-              <div
-                key={vi.key}
-                data-index={vi.index}
-                ref={virtualizer.measureElement}
-                className="absolute left-0 top-0 w-full"
-                style={{ transform: `translateY(${vi.start}px)` }}
-              >
+          <div className="relative w-full" style={{ height: totalSize }}>
+            {virtualItems.map((vi) => {
+              const block = blocks[vi.index];
+              const meta = block ? rowMeta(blocks, vi.index) : null;
+              let animate = false;
+              if (block && anim) {
+                animate =
+                  block.seq > anim.mountSeq && !anim.seen.has(block.seq);
+                if (animate) anim.seen.add(block.seq);
+              }
+              return (
                 <div
-                  className={cx(
-                    "transcript-column",
-                    meta ? GAP_CLS[meta.gap] : "pt-5",
-                  )}
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full"
+                  style={{ transform: `translateY(${vi.start}px)` }}
                 >
-                  {meta?.dayLabel ? <DayChip label={meta.dayLabel} /> : null}
-                  {block && meta ? (
-                    // biome-ignore lint/a11y: selection convenience; the inspector is reachable elsewhere
-                    <div
-                      className={cx(
-                        "rounded-lg transition-colors duration-[260ms]",
-                        flashSeq === block.seq && "bg-accent/10",
-                        animate && "animate-fade-slide-in",
-                      )}
-                      onClick={() =>
-                        useUi.getState().setSelected({ sessionId, seq: block.seq })
-                      }
-                    >
-                      <BlockView
-                        block={block}
-                        flushTop={meta.groupWithPrev}
-                        flushBottom={meta.groupWithNext}
-                      />
-                    </div>
-                  ) : (
-                    <TailView transcript={transcript} />
-                  )}
+                  <div
+                    className={cx(
+                      "transcript-column",
+                      meta ? GAP_CLS[meta.gap] : "pt-5",
+                    )}
+                  >
+                    {meta?.dayLabel ? <DayChip label={meta.dayLabel} /> : null}
+                    {block && meta ? (
+                      // biome-ignore lint/a11y: selection convenience; the inspector is reachable elsewhere
+                      <div
+                        className={cx(
+                          "rounded-lg transition-colors duration-[260ms]",
+                          flashSeq === block.seq && "bg-accent/10",
+                          animate && "animate-fade-slide-in",
+                        )}
+                        onClick={() =>
+                          useUi
+                            .getState()
+                            .setSelected({ sessionId, seq: block.seq })
+                        }
+                      >
+                        <BlockView
+                          block={block}
+                          sessionId={sessionId}
+                          flushTop={meta.groupWithPrev}
+                          flushBottom={meta.groupWithNext}
+                        />
+                      </div>
+                    ) : (
+                      <TailView transcript={transcript} />
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
+
+        {loadingOlder ? (
+          <div className="absolute inset-x-0 top-2 z-10 flex justify-center">
+            <span className="flex items-center gap-1.5 rounded-full border border-border bg-overlay px-2.5 py-1 text-xs text-fg-secondary shadow-md">
+              <Spinner className="size-3" /> loading older…
+            </span>
+          </div>
+        ) : null}
+
+        {showPill ? (
+          <button
+            type="button"
+            onClick={() => {
+              setNewCount(0);
+              setUnpinned(false);
+              pinnedRef.current = true;
+              scrollToBottom();
+            }}
+            className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 animate-fade-slide-in items-center gap-1.5 rounded-full border border-border bg-overlay px-3 py-1 text-xs text-fg shadow-md transition-colors duration-100 hover:bg-raised"
+          >
+            Jump to latest
+            {newCount > 0 ? (
+              <span className="tabular-nums text-fg-muted">{newCount} new</span>
+            ) : null}
+            <ArrowDown className="size-3" />
+          </button>
+        ) : null}
       </div>
-
-      {loadingOlder ? (
-        <div className="absolute inset-x-0 top-2 z-10 flex justify-center">
-          <span className="flex items-center gap-1.5 rounded-full border border-border bg-overlay px-2.5 py-1 text-xs text-fg-secondary shadow-md">
-            <Spinner className="size-3" /> loading older…
-          </span>
-        </div>
-      ) : null}
-
-      {showPill ? (
-        <button
-          type="button"
-          onClick={() => {
-            setNewCount(0);
-            setUnpinned(false);
-            pinnedRef.current = true;
-            scrollToBottom();
-          }}
-          className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 animate-fade-slide-in items-center gap-1.5 rounded-full border border-border bg-overlay px-3 py-1 text-xs text-fg shadow-md transition-colors duration-100 hover:bg-raised"
-        >
-          Jump to latest
-          {newCount > 0 ? (
-            <span className="tabular-nums text-fg-muted">{newCount} new</span>
-          ) : null}
-          <ArrowDown className="size-3" />
-        </button>
-      ) : null}
     </div>
   );
 }

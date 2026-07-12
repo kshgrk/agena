@@ -12,7 +12,9 @@ import {
   applyFrame,
   applySnapshot,
   markSynced,
+  needsRecentHistory,
   prependOlderEvents,
+  useTranscripts,
 } from "./transcript.ts";
 import { emptyTranscript } from "./types.ts";
 
@@ -20,10 +22,7 @@ const MODEL: ModelRef = { provider: "pi", id: "gpt-x" };
 const AT = "2026-07-06T00:00:00.000Z";
 
 /** Partial match: every key in `expected` deep-equals the actual value. */
-function matchObject(
-  actual: unknown,
-  expected: Record<string, unknown>,
-): void {
+function matchObject(actual: unknown, expected: Record<string, unknown>): void {
   assert.ok(
     actual !== null && typeof actual === "object",
     `expected an object, got ${String(actual)}`,
@@ -396,6 +395,31 @@ describe("applyEvent + applyFrame", () => {
     assert.equal(s.live, true);
   });
 
+  it("loads recent history when one event replayed after a saved cursor", () => {
+    const oneReplayed = markSynced(
+      applyEvent(
+        emptyTranscript("s1"),
+        ev(923, "terminal.session.ended", {
+          terminalId: "term-1",
+          exitCode: 0,
+          reason: "exit",
+        }),
+        true,
+      ),
+      923,
+    );
+    assert.equal(needsRecentHistory(oneReplayed), true);
+    const first = oneReplayed.rawEvents[0];
+    assert.ok(first);
+    assert.equal(
+      needsRecentHistory({
+        ...oneReplayed,
+        rawEvents: [{ ...first, seq: 724 }],
+      }),
+      false,
+    );
+  });
+
   it("drops deltas with a mismatched messageId and unknown/invalid frames", () => {
     let s = markSynced(
       applyEvent(emptyTranscript("s1"), started("ma"), false),
@@ -540,5 +564,42 @@ describe("applyEvent + applyFrame", () => {
     assert.equal(out.live, true);
     assert.equal(out.lastSeq, 7);
     assert.deepEqual(out.queue, { steerCount: 2, followUpCount: 1 });
+  });
+
+  it("revealSeq loads contiguous older pages through the target", async () => {
+    const calls: number[] = [];
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        agena: {
+          readEvents: async (_sessionId: string, opts: { fromSeq: number }) => {
+            calls.push(opts.fromSeq);
+            const end = Math.min(opts.fromSeq + 1_000, 2_500);
+            return {
+              events: Array.from({ length: end - opts.fromSeq }, (_, index) =>
+                ev(opts.fromSeq + index + 1, "test.marker", {}),
+              ),
+              nextFromSeq: null,
+            };
+          },
+        },
+      },
+    });
+    const latest = markSynced(
+      applyEvent(emptyTranscript("s1"), ev(2_501, "test.marker", {}), false),
+      2_501,
+    );
+    useTranscripts.setState({
+      bySession: { s1: latest },
+      loadingOlder: {},
+    });
+
+    await useTranscripts.getState().revealSeq("s1", 2);
+
+    assert.deepEqual(calls, [1_500, 500, 0]);
+    const events = useTranscripts.getState().bySession.s1?.rawEvents;
+    assert.equal(events?.[0]?.seq, 1);
+    assert.equal(events?.at(-1)?.seq, 2_501);
+    Reflect.deleteProperty(globalThis, "window");
   });
 });

@@ -22,10 +22,12 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type {
+  AgentTaskStore,
   ApprovalQueryStore,
   ClosableStore,
   CreateSessionInput,
   EventStore,
+  MessageQueryStore,
   ProjectionStore,
   RecoveryStore,
   RuntimeAdapter,
@@ -36,6 +38,7 @@ import type {
   SessionStatusStore,
 } from "@agena/core";
 import {
+  AgentOrchestrator,
   InMemoryEventStore,
   PathViolation,
   resolveWorkspacePath,
@@ -65,12 +68,15 @@ import {
   listImportsQuerySchema,
   listSessionsQuerySchema,
   PROTOCOL_VERSION,
+  pluginIdParamsSchema,
   providerIdParamsSchema,
   providerOAuthFlowParamsSchema,
   respondProviderOAuthRequestSchema,
   restoreSnapshotRequestSchema,
+  type SessionSummary,
   saveProviderApiKeyRequestSchema,
   searchQuerySchema,
+  setPluginEnabledRequestSchema,
   updateSessionStatusRequestSchema,
   WS_PATH,
 } from "@agena/protocol";
@@ -82,6 +88,7 @@ import type { DaemonConfig } from "./config.ts";
 import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
 import { McpService } from "./mcp-service.ts";
+import { PluginService } from "./plugin-service.ts";
 import { ProviderAuthService } from "./provider-auth-service.ts";
 import { PtyManager } from "./pty-manager.ts";
 import { SkillService } from "./skill-service.ts";
@@ -140,6 +147,30 @@ function providerAuthError(c: Context, error: unknown) {
       retryable: false,
     },
     message.includes("not found") ? 404 : 400,
+  );
+}
+
+function invalidPluginRequest(c: Context) {
+  return c.json(
+    {
+      code: "INVALID_PAYLOAD",
+      message: "invalid plugin request",
+      retryable: false,
+    },
+    400,
+  );
+}
+
+function pluginError(c: Context, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const missing = message === "Plugin not found";
+  return c.json(
+    {
+      code: missing ? "NOT_FOUND" : "PLUGIN_OPERATION_FAILED",
+      message,
+      retryable: false,
+    },
+    missing ? 404 : 400,
   );
 }
 
@@ -377,6 +408,39 @@ async function ensureControlSession(store: EventStore): Promise<SessionRecord> {
   });
 }
 
+function agentTasks(store: EventStore): (EventStore & AgentTaskStore) | null {
+  return "createSubagentSession" in store
+    ? (store as EventStore & AgentTaskStore)
+    : null;
+}
+
+function sessionSummaries(
+  sessions: SessionRecord[],
+  tasks: AgentTaskStore | null,
+): SessionSummary[] {
+  const tasksByChildSessionId = new Map(
+    tasks?.listAgentTasks().map((task) => [task.childSessionId, task]) ?? [],
+  );
+  return sessions.map((session) => {
+    const task = tasksByChildSessionId.get(session.sessionId);
+    return {
+      ...session,
+      ...(task
+        ? {
+            subagent: {
+              taskId: task.taskId,
+              role: task.role,
+              status: task.status,
+              createdAt: task.createdAt,
+              ...(task.startedAt ? { startedAt: task.startedAt } : {}),
+              ...(task.finishedAt ? { finishedAt: task.finishedAt } : {}),
+            },
+          }
+        : {}),
+    };
+  });
+}
+
 export async function startDaemon(
   config: DaemonConfig,
   adapter: RuntimeAdapter,
@@ -398,17 +462,36 @@ export async function startDaemon(
           >[0],
         )
       : null;
+  const plugins = new PluginService(
+    mcps,
+    "packages" in adapter && adapter.packages
+      ? (adapter.packages as ConstructorParameters<typeof PluginService>[1])
+      : null,
+  );
   await mcps?.initialize();
   // `gateway` is initialized before any frame can be published (frames only
   // flow after a prompt), so the closure is safe.
   let gateway: Gateway;
+  let agents: AgentOrchestrator | null = null;
   const orchestrator = new SessionOrchestrator(store, adapter, {
     workspaceDir: config.workspaceDir,
     publishFrame: (frame) => gateway.publishFrame(frame),
     visibleBrowser: {
       request: (action) => gateway.requestVisibleBrowser(action),
     },
+    ...(agentTasks(store)
+      ? {
+          subagents: {
+            run: (input) => {
+              if (!agents) throw new Error("subagent orchestrator unavailable");
+              return agents.run(input);
+            },
+          },
+        }
+      : {}),
   });
+  const taskStore = agentTasks(store);
+  if (taskStore) agents = new AgentOrchestrator(taskStore, orchestrator);
   gateway = new Gateway(store, orchestrator);
   const ptys = new PtyManager(store, config.workspaceDir);
   const tunnels = new TunnelManager();
@@ -472,6 +555,57 @@ export async function startDaemon(
     }),
   );
   app.get("/v1/mcps", (c) => c.json({ mcps: mcps?.list() ?? [] }));
+  app.get("/v1/plugins", (c) => c.json({ plugins: plugins.list() }));
+  app.post("/v1/plugins/:id/install", async (c) => {
+    const params = pluginIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidPluginRequest(c);
+    try {
+      const plugin = await plugins.install(params.data.id);
+      await adapter.reloadExtensions?.();
+      return c.json({ plugin });
+    } catch (error) {
+      return pluginError(c, error);
+    }
+  });
+  app.post("/v1/plugins/:id/update", async (c) => {
+    const params = pluginIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidPluginRequest(c);
+    try {
+      const plugin = await plugins.update(params.data.id);
+      await adapter.reloadExtensions?.();
+      return c.json({ plugin });
+    } catch (error) {
+      return pluginError(c, error);
+    }
+  });
+  app.patch("/v1/plugins/:id", async (c) => {
+    const params = pluginIdParamsSchema.safeParse(c.req.param());
+    const body = setPluginEnabledRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!params.success || !body.success) return invalidPluginRequest(c);
+    try {
+      const plugin = await plugins.setEnabled(
+        params.data.id,
+        body.data.enabled,
+      );
+      await adapter.reloadExtensions?.();
+      return c.json({ plugin });
+    } catch (error) {
+      return pluginError(c, error);
+    }
+  });
+  app.delete("/v1/plugins/:id", async (c) => {
+    const params = pluginIdParamsSchema.safeParse(c.req.param());
+    if (!params.success) return invalidPluginRequest(c);
+    try {
+      const plugin = await plugins.remove(params.data.id);
+      await adapter.reloadExtensions?.();
+      return c.json({ plugin });
+    } catch (error) {
+      return pluginError(c, error);
+    }
+  });
   app.get("/v1/providers", (c) =>
     providers
       ? c.json({ providers: providers.list() })
@@ -855,6 +989,7 @@ export async function startDaemon(
       );
     }
     const fp = parsed.data.sourceFingerprint;
+    const subagent = parsed.data.subagent;
     const existing = imports.findImport(
       fp.machineId,
       fp.harness,
@@ -901,18 +1036,75 @@ export async function startDaemon(
           : fp.harness === "codex"
             ? ("import.codex" as const)
             : undefined; // pi sources are already pi-native
-      const session = await store.createSession({
-        workspaceId: "default",
-        ...(parsed.data.title !== undefined
-          ? { title: parsed.data.title }
-          : {}),
-        scope: "project",
-        cwd: scope.cwd,
-        ...(scope.projectId ? { projectId: scope.projectId } : {}),
-        ...(scope.projectRoot ? { projectRoot: scope.projectRoot } : {}),
-        source: { kind: "importer" },
-        ...(origin ? { origin } : {}),
-      });
+      const parent = subagent
+        ? imports.findImport(
+            fp.machineId,
+            fp.harness,
+            subagent.parentSourceSessionId,
+          )
+        : null;
+      const parentSessionId = parent?.sessionId;
+      if (subagent && !parentSessionId) {
+        return c.json(
+          {
+            code: "INVALID_PAYLOAD",
+            message: "parent session must be imported before its subagents",
+            retryable: false,
+          },
+          400,
+        );
+      }
+      const taskId = subagent
+        ? `import:${fp.harness}:${fp.sourceSessionId}`
+        : null;
+      const taskStore = subagent ? agentTasks(store) : null;
+      if (subagent && !taskStore) {
+        return c.json(
+          {
+            code: "INTERNAL",
+            message: "store does not support imported subagents",
+            retryable: false,
+          },
+          500,
+        );
+      }
+      let session: SessionRecord;
+      if (subagent && taskStore && parentSessionId && taskId) {
+        session = (
+          await taskStore.createSubagentSession({
+            parentSessionId,
+            title: parsed.data.title ?? subagent.role,
+            source: { kind: "importer" },
+            ...(origin ? { origin } : {}),
+            task: {
+              taskId,
+              parentRunId: `import:${subagent.parentSourceSessionId}`,
+              parentMessageId: `import:${subagent.parentSourceSessionId}`,
+              parentToolCallId: `import:${subagent.agentId}`,
+              role: subagent.role,
+              task: subagent.task,
+              execution: subagent.execution,
+              context: "fresh",
+              workspaceMode: "shared_readonly",
+              requestedModel: subagent.model,
+              resolvedModel: subagent.model,
+            },
+          })
+        ).session;
+      } else {
+        session = await store.createSession({
+          workspaceId: "default",
+          ...(parsed.data.title !== undefined
+            ? { title: parsed.data.title }
+            : {}),
+          scope: "project",
+          cwd: scope.cwd,
+          ...(scope.projectId ? { projectId: scope.projectId } : {}),
+          ...(scope.projectRoot ? { projectRoot: scope.projectRoot } : {}),
+          source: { kind: "importer" },
+          ...(origin ? { origin } : {}),
+        });
+      }
       // Claim the fingerprint right after creating the session: a concurrent
       // duplicate POST loses on UNIQUE(machine_id, harness, source_session_id)
       // here, and a later failure (event seeding) still leaves the ledger row,
@@ -958,6 +1150,33 @@ export async function startDaemon(
         branchId: session.rootBranchId,
         events,
       });
+      if (subagent && taskId && parentSessionId) {
+        const parentSession = await store.getSession(parentSessionId);
+        if (!parentSession)
+          throw new Error("imported parent session disappeared");
+        await store.appendEvents({
+          sessionId: parentSessionId,
+          branchId: parentSession.rootBranchId,
+          events: [
+            {
+              type: "agent.task.started",
+              v: 1,
+              source: { kind: "importer" },
+              payload: { taskId, startedAt: header.timestamp },
+            },
+            {
+              type: "agent.task.completed",
+              v: 1,
+              source: { kind: "importer" },
+              payload: {
+                taskId,
+                resultMessageId: `import:${fp.sourceSessionId}:result`,
+                summary: [],
+              },
+            },
+          ],
+        });
+      }
       return c.json(
         {
           sessionId: session.sessionId,
@@ -1066,7 +1285,10 @@ export async function startDaemon(
       );
     }
     return c.json({
-      sessions: await store.listSessions(sessionFilter(parsed.data)),
+      sessions: sessionSummaries(
+        await store.listSessions(sessionFilter(parsed.data)),
+        taskStore,
+      ),
     });
   });
   app.get("/v1/search", async (c) => {
@@ -1103,6 +1325,31 @@ export async function startDaemon(
           : {}),
       }),
     });
+  });
+  app.get("/v1/sessions/:id/user-messages", async (c) => {
+    const sessionId = c.req.param("id");
+    if (!(await store.getSession(sessionId))) {
+      return c.json(
+        {
+          code: "SESSION_NOT_FOUND",
+          message: `unknown session ${sessionId}`,
+          retryable: false,
+        },
+        404,
+      );
+    }
+    const messages = messageQueryStore(store);
+    if (!messages) {
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: "store does not support message queries",
+          retryable: false,
+        },
+        500,
+      );
+    }
+    return c.json({ messages: await messages.listUserMessages(sessionId) });
   });
   app.patch("/v1/sessions/:id", async (c) => {
     const parsed = updateSessionStatusRequestSchema.safeParse(
@@ -1556,6 +1803,12 @@ function approvalQueryStore(store: EventStore): ApprovalQueryStore | null {
 
 function searchStore(store: EventStore): SearchStore | null {
   return "search" in store ? (store as EventStore & SearchStore) : null;
+}
+
+function messageQueryStore(store: EventStore): MessageQueryStore | null {
+  return "listUserMessages" in store
+    ? (store as EventStore & MessageQueryStore)
+    : null;
 }
 
 function projectionStore(store: EventStore): ProjectionStore | null {

@@ -3,10 +3,11 @@
 // composes the dockview layout, the sidebar, and the overlay hosts from those
 // definitions only. This module stays pure/node-safe (plus one tiny zustand
 // store) so it can be tested without a DOM.
+
+import type { UsageTotals } from "@agena/protocol";
 import type { SerializedDockview } from "dockview";
 import type { LucideIcon } from "lucide-react";
 import type { FC } from "react";
-import type { UsageTotals } from "@agena/protocol";
 import { create } from "zustand";
 import type { Block } from "../store/types.ts";
 
@@ -30,7 +31,7 @@ export const OPEN_SEARCH_EVENT = "agena:open-search";
 // ---- persisted layout blob ---------------------------------------------------
 
 /** Bump to discard persisted layouts whose defaults no longer apply. */
-export const LAYOUT_VERSION = 3;
+export const LAYOUT_VERSION = 4;
 
 export type SavedLayout = {
   dock: SerializedDockview | null;
@@ -89,6 +90,5 @@ export type ShellUiStore = {
 export const useShellUi = create<ShellUiStore>((set) => ({
   sidebarCollapsed: false,
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
-  toggleSidebar: () =>
-    set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 }));

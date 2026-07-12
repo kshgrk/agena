@@ -2,10 +2,16 @@
 // under the transcript; it binds the active session itself and renders nothing
 // when no session is selected (the transcript pane owns that empty state).
 import { useSessions } from "../../store/index.ts";
+import { ActiveAgents } from "../agents/task-group.tsx";
 import { Composer } from "./composer.tsx";
 
 export function ComposerPane() {
   const sessionId = useSessions((s) => s.activeSessionId);
   if (!sessionId) return null;
-  return <Composer sessionId={sessionId} />;
+  return (
+    <>
+      <ActiveAgents parentSessionId={sessionId} />
+      <Composer sessionId={sessionId} />
+    </>
+  );
 }

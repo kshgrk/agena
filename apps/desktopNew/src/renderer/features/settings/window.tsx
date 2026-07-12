@@ -5,6 +5,7 @@
 // browser view is hidden while this window is up.
 import type { LucideIcon } from "lucide-react";
 import {
+  Blocks,
   FolderInput,
   Info,
   Plug,
@@ -21,6 +22,7 @@ import { AboutSection } from "./about.tsx";
 import { ConnectionSection } from "./connection.tsx";
 import { filterSettingsItems } from "./lib.ts";
 import { McpSection } from "./mcp.tsx";
+import { PluginsSection } from "./plugins.tsx";
 import { ProvidersSection } from "./providers.tsx";
 import { SessionImportSection } from "./session-import.tsx";
 import { SkillsSection } from "./skills.tsx";
@@ -43,6 +45,12 @@ const SECTIONS: ReadonlyArray<{
     title: "Providers",
     icon: WalletCards,
     keywords: ["models", "api key", "oauth", "subscription"],
+  },
+  {
+    id: "plugins",
+    title: "Plugins",
+    icon: Blocks,
+    keywords: ["integrations", "extensions", "skills", "mcp", "marketplace"],
   },
   {
     id: "mcp",
@@ -76,6 +84,8 @@ function SectionBody({ section }: { section: SettingsSection }) {
       return <ConnectionSection />;
     case "providers":
       return <ProvidersSection />;
+    case "plugins":
+      return <PluginsSection />;
     case "mcp":
       return <McpSection />;
     case "skills":

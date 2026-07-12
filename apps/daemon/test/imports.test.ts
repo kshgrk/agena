@@ -153,6 +153,49 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
     (await daemon.store.readEvents(created.sessionId, 0)).events.length,
   ).toBe(3);
 
+  const childPiSession = piSession.replace("pi-src-1", "pi-child-1");
+  const childBody = {
+    ...body,
+    title: "Security review",
+    sourceFingerprint: {
+      ...body.sourceFingerprint,
+      sourcePath: "/home/u/.claude/projects/p/src-1/subagents/agent-1.jsonl",
+      sourceSessionId: "agent-1",
+      size: childPiSession.length,
+    },
+    subagent: {
+      parentSourceSessionId: "src-1",
+      agentId: "agent-1",
+      role: "security",
+      task: "Review authentication",
+      execution: "foreground",
+      model: { provider: "anthropic", id: "claude" },
+    },
+    piSession: childPiSession,
+  };
+  const childResponse = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(childBody),
+  });
+  expect(childResponse.status).toBe(201);
+  const child = (await childResponse.json()) as { sessionId: string };
+  expect(await daemon.store.getSession(child.sessionId)).toMatchObject({
+    sessionKind: "subagent",
+    origin: "import.claude",
+    parentSessionId: created.sessionId,
+  });
+  expect(
+    (daemon.store as SqliteEventStore).getAgentTask("import:claude:agent-1"),
+  ).toMatchObject({
+    childSessionId: child.sessionId,
+    status: "completed",
+    role: "security",
+  });
+
   // Ledger listing, filtered by machine.
   const list = async (qs: string) =>
     (await (
@@ -161,7 +204,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
       })
     ).json()) as { imports: Array<Record<string, unknown>> };
   const mine = await list("?machineId=machine-1");
-  expect(mine.imports).toHaveLength(1);
+  expect(mine.imports).toHaveLength(2);
   expect(mine.imports[0]).toMatchObject({
     sessionId: created.sessionId,
     projectId: "prj_proj",
@@ -170,7 +213,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
     sourceSessionId: "src-1",
   });
   expect((await list("?machineId=other")).imports).toHaveLength(0);
-  expect((await list("")).imports).toHaveLength(1);
+  expect((await list("")).imports).toHaveLength(2);
 
   // Full project teardown: rows, ledger, pi file, workspace dir — and the
   // fingerprint is importable again afterwards.
@@ -181,7 +224,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
   expect(del.status).toBe(200);
   expect(await del.json()).toEqual({
     projectId: "prj_proj",
-    deletedSessions: 1,
+    deletedSessions: 2,
   });
   expect(await daemon.store.getSession(created.sessionId)).toBeNull();
   expect((await list("")).imports).toHaveLength(0);

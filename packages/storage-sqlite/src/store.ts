@@ -27,13 +27,17 @@ import {
 } from "@agena/core";
 import type {
   AgenaEvent,
+  AgentTaskCreated,
+  AgentTaskSummary,
   EventSource,
   ImportLedgerEntry,
   McpSummary,
   SearchHit,
+  SessionOrigin,
   SessionStatus,
   SkillSummary,
   SnapshotSummary,
+  UserMessageAnchor,
 } from "@agena/protocol";
 import { durableEventSchemas } from "@agena/protocol";
 import { ulid } from "ulid";
@@ -57,6 +61,43 @@ type SessionRow = {
   project_root: string | null;
   cwd: string;
   host_cwd_hint: string | null;
+  origin: SessionOrigin;
+  parent_session_id: string | null;
+  parent_task_id: string | null;
+  session_kind: "primary" | "subagent";
+};
+
+type UserMessageRow = {
+  id: string;
+  seq: number;
+  content: string;
+  created_at: string;
+};
+
+type AgentTaskRow = {
+  id: string;
+  parent_session_id: string;
+  child_session_id: string;
+  parent_run_id: string;
+  parent_message_id: string;
+  parent_tool_call_id: string;
+  role: string;
+  task: string;
+  execution: AgentTaskCreated["execution"];
+  context_mode: AgentTaskCreated["context"];
+  workspace_mode: AgentTaskCreated["workspaceMode"];
+  requested_model: string | null;
+  resolved_model: string;
+  retry_of_task_id: string | null;
+  status: AgentTaskSummary["status"];
+  summary: string | null;
+  error: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 type SnapshotRow = {
@@ -108,6 +149,7 @@ type McpRow = {
   url: string | null;
   auth_kind: McpSummary["authKind"];
   status: McpSummary["status"];
+  enabled: number;
   config: string;
   imported_at: string;
   updated_at: string;
@@ -128,8 +170,17 @@ type SkillRow = {
 };
 
 export type McpRegistryRecord = McpSummary & {
+  enabled: boolean;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+};
+
+export type CreateSubagentSessionInput = {
+  parentSessionId: string;
+  title?: string;
+  source: EventSource;
+  origin?: "import.claude" | "import.codex";
+  task: Omit<AgentTaskCreated, "parentSessionId" | "childSessionId">;
 };
 
 type CountRow = { count: number };
@@ -157,6 +208,7 @@ function mcpFromRow(row: McpRow): McpRegistryRecord {
     ...(row.url ? { url: row.url } : {}),
     authKind: row.auth_kind,
     status: row.status,
+    enabled: row.enabled === 1,
     importedAt: row.imported_at,
     updatedAt: row.updated_at,
     ...(config.env && Object.keys(config.env).length
@@ -217,9 +269,15 @@ export class SqliteEventStore implements EventStore {
         project_root     TEXT,
         cwd              TEXT NOT NULL DEFAULT '.',
         host_cwd_hint    TEXT,
+        origin           TEXT NOT NULL DEFAULT 'native'
+                         CHECK (origin IN ('native','import.claude','import.codex','control')),
         status           TEXT NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active','idle','archived')),
-        is_control       INTEGER NOT NULL DEFAULT 0
+        is_control       INTEGER NOT NULL DEFAULT 0,
+        parent_session_id TEXT REFERENCES sessions(id),
+        parent_task_id    TEXT,
+        session_kind      TEXT NOT NULL DEFAULT 'primary'
+                          CHECK (session_kind IN ('primary','subagent'))
       ) STRICT;
       CREATE TABLE IF NOT EXISTS projects (
         id           TEXT PRIMARY KEY,
@@ -292,6 +350,36 @@ export class SqliteEventStore implements EventStore {
       CREATE INDEX IF NOT EXISTS idx_tool_calls_session
         ON tool_calls(session_id, branch_id, started_seq);
 
+      CREATE TABLE IF NOT EXISTS agent_tasks (
+        id                  TEXT PRIMARY KEY,
+        parent_session_id   TEXT NOT NULL REFERENCES sessions(id),
+        child_session_id    TEXT NOT NULL UNIQUE REFERENCES sessions(id),
+        parent_run_id       TEXT NOT NULL,
+        parent_message_id   TEXT NOT NULL,
+        parent_tool_call_id TEXT NOT NULL,
+        role                TEXT NOT NULL,
+        task                TEXT NOT NULL,
+        execution           TEXT NOT NULL CHECK (execution IN ('foreground','background')),
+        context_mode        TEXT NOT NULL CHECK (context_mode IN ('fresh','fork')),
+        workspace_mode      TEXT NOT NULL CHECK (workspace_mode IN ('shared_readonly','shared_serial_writer','isolated_worktree')),
+        requested_model     TEXT CHECK (requested_model IS NULL OR json_valid(requested_model)),
+        resolved_model      TEXT NOT NULL CHECK (json_valid(resolved_model)),
+        retry_of_task_id    TEXT,
+        status              TEXT NOT NULL CHECK (status IN ('created','running','completed','failed','cancelled')),
+        summary             TEXT CHECK (summary IS NULL OR json_valid(summary)),
+        error               TEXT CHECK (error IS NULL OR json_valid(error)),
+        input_tokens        INTEGER,
+        output_tokens       INTEGER,
+        cost_usd            REAL,
+        created_at          TEXT NOT NULL,
+        started_at          TEXT,
+        finished_at         TEXT
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent
+        ON agent_tasks(parent_session_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_agent_tasks_status
+        ON agent_tasks(status, created_at);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         content,
         session_id UNINDEXED,
@@ -331,6 +419,7 @@ export class SqliteEventStore implements EventStore {
         url         TEXT,
         auth_kind   TEXT NOT NULL CHECK (auth_kind IN ('none','oauth','api_key')),
         status      TEXT NOT NULL CHECK (status IN ('imported','needs_auth','connected','error')),
+        enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
         config      TEXT NOT NULL CHECK (json_valid(config)),
         imported_at TEXT NOT NULL,
         updated_at  TEXT NOT NULL
@@ -374,6 +463,8 @@ export class SqliteEventStore implements EventStore {
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const now = new Date().toISOString();
     const scope = normalizeSessionScope(input);
+    const origin =
+      input.origin ?? (scope.scope === "control" ? "control" : "native");
     const record: SessionRecord = {
       sessionId: ulid(),
       workspaceId: input.workspaceId,
@@ -383,6 +474,8 @@ export class SqliteEventStore implements EventStore {
       createdAt: now,
       updatedAt: now,
       status: "active",
+      origin,
+      sessionKind: "primary",
       ...scope,
     };
     const event: AgenaEvent = {
@@ -396,8 +489,7 @@ export class SqliteEventStore implements EventStore {
         workspaceId: input.workspaceId,
         ...(input.title !== undefined ? { title: input.title } : {}),
         runtime: "pi",
-        origin:
-          input.origin ?? (scope.scope === "control" ? "control" : "native"),
+        origin,
         ...scope,
         rootBranchId: record.rootBranchId,
       },
@@ -425,8 +517,8 @@ export class SqliteEventStore implements EventStore {
           `INSERT INTO sessions
            (id, workspace_id, title, active_branch_id, last_seq, created_at,
             pi_session_path, updated_at, scope, project_id, project_root, cwd,
-            host_cwd_hint, status, is_control)
-           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+            host_cwd_hint, origin, status, is_control)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
         )
         .run(
           record.sessionId,
@@ -441,6 +533,7 @@ export class SqliteEventStore implements EventStore {
           scope.projectRoot ?? null,
           scope.cwd,
           scope.hostCwdHint ?? null,
+          origin,
           scope.scope === "control" ? 1 : 0,
         );
       this.#db
@@ -460,6 +553,136 @@ export class SqliteEventStore implements EventStore {
     return record;
   }
 
+  async createSubagentSession(input: CreateSubagentSessionInput): Promise<{
+    session: SessionRecord;
+    task: AgentTaskSummary;
+  }> {
+    const parent = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(input.parentSessionId) as SessionRow | undefined;
+    if (!parent) {
+      throw new StoreError(
+        "session_not_found",
+        `unknown session ${input.parentSessionId}`,
+      );
+    }
+    const now = new Date().toISOString();
+    const origin = input.origin ?? "native";
+    const childSessionId = ulid();
+    const rootBranchId = ulid();
+    const payload: AgentTaskCreated = {
+      ...input.task,
+      parentSessionId: parent.id,
+      childSessionId,
+    };
+    validateNewEvent("agent.task.created", payload);
+    const session: SessionRecord = {
+      sessionId: childSessionId,
+      workspaceId: parent.workspace_id,
+      title: input.title ?? input.task.role,
+      rootBranchId,
+      lastSeq: 1,
+      createdAt: now,
+      updatedAt: now,
+      scope: parent.scope,
+      status: "active",
+      origin,
+      ...(parent.project_id ? { projectId: parent.project_id } : {}),
+      ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
+      cwd: parent.cwd,
+      ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
+      sessionKind: "subagent",
+      parentSessionId: parent.id,
+      parentTaskId: input.task.taskId,
+    };
+    const childEvent: AgenaEvent = {
+      sessionId: childSessionId,
+      branchId: rootBranchId,
+      seq: 1,
+      type: "session.created",
+      v: 1,
+      source: { kind: "daemon" },
+      payload: {
+        workspaceId: parent.workspace_id,
+        title: session.title,
+        runtime: "pi",
+        origin,
+        scope: parent.scope,
+        ...(parent.project_id ? { projectId: parent.project_id } : {}),
+        ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
+        cwd: parent.cwd,
+        ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
+        rootBranchId,
+      },
+      createdAt: now,
+    };
+    const parentEvent: AgenaEvent = {
+      sessionId: parent.id,
+      branchId: parent.active_branch_id,
+      seq: parent.last_seq + 1,
+      type: "agent.task.created",
+      v: 1,
+      source: input.source,
+      payload,
+      createdAt: now,
+    };
+    this.#transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO sessions
+           (id, workspace_id, title, active_branch_id, last_seq, created_at,
+            pi_session_path, updated_at, scope, project_id, project_root, cwd,
+            host_cwd_hint, origin, status, is_control, parent_session_id, parent_task_id,
+            session_kind)
+           VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, 'subagent')`,
+        )
+        .run(
+          childSessionId,
+          parent.workspace_id,
+          session.title ?? null,
+          rootBranchId,
+          now,
+          now,
+          parent.scope,
+          parent.project_id,
+          parent.project_root,
+          parent.cwd,
+          parent.host_cwd_hint,
+          origin,
+          parent.id,
+          input.task.taskId,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO branches
+           (id, session_id, parent_branch_id, forked_from_seq, name, created_at)
+           VALUES (?, ?, NULL, NULL, NULL, ?)`,
+        )
+        .run(rootBranchId, childSessionId, now);
+      this.#insertEvent(childEvent);
+      this.#insertEvent(parentEvent);
+      this.#applyProjection(parentEvent);
+      this.#db
+        .prepare(
+          "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(parentEvent.seq, now, parent.id);
+    });
+    this.#emitCommitted({
+      sessionId: childSessionId,
+      events: [childEvent],
+      lastSeq: 1,
+    });
+    this.#emitCommitted({
+      sessionId: parent.id,
+      events: [parentEvent],
+      lastSeq: parentEvent.seq,
+    });
+    const task = this.getAgentTask(input.task.taskId);
+    if (!task) throw new Error("agent task projection was not created");
+    return { session, task };
+  }
+
   async getSession(sessionId: string): Promise<SessionRecord | null> {
     const row = this.#db
       .prepare("SELECT * FROM sessions WHERE id = ?")
@@ -473,6 +696,29 @@ export class SqliteEventStore implements EventStore {
       .prepare(`SELECT * FROM sessions ${where} ORDER BY id DESC`)
       .all(...params) as SessionRow[];
     return rows.map(sessionFromRow);
+  }
+
+  getAgentTask(taskId: string): AgentTaskSummary | null {
+    const row = this.#db
+      .prepare("SELECT * FROM agent_tasks WHERE id = ?")
+      .get(taskId) as AgentTaskRow | undefined;
+    return row ? agentTaskFromRow(row) : null;
+  }
+
+  listAgentTasks(parentSessionId?: string): AgentTaskSummary[] {
+    const rows = (
+      parentSessionId
+        ? this.#db
+            .prepare(
+              `SELECT * FROM agent_tasks
+               WHERE parent_session_id = ? ORDER BY created_at ASC`,
+            )
+            .all(parentSessionId)
+        : this.#db
+            .prepare("SELECT * FROM agent_tasks ORDER BY created_at ASC")
+            .all()
+    ) as AgentTaskRow[];
+    return rows.map(agentTaskFromRow);
   }
 
   async updateSessionStatus(
@@ -684,6 +930,23 @@ export class SqliteEventStore implements EventStore {
     }));
   }
 
+  async listUserMessages(sessionId: string): Promise<UserMessageAnchor[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT id, seq, content, created_at
+         FROM messages
+         WHERE session_id = ? AND role = 'user'
+         ORDER BY seq ASC`,
+      )
+      .all(sessionId) as UserMessageRow[];
+    return rows.map((row) => ({
+      messageId: row.id,
+      seq: row.seq,
+      preview: extractSearchText(JSON.parse(row.content)).slice(0, 320),
+      createdAt: row.created_at,
+    }));
+  }
+
   insertImport(
     entry: Omit<ImportLedgerEntry, "id" | "importedAt">,
   ): ImportLedgerEntry {
@@ -739,7 +1002,10 @@ export class SqliteEventStore implements EventStore {
   }
 
   upsertMcp(
-    input: Omit<McpRegistryRecord, "id" | "importedAt" | "updatedAt">,
+    input: Omit<
+      McpRegistryRecord,
+      "id" | "importedAt" | "updatedAt" | "enabled"
+    > & { enabled?: boolean },
   ): McpRegistryRecord {
     const existing = this.#db
       .prepare("SELECT id, imported_at FROM mcps WHERE identity = ?")
@@ -753,10 +1019,10 @@ export class SqliteEventStore implements EventStore {
     });
     this.#db
       .prepare(`INSERT INTO mcps
-      (id,identity,name,transport,command,args,url,auth_kind,status,config,imported_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      (id,identity,name,transport,command,args,url,auth_kind,status,enabled,config,imported_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(identity) DO UPDATE SET name=excluded.name,transport=excluded.transport,command=excluded.command,
-      args=excluded.args,url=excluded.url,auth_kind=excluded.auth_kind,status=excluded.status,
+      args=excluded.args,url=excluded.url,auth_kind=excluded.auth_kind,status=excluded.status,enabled=excluded.enabled,
       config=excluded.config,updated_at=excluded.updated_at`)
       .run(
         id,
@@ -768,6 +1034,7 @@ export class SqliteEventStore implements EventStore {
         input.url ?? null,
         input.authKind,
         input.status,
+        input.enabled === false ? 0 : 1,
         config,
         importedAt,
         now,
@@ -800,6 +1067,19 @@ export class SqliteEventStore implements EventStore {
       .prepare("UPDATE mcps SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, new Date().toISOString(), id);
     return this.getMcp(id);
+  }
+
+  setMcpEnabled(id: string, enabled: boolean): McpRegistryRecord | null {
+    this.#db
+      .prepare("UPDATE mcps SET enabled = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, new Date().toISOString(), id);
+    return this.getMcp(id);
+  }
+
+  deleteMcp(id: string): boolean {
+    return (
+      this.#db.prepare("DELETE FROM mcps WHERE id = ?").run(id).changes > 0
+    );
   }
 
   upsertSkill(
@@ -893,6 +1173,12 @@ export class SqliteEventStore implements EventStore {
       : [];
     this.#transaction(() => {
       if (sessionIds.length) {
+        this.#db
+          .prepare(
+            `DELETE FROM agent_tasks
+             WHERE parent_session_id IN (${ph}) OR child_session_id IN (${ph})`,
+          )
+          .run(...sessionIds, ...sessionIds);
         for (const table of [
           "events",
           "messages",
@@ -947,10 +1233,14 @@ export class SqliteEventStore implements EventStore {
         this.#db
           .prepare("DELETE FROM messages_fts WHERE session_id = ?")
           .run(sessionId);
+        this.#db
+          .prepare("DELETE FROM agent_tasks WHERE parent_session_id = ?")
+          .run(sessionId);
       } else {
         this.#db.prepare("DELETE FROM messages").run();
         this.#db.prepare("DELETE FROM tool_calls").run();
         this.#db.prepare("DELETE FROM messages_fts").run();
+        this.#db.prepare("DELETE FROM agent_tasks").run();
       }
       const rows = (
         sessionId
@@ -1021,7 +1311,17 @@ export class SqliteEventStore implements EventStore {
     add("project_root", "project_root TEXT");
     add("cwd", "cwd TEXT NOT NULL DEFAULT '.'");
     add("host_cwd_hint", "host_cwd_hint TEXT");
+    add(
+      "origin",
+      "origin TEXT NOT NULL DEFAULT 'native' CHECK (origin IN ('native','import.claude','import.codex','control'))",
+    );
     add("pi_session_path", "pi_session_path TEXT");
+    add("parent_session_id", "parent_session_id TEXT REFERENCES sessions(id)");
+    add("parent_task_id", "parent_task_id TEXT");
+    add(
+      "session_kind",
+      "session_kind TEXT NOT NULL DEFAULT 'primary' CHECK (session_kind IN ('primary','subagent'))",
+    );
     add(
       "status",
       "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','idle','archived'))",
@@ -1039,6 +1339,20 @@ export class SqliteEventStore implements EventStore {
     this.#db
       .prepare("UPDATE sessions SET is_control = 1 WHERE scope = 'control'")
       .run();
+    this.#db
+      .prepare(
+        `UPDATE sessions
+         SET origin = COALESCE(
+           (SELECT json_extract(payload, '$.origin')
+            FROM events
+            WHERE events.session_id = sessions.id
+              AND events.type = 'session.created'
+            ORDER BY seq ASC
+            LIMIT 1),
+           CASE WHEN scope = 'control' THEN 'control' ELSE 'native' END
+         )`,
+      )
+      .run();
   }
 
   #migrateMcpColumns(): void {
@@ -1047,12 +1361,17 @@ export class SqliteEventStore implements EventStore {
         this.#db.prepare("PRAGMA table_info(mcps)").all() as TableColumnRow[]
       ).map((column) => column.name),
     );
-    if (columns.has("identity")) return;
-    this.#db.exec("ALTER TABLE mcps ADD COLUMN identity TEXT");
-    this.#db.exec(
-      "UPDATE mcps SET identity = CASE WHEN url IS NOT NULL THEN 'remote:' || rtrim(url, '/') ELSE 'legacy:' || id END",
-    );
-    this.#db.exec("CREATE UNIQUE INDEX idx_mcps_identity ON mcps(identity)");
+    if (!columns.has("identity")) {
+      this.#db.exec("ALTER TABLE mcps ADD COLUMN identity TEXT");
+      this.#db.exec(
+        "UPDATE mcps SET identity = CASE WHEN url IS NOT NULL THEN 'remote:' || rtrim(url, '/') ELSE 'legacy:' || id END",
+      );
+      this.#db.exec("CREATE UNIQUE INDEX idx_mcps_identity ON mcps(identity)");
+    }
+    if (!columns.has("enabled"))
+      this.#db.exec(
+        "ALTER TABLE mcps ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1))",
+      );
   }
 
   #transaction(fn: () => void): void {
@@ -1180,6 +1499,70 @@ export class SqliteEventStore implements EventStore {
       case "tool.call.denied":
         this.#finishToolCall(event, "denied", { reason: p.reason });
         return;
+      case "agent.task.created":
+        this.#db
+          .prepare(
+            `INSERT INTO agent_tasks
+             (id, parent_session_id, child_session_id, parent_run_id,
+              parent_message_id, parent_tool_call_id, role, task, execution,
+              context_mode, workspace_mode, requested_model, resolved_model,
+              retry_of_task_id, status, summary, error, input_tokens,
+              output_tokens, cost_usd, created_at, started_at, finished_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created',
+                     NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL)`,
+          )
+          .run(
+            stringField(p, "taskId"),
+            stringField(p, "parentSessionId"),
+            stringField(p, "childSessionId"),
+            stringField(p, "parentRunId"),
+            stringField(p, "parentMessageId"),
+            stringField(p, "parentToolCallId"),
+            stringField(p, "role"),
+            stringField(p, "task"),
+            stringField(p, "execution"),
+            stringField(p, "context"),
+            stringField(p, "workspaceMode"),
+            p.requestedModel ? JSON.stringify(p.requestedModel) : null,
+            JSON.stringify(p.resolvedModel),
+            typeof p.retryOfTaskId === "string" ? p.retryOfTaskId : null,
+            event.createdAt,
+          );
+        return;
+      case "agent.task.started":
+        this.#db
+          .prepare(
+            "UPDATE agent_tasks SET status = 'running', started_at = ? WHERE id = ?",
+          )
+          .run(stringField(p, "startedAt"), stringField(p, "taskId"));
+        return;
+      case "agent.task.completed": {
+        const usage = record(p.usage);
+        this.#db
+          .prepare(
+            `UPDATE agent_tasks SET status = 'completed', summary = ?, error = NULL,
+             input_tokens = ?, output_tokens = ?, cost_usd = ?, finished_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            JSON.stringify(p.summary ?? []),
+            optionalNumberField(usage, "inputTokens"),
+            optionalNumberField(usage, "outputTokens"),
+            optionalNumberField(usage, "costUsd"),
+            event.createdAt,
+            stringField(p, "taskId"),
+          );
+        return;
+      }
+      case "agent.task.failed":
+        this.#finishAgentTask(event, "failed", p.summary, p.error);
+        return;
+      case "agent.task.cancelled":
+        this.#finishAgentTask(event, "cancelled", undefined, {
+          code: "cancelled",
+          message: stringField(p, "reason"),
+        });
+        return;
       default:
         return;
     }
@@ -1241,6 +1624,27 @@ export class SqliteEventStore implements EventStore {
         JSON.stringify(result ?? null),
         event.seq,
         stringField(p, "toolCallId"),
+      );
+  }
+
+  #finishAgentTask(
+    event: AgenaEvent,
+    status: "failed" | "cancelled",
+    summary: unknown,
+    error: unknown,
+  ): void {
+    const p = record(event.payload);
+    this.#db
+      .prepare(
+        `UPDATE agent_tasks
+         SET status = ?, summary = ?, error = ?, finished_at = ? WHERE id = ?`,
+      )
+      .run(
+        status,
+        summary === undefined ? null : JSON.stringify(summary),
+        JSON.stringify(error),
+        event.createdAt,
+        stringField(p, "taskId"),
       );
   }
 
@@ -1307,7 +1711,51 @@ function sessionFromRow(row: SessionRow): SessionRecord {
     ...(row.project_root !== null ? { projectRoot: row.project_root } : {}),
     cwd: row.cwd,
     ...(row.host_cwd_hint !== null ? { hostCwdHint: row.host_cwd_hint } : {}),
+    origin: row.origin,
+    sessionKind: row.session_kind,
+    ...(row.parent_session_id !== null
+      ? { parentSessionId: row.parent_session_id }
+      : {}),
+    ...(row.parent_task_id !== null
+      ? { parentTaskId: row.parent_task_id }
+      : {}),
   };
+}
+
+function agentTaskFromRow(row: AgentTaskRow): AgentTaskSummary {
+  return {
+    taskId: row.id,
+    parentSessionId: row.parent_session_id,
+    childSessionId: row.child_session_id,
+    parentRunId: row.parent_run_id,
+    parentMessageId: row.parent_message_id,
+    parentToolCallId: row.parent_tool_call_id,
+    role: row.role,
+    task: row.task,
+    execution: row.execution,
+    context: row.context_mode,
+    workspaceMode: row.workspace_mode,
+    ...(row.requested_model
+      ? { requestedModel: JSON.parse(row.requested_model) }
+      : {}),
+    resolvedModel: JSON.parse(row.resolved_model),
+    ...(row.retry_of_task_id ? { retryOfTaskId: row.retry_of_task_id } : {}),
+    status: row.status,
+    ...(row.summary ? { summary: JSON.parse(row.summary) } : {}),
+    ...(row.error ? { error: JSON.parse(row.error) } : {}),
+    ...(row.input_tokens !== null && row.output_tokens !== null
+      ? {
+          usage: {
+            inputTokens: row.input_tokens,
+            outputTokens: row.output_tokens,
+            ...(row.cost_usd !== null ? { costUsd: row.cost_usd } : {}),
+          },
+        }
+      : {}),
+    createdAt: row.created_at,
+    ...(row.started_at ? { startedAt: row.started_at } : {}),
+    ...(row.finished_at ? { finishedAt: row.finished_at } : {}),
+  } as AgentTaskSummary;
 }
 
 function importFromRow(row: ImportRow): ImportLedgerEntry {
@@ -1462,6 +1910,14 @@ function stringField(payload: Record<string, unknown>, key: string): string {
     throw new StoreError("invalid_payload", `${key} must be a string`);
   }
   return value;
+}
+
+function optionalNumberField(
+  payload: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = payload[key];
+  return typeof value === "number" ? value : null;
 }
 
 function openWork(events: AgenaEvent[]): NewEvent[] {

@@ -1,8 +1,9 @@
-// The embedded browser pane's page host (desktop_plan §7). ONE WebContentsView
-// (v1: single page), owned by main, composited over the renderer at the panel's
+// The embedded browser pane's page host (desktop_plan §7). WebContentsViews are
+// owned by main; the active tab is composited over the renderer at the panel's
 // rect. Sandboxed, own persistent partition, deny-by-default permissions, no
 // webSecurity:false. D-INV-3: the view paints ABOVE all renderer DOM, so the
 // renderer hides it (setVisible) under any overlay incl. the approval modal.
+import { randomUUID } from "node:crypto";
 import { shell, WebContentsView } from "electron";
 
 const NAV_EVENTS = [
@@ -32,13 +33,31 @@ const round = (b) => ({
 });
 
 export function createBrowserHost({ getWindow, broadcast, partition }) {
-  let view = null;
+  const tabs = new Map();
+  let activeTabId = null;
+  let attachedView = null;
   let attachedTo = null;
   let lastBounds = { x: 0, y: 0, width: 0, height: 0 };
 
-  const live = () => view && !view.webContents.isDestroyed();
+  const live = (tab) => tab && !tab.view.webContents.isDestroyed();
+  const activeTab = () => tabs.get(activeTabId) ?? null;
+  const tabState = (tab) => {
+    const c = tab.view.webContents;
+    const nav = c.navigationHistory;
+    return {
+      tabId: tab.tabId,
+      url: c.getURL() || "",
+      title: c.getTitle() || "New tab",
+      loading: c.isLoading(),
+      canGoBack: nav.canGoBack(),
+      canGoForward: nav.canGoForward(),
+    };
+  };
+  const listTabs = () => [...tabs.values()].filter(live).map(tabState);
 
   const emptyState = () => ({
+    tabs: [],
+    activeTabId: null,
     url: null,
     title: null,
     loading: false,
@@ -47,24 +66,26 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
   });
 
   const emit = () => {
-    if (!live()) {
+    const tab = activeTab();
+    if (!live(tab)) {
       broadcast("agena:browser-state", emptyState());
       return;
     }
-    const c = view.webContents;
-    const nav = c.navigationHistory;
+    const state = tabState(tab);
     broadcast("agena:browser-state", {
-      url: c.getURL() || null,
-      title: c.getTitle() || null,
-      loading: c.isLoading(),
-      canGoBack: nav.canGoBack(),
-      canGoForward: nav.canGoForward(),
+      tabs: listTabs(),
+      activeTabId,
+      url: state.url || null,
+      title: state.title || null,
+      loading: state.loading,
+      canGoBack: state.canGoBack,
+      canGoForward: state.canGoForward,
     });
   };
 
-  const ensureView = () => {
-    if (view) return;
-    view = new WebContentsView({
+  const createTab = () => {
+    const tabId = randomUUID();
+    const view = new WebContentsView({
       webPreferences: {
         sandbox: true,
         contextIsolation: true,
@@ -73,11 +94,13 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
       },
     });
     const c = view.webContents;
-    // target=_blank / window.open → stay in this pane (web URLs only).
+    const tab = { tabId, view };
+    tabs.set(tabId, tab);
+    // target=_blank / window.open → a new Agena tab (web URLs only).
     c.setWindowOpenHandler(({ url }) => {
       try {
         assertHttpUrl(url);
-        c.loadURL(url);
+        void open(url, { newTab: true });
       } catch {
         // non-http(s) scheme — dropped
       }
@@ -90,37 +113,49 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
       if (!/^https?:/i.test(url)) e.preventDefault();
     });
     for (const ev of NAV_EVENTS) c.on(ev, () => emit());
+    return tab;
   };
 
-  const attach = (host, bounds) => {
-    if (attachedTo === host) return;
-    if (attachedTo) {
+  const attach = (tab) => {
+    const host = getWindow();
+    if (!host) throw new Error("browser window is not available");
+    if (attachedTo && attachedView) {
       try {
-        attachedTo.contentView.removeChildView(view);
+        attachedTo.contentView.removeChildView(attachedView);
       } catch {
         /* window gone */
       }
     }
-    host.contentView.addChildView(view);
+    host.contentView.addChildView(tab.view);
     attachedTo = host;
-    view.setBounds(round(bounds));
+    attachedView = tab.view;
+    tab.view.setBounds(round(lastBounds));
   };
 
-  const open = async (url) => {
-    assertHttpUrl(url); // agent-supplied — the error surfaces to the requester
-    const win = getWindow();
-    if (!win) throw new Error("browser window is not available");
-    ensureView();
-    attach(win, lastBounds);
-    view.setVisible(true);
-    await view.webContents.loadURL(url);
+  const activate = (tabId) => {
+    const tab = tabs.get(tabId);
+    if (!live(tab)) throw new Error(`unknown browser tab ${tabId}`);
+    activeTabId = tabId;
+    attach(tab);
+    tab.view.setVisible(true);
     emit();
-    return pageState(view.webContents);
+  };
+
+  const open = async (url, { newTab = true } = {}) => {
+    assertHttpUrl(url); // agent-supplied — the error surfaces to the requester
+    const tab = !newTab && live(activeTab()) ? activeTab() : createTab();
+    activate(tab.tabId);
+    await tab.view.webContents.loadURL(url);
+    emit();
+    return pageState(tab.view.webContents, { tabId: tab.tabId });
   };
 
   const navigate = (action) => {
-    if (!live()) return;
-    const c = view.webContents;
+    if (action?.kind === "activate") return activate(action.tabId);
+    if (action?.kind === "close") return closeTab(action.tabId);
+    const tab = tabs.get(action?.tabId ?? activeTabId);
+    if (!live(tab)) return;
+    const c = tab.view.webContents;
     const nav = c.navigationHistory;
     switch (action?.kind) {
       case "back":
@@ -146,56 +181,103 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
 
   const setBounds = (b) => {
     lastBounds = b;
-    if (view) view.setBounds(round(b));
+    const tab = activeTab();
+    if (live(tab)) tab.view.setBounds(round(b));
   };
 
   const setVisible = (v) => {
-    if (view) view.setVisible(!!v);
+    const tab = activeTab();
+    if (live(tab)) tab.view.setVisible(!!v);
   };
 
   const openDevTools = () => {
-    if (live()) view.webContents.openDevTools({ mode: "detach" });
+    const tab = activeTab();
+    if (live(tab)) tab.view.webContents.openDevTools({ mode: "detach" });
   };
 
-  const destroyView = () => {
-    if (!view) return;
-    if (attachedTo) {
+  const destroyTab = (tab) => {
+    if (!tab) return;
+    if (attachedTo && attachedView === tab.view) {
       try {
-        attachedTo.contentView.removeChildView(view);
+        attachedTo.contentView.removeChildView(tab.view);
       } catch {
         /* window gone */
       }
     }
-    if (!view.webContents.isDestroyed()) {
+    if (!tab.view.webContents.isDestroyed()) {
       try {
-        view.webContents.close();
+        tab.view.webContents.close();
       } catch {
         /* already closing */
       }
     }
-    view = null;
-    attachedTo = null;
+    tabs.delete(tab.tabId);
+    if (attachedView === tab.view) {
+      attachedView = null;
+      attachedTo = null;
+    }
   };
 
   const openExternal = async () => {
-    const url = live() ? view.webContents.getURL() : "";
+    const tab = activeTab();
+    const url = live(tab) ? tab.view.webContents.getURL() : "";
     if (url) await shell.openExternal(url);
   };
 
+  const closeTab = (tabId) => {
+    const tab = tabs.get(tabId);
+    if (!tab) return;
+    const wasActive = activeTabId === tabId;
+    destroyTab(tab);
+    if (wasActive) {
+      const next = [...tabs.values()].at(-1);
+      activeTabId = next?.tabId ?? null;
+      if (next) activate(next.tabId);
+    }
+    emit();
+  };
+
   const close = () => {
-    destroyView();
+    for (const tab of [...tabs.values()]) destroyTab(tab);
+    activeTabId = null;
     emit();
   };
 
   const agentRequest = async (action) => {
-    if (action.action === "open") return open(action.url);
-    if (!live()) throw new Error("visible browser is not open");
-    const c = view.webContents;
+    if (action.action === "open") return open(action.url, { newTab: true });
+    if (action.action === "list") {
+      const tab = activeTab();
+      return {
+        url: live(tab) ? tab.view.webContents.getURL() : "",
+        title: live(tab) ? tab.view.webContents.getTitle() : "",
+        tabs: listTabs(),
+      };
+    }
+    if (action.action === "close") {
+      closeTab(action.tabId);
+      return { url: "", title: "", tabs: listTabs() };
+    }
+    const tab = tabs.get(action.tabId ?? activeTabId);
+    if (!live(tab)) throw new Error("visible browser tab is not open");
+    const c = tab.view.webContents;
+    if (action.action === "navigate") {
+      if (action.kind === "url" && action.url) {
+        await c.loadURL(action.url);
+      } else {
+        navigate({ tabId: tab.tabId, kind: action.kind });
+        await delay(100);
+      }
+      return pageState(c, { tabId: tab.tabId });
+    }
     switch (action.action) {
       case "read":
-        return pageState(c, { includeHtml: !!action.includeHtml });
+        return pageState(c, {
+          tabId: tab.tabId,
+          includeHtml: !!action.includeHtml,
+        });
       case "screenshot":
         return pageState(c, {
+          tabId: tab.tabId,
           screenshot: await captureScreenshot(c, action.maxWidth ?? 1024),
         });
       case "click": {
@@ -203,18 +285,18 @@ export function createBrowserHost({ getWindow, broadcast, partition }) {
           ? await clickSelector(c, action.selector)
           : await clickPoint(c, action.x, action.y);
         await delay(100);
-        return pageState(c, { value });
+        return pageState(c, { tabId: tab.tabId, value });
       }
       case "type": {
         const value = action.selector
           ? await typeSelector(c, action.selector, action.text, !!action.submit)
           : await typeFocused(c, action.text, !!action.submit);
         await delay(100);
-        return pageState(c, { value });
+        return pageState(c, { tabId: tab.tabId, value });
       }
       case "evaluate": {
         const value = await evaluate(c, action.script);
-        return pageState(c, { value });
+        return pageState(c, { tabId: tab.tabId, value });
       }
     }
   };
@@ -249,6 +331,7 @@ async function pageState(webContents, extras = {}) {
     true,
   );
   return {
+    ...(extras.tabId ? { tabId: extras.tabId } : {}),
     url: String(state.url ?? webContents.getURL() ?? ""),
     title: String(state.title ?? webContents.getTitle() ?? ""),
     ...(typeof state.text === "string" ? { text: state.text } : {}),

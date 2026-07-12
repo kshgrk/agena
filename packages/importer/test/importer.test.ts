@@ -2,8 +2,10 @@ import { durableEventSchemas } from "@agena/protocol";
 import { describe, expect, it } from "vitest";
 import {
   convertToPi,
+  discoverClaudeSubagents,
   groupCodexThreads,
   parseClaudeSession,
+  parseClaudeSubagent,
   parseCodexRollout,
   parsePiSession,
   synthesizeEvents,
@@ -81,6 +83,81 @@ const codexUser = (text: string, ts: string, extra: unknown[] = []) => ({
     role: "user",
     content: [...extra, { type: "input_text", text }],
   },
+});
+
+const claudeSubagentFixture = jsonl([
+  {
+    type: "user",
+    sessionId: "parent-1",
+    agentId: "agent-1",
+    isSidechain: true,
+    timestamp: "2026-01-02T03:04:05.000Z",
+    message: { role: "user", content: "Inspect the auth flow" },
+  },
+  {
+    type: "assistant",
+    sessionId: "parent-1",
+    agentId: "agent-1",
+    isSidechain: true,
+    timestamp: "2026-01-02T03:04:06.000Z",
+    message: {
+      role: "assistant",
+      model: "claude-haiku-4-5",
+      content: [{ type: "text", text: "Found it." }],
+    },
+  },
+]);
+
+describe("Claude subagent discovery", () => {
+  const parentPath = "/home/dev/.claude/projects/app/parent-1.jsonl";
+  const childPath =
+    "/home/dev/.claude/projects/app/parent-1/subagents/agent-agent-1.jsonl";
+
+  it("keeps sidechain children, derives the parent, and only uses explicit task links", () => {
+    const parentContent = jsonl([
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Agent",
+              input: {
+                agentId: "agent-1",
+                description: "Audit auth",
+                subagent_type: "Explore",
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const parsed = parseClaudeSubagent(
+      claudeSubagentFixture,
+      childPath,
+      parentPath,
+      parentContent,
+    );
+
+    expect(parsed).toMatchObject({
+      parentSourceSessionId: "parent-1",
+      sourceSessionId: "agent-1",
+      agentId: "agent-1",
+      title: "Audit auth",
+      model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      startedAt: "2026-01-02T03:04:05.000Z",
+      endedAt: "2026-01-02T03:04:06.000Z",
+      task: { title: "Audit auth", role: "Explore" },
+    });
+    expect(parsed?.transcript.sourceSessionId).toBe("agent-1");
+
+    const discovered = discoverClaudeSubagents(parentPath, [
+      { sourcePath: childPath, content: claudeSubagentFixture },
+      { sourcePath: "journal.jsonl", content: "{}\n" },
+    ]);
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0]?.task).toBeUndefined();
+  });
 });
 
 describe("parseClaudeSession", () => {
@@ -405,6 +482,32 @@ describe("titleFromEntries", () => {
 });
 
 describe("parseCodexRollout", () => {
+  it("keeps thread-spawn lineage from the first rollout header", () => {
+    const parsed = parseCodexRollout(
+      jsonl([
+        {
+          ...codexMeta("child-thread", "2026-02-01T00:00:00.000Z"),
+          payload: {
+            ...codexMeta("child-thread", "2026-02-01T00:00:00.000Z").payload,
+            session_id: "root-session",
+            parent_thread_id: "parent-thread",
+            thread_source: "subagent",
+            agent_path: "/root/mcp_runtime",
+            agent_nickname: "Goodall",
+          },
+        },
+        codexUser("inherited parent prompt", "2026-02-01T00:00:01.000Z"),
+      ]),
+      "/src/rollout-child.jsonl",
+    );
+    expect(parsed?.sourceSessionId).toBe("child-thread");
+    expect(parsed?.codexSubagent).toEqual({
+      parentSourceSessionId: "parent-thread",
+      agentPath: "/root/mcp_runtime",
+      nickname: "Goodall",
+    });
+  });
+
   it("strips bootstrap text blocks mixed with real user text", () => {
     const fixture = jsonl([
       codexMeta("thread-1", "2026-02-01T00:00:00.000Z"),

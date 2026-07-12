@@ -501,6 +501,17 @@ export function markSynced(
 // ---- store ----------------------------------------------------------------------
 
 const PAGE = 200;
+const REVEAL_PAGE = 1_000;
+
+/** True until the transcript contains the daemon's newest history page. */
+export function needsRecentHistory(
+  transcript: TranscriptState | undefined,
+): boolean {
+  if (!transcript?.live || transcript.lastSeq === 0) return false;
+  const oldestLoaded = transcript.rawEvents[0]?.seq;
+  const newestPageStart = Math.max(1, transcript.lastSeq - PAGE + 1);
+  return oldestLoaded === undefined || oldestLoaded > newestPageStart;
+}
 
 export type TranscriptsStore = {
   bySession: Readonly<Record<string, TranscriptState>>;
@@ -512,6 +523,8 @@ export type TranscriptsStore = {
   ) => void;
   /** Backward-page older events for a session via the bridge. */
   prependOlder: (sessionId: string) => Promise<void>;
+  /** Load contiguous older history until targetSeq is available. */
+  revealSeq: (sessionId: string, targetSeq: number) => Promise<void>;
 };
 
 export const transcriptsInitial = {
@@ -542,6 +555,42 @@ export const useTranscripts = create<TranscriptsStore>((set, get) => ({
       const older = page.events.filter((e) => e.seq < oldest);
       if (older.length > 0) {
         get().update(sessionId, (cur) => prependOlderEvents(cur, older));
+      }
+    } finally {
+      set((s) => ({ loadingOlder: { ...s.loadingOlder, [sessionId]: false } }));
+    }
+  },
+  revealSeq: async (sessionId, targetSeq) => {
+    const bridge = getBridge();
+    if (!bridge) return;
+    if (get().loadingOlder[sessionId]) {
+      await new Promise<void>((resolve) => {
+        const unsubscribe = useTranscripts.subscribe((state) => {
+          if (!state.loadingOlder[sessionId]) {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+      return get().revealSeq(sessionId, targetSeq);
+    }
+    set((s) => ({ loadingOlder: { ...s.loadingOlder, [sessionId]: true } }));
+    try {
+      while (true) {
+        const transcript = get().bySession[sessionId];
+        if (!transcript) return;
+        const oldest = transcript.rawEvents[0]?.seq ?? transcript.lastSeq + 1;
+        if (oldest <= targetSeq || oldest <= 1) return;
+        const fromSeq = Math.max(0, oldest - 1 - REVEAL_PAGE);
+        const page = await bridge.readEvents(sessionId, {
+          fromSeq,
+          limit: REVEAL_PAGE,
+        });
+        const older = page.events.filter((event) => event.seq < oldest);
+        if (older.length === 0) return;
+        get().update(sessionId, (current) =>
+          prependOlderEvents(current, older),
+        );
       }
     } finally {
       set((s) => ({ loadingOlder: { ...s.loadingOlder, [sessionId]: false } }));

@@ -43,6 +43,20 @@ registerCommands([
     run: () => openSettings("providers"),
   },
   {
+    id: "settings.open.plugins",
+    title: "Settings: Plugins",
+    group: "Settings",
+    keywords: [
+      "plugins",
+      "integrations",
+      "extensions",
+      "skills",
+      "mcp",
+      "marketplace",
+    ],
+    run: () => openSettings("plugins"),
+  },
+  {
     id: "settings.open.mcp",
     title: "Settings: MCP Servers",
     group: "Settings",

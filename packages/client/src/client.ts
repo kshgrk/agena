@@ -24,12 +24,14 @@ import {
   type ImportSkillResponse,
   type ImportsResponse,
   type InFlightSnapshot,
+  type ListPluginsResponse,
   type ListProvidersResponse,
   type ListSessionsQuery,
   type McpSummary,
   type ModelRef,
   type PendingApprovalSummary,
   PING_INTERVAL_MS,
+  type PluginResponse,
   PROTOCOL_VERSION,
   type ProjectResponse,
   type PromptAck,
@@ -57,6 +59,7 @@ import {
   setThinkingLevelAckSchema,
   subscribeAckSchema,
   type ThinkingLevel,
+  type UserMessageAnchor,
   VISIBLE_BROWSER_CAPABILITY,
   type VisibleBrowserAction,
   type VisibleBrowserResult,
@@ -422,6 +425,14 @@ export class AgenaClient {
     ) as Promise<ReadEventsPage>;
   }
 
+  async listUserMessages(sessionId: string): Promise<UserMessageAnchor[]> {
+    const body = await this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/user-messages`,
+    );
+    return (body as { messages: UserMessageAnchor[] }).messages;
+  }
+
   async listFiles(opts: ListFilesOptions = {}): Promise<FileEntry[]> {
     const query = new URLSearchParams();
     if (opts.path) query.set("path", opts.path);
@@ -508,6 +519,42 @@ export class AgenaClient {
       "GET",
       "/v1/providers",
     ) as Promise<ListProvidersResponse>;
+  }
+
+  async listPlugins(): Promise<ListPluginsResponse> {
+    return this.fetchJson("GET", "/v1/plugins") as Promise<ListPluginsResponse>;
+  }
+
+  async installPlugin(id: string): Promise<PluginResponse> {
+    return this.fetchJson(
+      "POST",
+      `/v1/plugins/${encodeURIComponent(id)}/install`,
+      {},
+    ) as Promise<PluginResponse>;
+  }
+
+  async updatePlugin(id: string): Promise<PluginResponse> {
+    return this.fetchJson(
+      "POST",
+      `/v1/plugins/${encodeURIComponent(id)}/update`,
+      {},
+    ) as Promise<PluginResponse>;
+  }
+
+  async setPluginEnabled(
+    id: string,
+    enabled: boolean,
+  ): Promise<PluginResponse> {
+    return this.fetchJson("PATCH", `/v1/plugins/${encodeURIComponent(id)}`, {
+      enabled,
+    }) as Promise<PluginResponse>;
+  }
+
+  async removePlugin(id: string): Promise<PluginResponse> {
+    return this.fetchJson(
+      "DELETE",
+      `/v1/plugins/${encodeURIComponent(id)}`,
+    ) as Promise<PluginResponse>;
   }
 
   async saveProviderApiKey(

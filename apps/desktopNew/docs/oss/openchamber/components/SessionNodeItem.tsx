@@ -1011,11 +1011,11 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                      onPointerDown={handleRowPointerDown}
-                      onPointerUp={handleRowPointerEnd}
-                      onPointerCancel={handleRowPointerEnd}
-                      onMouseDown={handleRowMouseDown}
-                      onClick={(event) => handleRowSelect(event)}
+ 	                    onPointerDown={handleRowPointerDown}
+ 	                    onPointerUp={handleRowPointerEnd}
+ 	                    onPointerCancel={handleRowPointerEnd}
+ 	                    onMouseDown={handleRowMouseDown}
+ 	                    onClick={(event) => handleRowSelect(event)}
                     onDoubleClick={(e) => {
                       e.stopPropagation();
                       handleSessionDoubleClick(session.id, sessionTitle);

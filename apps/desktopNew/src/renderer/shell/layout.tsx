@@ -13,11 +13,12 @@ import {
 } from "dockview";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ChildSessionBanner } from "../features/agents/task-group.tsx";
 import {
   pane as browserPane,
   initBrowserStore,
 } from "../features/browser/index.ts";
-import { pane as composerPane } from "../features/composer/index.ts";
+import { Composer } from "../features/composer/composer.tsx";
 import { pane as diffPane } from "../features/diff/index.ts";
 import { pane as filesPane } from "../features/files/index.ts";
 import { pane as inspectorPane } from "../features/inspector/index.ts";
@@ -26,6 +27,7 @@ import { pane as snapshotsPane } from "../features/snapshots/index.ts";
 import { pane as terminalPane } from "../features/terminal/index.ts";
 import { pane as timelinePane } from "../features/timeline/index.ts";
 import { pane as transcriptPane } from "../features/transcript/index.ts";
+import { Transcript } from "../features/transcript/transcript-pane.tsx";
 import {
   ensureSubscribed,
   pushToast,
@@ -47,42 +49,53 @@ import {
 
 // ---- center panel: the session workspace ------------------------------------
 
-function SessionWorkspace() {
-  const activeSessionId = useSessions((s) => s.activeSessionId);
+const SESSION_PANEL_PREFIX = "session:";
+const EMPTY_SESSION_PANEL = "session.empty";
+
+function sessionPanelId(sessionId: string): string {
+  return `${SESSION_PANEL_PREFIX}${sessionId}`;
+}
+
+function panelSessionId(panelId: string): string | null {
+  return panelId.startsWith(SESSION_PANEL_PREFIX)
+    ? panelId.slice(SESSION_PANEL_PREFIX.length)
+    : null;
+}
+
+function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const connState = useConnection((s) => s.state);
   // The displayed session is always subscribed — heals every race
   // (activation while connecting, reconnects, bootstrap ordering).
   useEffect(() => {
-    if (!activeSessionId || connState !== "connected") return;
-    ensureSubscribed(activeSessionId).catch((err: unknown) => {
+    if (connState !== "connected") return;
+    ensureSubscribed(sessionId).catch((err: unknown) => {
       pushToast({
         kind: "err",
         title: "Failed to subscribe to session",
         detail: err instanceof Error ? err.message : "subscribe failed",
       });
     });
-  }, [activeSessionId, connState]);
-  if (!activeSessionId) {
-    return (
-      <EmptyState
-        icon={transcriptPane.icon}
-        title="Pick or create a session"
-        hint={`${shortcutLabel("mod+n")} starts a new one.`}
-      />
-    );
-  }
+  }, [sessionId, connState]);
   return (
-    <div
-      key={activeSessionId}
-      className="flex h-full min-h-0 flex-col bg-canvas"
-    >
-      <div className="min-h-0 flex-1">
-        <transcriptPane.Component />
+    <div className="grid h-full min-h-0 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_auto] bg-canvas lg:grid-cols-[28px_minmax(0,1fr)]">
+      <div className="col-start-1 row-start-1 lg:col-span-2">
+        <ChildSessionBanner sessionId={sessionId} />
       </div>
-      <div className="shrink-0">
-        <composerPane.Component />
+      <Transcript sessionId={sessionId} workspaceGrid />
+      <div className="col-start-1 row-start-3 min-w-0 lg:col-start-2">
+        <Composer sessionId={sessionId} />
       </div>
     </div>
+  );
+}
+
+function EmptySessionWorkspace() {
+  return (
+    <EmptyState
+      icon={transcriptPane.icon}
+      title="Pick or create a session"
+      hint={`${shortcutLabel("mod+n")} starts a new one.`}
+    />
   );
 }
 
@@ -101,7 +114,9 @@ const RIGHT_PANES: readonly PaneDefinition[] = [
 const RIGHT_IDS: readonly string[] = RIGHT_PANES.map((p) => p.id);
 
 function panelNode(id: string): ReactNode {
-  if (id === "transcript") return <SessionWorkspace />;
+  const sessionId = panelSessionId(id);
+  if (sessionId) return <SessionWorkspace sessionId={sessionId} />;
+  if (id === EMPTY_SESSION_PANEL) return <EmptySessionWorkspace />;
   if (id === "terminal") return <terminalPane.Component />;
   const right = RIGHT_PANES.find((p) => p.id === id);
   if (right) return <right.Component />;
@@ -111,19 +126,47 @@ function panelNode(id: string): ReactNode {
 
 // ---- layout helpers -----------------------------------------------------------------
 
-function ensureTranscript(api: DockviewApi): void {
-  if (!api.getPanel("transcript")) {
+function ensureCenter(api: DockviewApi): void {
+  const hasSession = api.panels.some((panel) => panelSessionId(panel.id));
+  if (!hasSession && !api.getPanel(EMPTY_SESSION_PANEL)) {
     api.addPanel({
-      id: "transcript",
-      component: "transcript",
-      title: transcriptPane.title,
+      id: EMPTY_SESSION_PANEL,
+      component: EMPTY_SESSION_PANEL,
+      title: "Sessions",
     });
   }
 }
 
+function centerPanelId(api: DockviewApi): string {
+  return (
+    api.panels.find((panel) => panelSessionId(panel.id))?.id ??
+    EMPTY_SESSION_PANEL
+  );
+}
+
+function openSessionPanel(api: DockviewApi, sessionId: string): void {
+  const id = sessionPanelId(sessionId);
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  ensureCenter(api);
+  const summary = useSessions.getState().byId[sessionId];
+  const added = api.addPanel({
+    id,
+    component: id,
+    title: summary?.title || "Untitled session",
+    position: { referencePanel: centerPanelId(api), direction: "within" },
+  });
+  const empty = api.getPanel(EMPTY_SESSION_PANEL);
+  if (empty) api.removePanel(empty);
+  added.api.setActive();
+}
+
 /** Add a right-dock pane: joins the existing right group, or opens one. */
 function addRightPane(api: DockviewApi, id: string): void {
-  ensureTranscript(api);
+  ensureCenter(api);
   const def = RIGHT_PANES.find((p) => p.id === id);
   if (!def || api.getPanel(id)) return;
   let ref: string | null = null;
@@ -141,7 +184,7 @@ function addRightPane(api: DockviewApi, id: string): void {
     ...(ref
       ? { position: { referencePanel: ref, direction: "within" } }
       : {
-          position: { referencePanel: "transcript", direction: "right" },
+          position: { referencePanel: centerPanelId(api), direction: "right" },
           initialWidth: id === "browser" ? 640 : id === "inspector" ? 340 : 380,
         }),
   });
@@ -169,14 +212,14 @@ function applyInspector(api: DockviewApi, open: boolean): void {
 
 /** The bottom dock = the group holding the terminal panel. */
 function ensureTerminal(api: DockviewApi): void {
-  ensureTranscript(api);
+  ensureCenter(api);
   if (api.getPanel("terminal")) return;
   const added = api.addPanel({
     id: "terminal",
     component: "terminal",
     title: terminalPane.title,
     inactive: true,
-    position: { referencePanel: "transcript", direction: "below" },
+    position: { referencePanel: centerPanelId(api), direction: "below" },
     initialHeight: 280,
   });
   // a freshly-built group has no active panel yet (added inactive)
@@ -193,11 +236,11 @@ function applyTerminal(api: DockviewApi, open: boolean): void {
 /** Transcript-first default: the session IS the app; docks open on demand. */
 function buildDefaultLayout(api: DockviewApi): void {
   api.addPanel({
-    id: "transcript",
-    component: "transcript",
-    title: transcriptPane.title,
+    id: EMPTY_SESSION_PANEL,
+    component: EMPTY_SESSION_PANEL,
+    title: "Sessions",
   });
-  api.getPanel("transcript")?.api.setActive();
+  api.getPanel(EMPTY_SESSION_PANEL)?.api.setActive();
 }
 
 // ---- the dockview host component -----------------------------------------------------
@@ -253,7 +296,7 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       }
     }
     if (!restored) buildDefaultLayout(api);
-    ensureTranscript(api);
+    ensureCenter(api);
     // groups restored (or built) without an active panel never attach content
     for (const group of api.groups) {
       if (!group.activePanel) group.panels[0]?.api.setActive();
@@ -269,10 +312,22 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
     // dockview → store (tab close buttons, drag-out removals)
     const removeSub = api.onDidRemovePanel((panel) => {
       if (disposed) return;
-      if (panel.id === "transcript") {
-        // the workbench always has its center panel
+      if (panelSessionId(panel.id) || panel.id === EMPTY_SESSION_PANEL) {
         queueMicrotask(() => {
-          if (!disposed) ensureTranscript(api);
+          if (disposed) return;
+          ensureCenter(api);
+          const removedSessionId = panelSessionId(panel.id);
+          if (
+            removedSessionId &&
+            useSessions.getState().activeSessionId !== removedSessionId
+          ) {
+            return;
+          }
+          const next = api.panels.find((candidate) =>
+            panelSessionId(candidate.id),
+          );
+          const nextSessionId = next ? panelSessionId(next.id) : null;
+          useSessions.getState().setActive(nextSessionId);
         });
       } else if (panel.id === "inspector") {
         useUi.getState().setInspectorOpen(false);
@@ -288,6 +343,29 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       else if (panel.id === "browser") useUi.getState().setBrowserOpen(true);
       else if (panel.id === "terminal") useUi.getState().setTerminalOpen(true);
     });
+    const activeSub = api.onDidActivePanelChange((event) => {
+      const sessionId = event.panel ? panelSessionId(event.panel.id) : null;
+      if (sessionId && useSessions.getState().activeSessionId !== sessionId) {
+        useSessions.getState().setActive(sessionId);
+      }
+    });
+
+    const unsubSessions = useSessions.subscribe((state, previous) => {
+      if (
+        state.activeSessionId &&
+        state.activeSessionId !== previous.activeSessionId
+      ) {
+        openSessionPanel(api, state.activeSessionId);
+      }
+      for (const panel of api.panels) {
+        const sessionId = panelSessionId(panel.id);
+        if (!sessionId) continue;
+        const title = state.byId[sessionId]?.title || "Untitled session";
+        if (panel.title !== title) panel.api.setTitle(title);
+      }
+    });
+    const initialSessionId = useSessions.getState().activeSessionId;
+    if (initialSessionId) openSessionPanel(api, initialSessionId);
 
     // store → dockview
     const unsubUi = useUi.subscribe((s, prev) => {
@@ -356,9 +434,11 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       window.clearTimeout(saveTimer);
       unregister();
       unsubUi();
+      unsubSessions();
       unsubShell();
       removeSub.dispose();
       addSub.dispose();
+      activeSub.dispose();
       layoutSub.dispose();
       api.dispose();
     };

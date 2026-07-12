@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RuntimeAdapter } from "@agena/core";
+import type { AgentTaskStore, EventStore, RuntimeAdapter } from "@agena/core";
 import { FakeRuntimeAdapter } from "@agena/core/testing";
 import type { WireEnvelope } from "@agena/protocol";
 import {
@@ -391,6 +391,68 @@ test("POST/GET /v1/sessions: bearer-gated create + list (the `agena` boot path)"
   expect(
     ((await globals.json()) as { sessions: unknown[] }).sessions,
   ).toHaveLength(1);
+});
+
+test("GET /v1/sessions includes durable subagent hierarchy metadata", async () => {
+  const dir = stateDir();
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    stateDir: dir,
+    storage: "sqlite",
+  });
+  const parent = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const taskId = "task-review";
+  const taskStore = daemon.store as EventStore & AgentTaskStore;
+  const { session: child } = await taskStore.createSubagentSession({
+    parentSessionId: parent.sessionId,
+    source: { kind: "runtime", runtime: "pi" },
+    task: {
+      taskId,
+      parentRunId: "run-review",
+      parentMessageId: "message-review",
+      parentToolCallId: "tool-review",
+      role: "security",
+      task: "Review auth handling",
+      execution: "background",
+      context: "fresh",
+      workspaceMode: "shared_readonly",
+      resolvedModel: { provider: "fake", id: "reviewer" },
+    },
+  });
+  await daemon.store.appendEvents({
+    sessionId: parent.sessionId,
+    branchId: parent.rootBranchId,
+    events: [
+      {
+        type: "agent.task.started",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: { taskId, startedAt: "2026-07-12T00:00:00.000Z" },
+      },
+    ],
+  });
+
+  const response = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/sessions?allProjects=1`,
+    { headers: { authorization: `Bearer ${TOKEN}` } },
+  );
+  expect(response.status).toBe(200);
+  const { sessions } = (await response.json()) as {
+    sessions: Array<Record<string, unknown>>;
+  };
+  expect(
+    sessions.find((session) => session.sessionId === child.sessionId),
+  ).toMatchObject({
+    sessionKind: "subagent",
+    parentSessionId: parent.sessionId,
+    parentTaskId: taskId,
+    subagent: {
+      taskId,
+      role: "security",
+      status: "running",
+      createdAt: expect.any(String),
+      startedAt: "2026-07-12T00:00:00.000Z",
+    },
+  });
 });
 
 test("provider auth routes save and remove keys without returning them", async () => {
@@ -822,15 +884,17 @@ test("subscribe → prompt: requestId acks and an ordered, gap-free stream", asy
   expect(events.map((m) => m.event.type)).toEqual([
     "session.created",
     "message.user.created",
+    "session.title.changed",
     "run.started",
     "message.assistant.started",
     "message.assistant.completed",
     "run.completed",
   ]);
-  expect(events.map((m) => m.event.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(events.map((m) => m.event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   expect(events.map((m) => m.replayed)).toEqual([
     true, // history
     false, // live tail
+    false,
     false,
     false,
     false,
@@ -1014,13 +1078,13 @@ test("kill socket mid-stream → reconnect with fromSeq ⇒ no gaps, no dupes", 
   await c2.waitFor((m) => isEvent(m) && m.event.type === "run.completed");
   const c2Seqs = c2.events(session.sessionId).map((m) => m.event.seq);
 
-  // resumes exactly after the cursor: contiguous, no dupes, through run.completed (seq 6)
+  // resumes exactly after the cursor: contiguous, no dupes, through run.completed (seq 7)
   const expected = [];
-  for (let s = lastApplied + 1; s <= 6; s++) expected.push(s);
+  for (let s = lastApplied + 1; s <= 7; s++) expected.push(s);
   expect(c2Seqs).toEqual(expected);
-  // and the union of both connections covers 1..6 with no gaps
+  // and the union of both connections covers 1..7 with no gaps
   expect([...new Set([...c1Seqs, ...c2Seqs])].sort((a, b) => a - b)).toEqual([
-    1, 2, 3, 4, 5, 6,
+    1, 2, 3, 4, 5, 6, 7,
   ]);
 });
 

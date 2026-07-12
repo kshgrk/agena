@@ -204,9 +204,9 @@ export function createBridgeHost({
     const u = new URL(rawUrl);
     return `${local}${u.pathname}${u.search}${u.hash}`;
   };
-  const openBrowserUrl = async (rawUrl) => {
+  const openBrowserUrl = async (rawUrl, opts) => {
     const target = await resolveBrowserUrl(rawUrl);
-    await browserHost.open(target);
+    await browserHost.open(target, { newTab: opts?.newTab ?? false });
     return target;
   };
   let connectedInfo = null;
@@ -373,6 +373,10 @@ export function createBridgeHost({
         return { url: action.url, title: "OAuth complete", value: true };
       }
       if (action.action === "open") {
+        const target = await resolveBrowserUrl(action.url);
+        return browserHost.agentRequest({ ...action, url: target });
+      }
+      if (action.action === "navigate" && action.kind === "url" && action.url) {
         const target = await resolveBrowserUrl(action.url);
         return browserHost.agentRequest({ ...action, url: target });
       }
@@ -552,6 +556,8 @@ export function createBridgeHost({
         return need().updateSessionStatus(args[0], args[1]);
       case "readEvents":
         return need().readEvents(args[0], args[1] ?? {});
+      case "listUserMessages":
+        return need().listUserMessages(args[0]);
       case "search":
         return need().search(args[0], args[1] ?? {});
       case "listApprovals":
@@ -610,7 +616,7 @@ export function createBridgeHost({
         return savePersisted(args[0] ?? {});
       case "browserOpen": {
         const rawUrl = args[0];
-        return openBrowserUrl(rawUrl);
+        return openBrowserUrl(rawUrl, args[1]);
       }
       case "browserNavigate":
         return browserHost.navigate(args[0]);
@@ -659,6 +665,26 @@ export function createBridgeHost({
       }
       case "mcpAuthStart":
         return startMcpOAuth(args[0]);
+      case "listPlugins": {
+        const result = await need().listPlugins();
+        return result.plugins;
+      }
+      case "installPlugin": {
+        const result = await need().installPlugin(args[0]);
+        return result.plugin;
+      }
+      case "updatePlugin": {
+        const result = await need().updatePlugin(args[0]);
+        return result.plugin;
+      }
+      case "setPluginEnabled": {
+        const result = await need().setPluginEnabled(args[0], args[1]);
+        return result.plugin;
+      }
+      case "removePlugin": {
+        const result = await need().removePlugin(args[0]);
+        return result.plugin;
+      }
       case "listProviders": {
         const result = await need().listProviders();
         return result.providers;

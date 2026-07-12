@@ -49,6 +49,8 @@ export class InMemoryEventStore implements EventStore {
       createdAt: now,
       updatedAt: now,
       status: "active",
+      origin:
+        input.origin ?? (scope.scope === "control" ? "control" : "native"),
       ...scope,
     };
     this.#sessions.set(record.sessionId, { record, events: [] });

@@ -13,6 +13,7 @@ import type {
   ListSessionsQuery,
   ModelRef,
   PendingApprovalSummary,
+  PluginSummary,
   PromptAck,
   ProviderAuthSummary,
   ProviderOAuthStatusResponse,
@@ -27,6 +28,7 @@ import type {
   SnapshotSummary,
   SubscribeAck,
   ThinkingLevel,
+  UserMessageAnchor,
 } from "@agena/protocol";
 import {
   type AgenaBridge,
@@ -77,6 +79,45 @@ import {
 
 const PERSIST_KEY = "agena.desktop.persisted";
 const DAEMON_URL = "http://127.0.0.1:7777";
+
+const mockPlugins: PluginSummary[] = [
+  {
+    id: "github",
+    name: "GitHub",
+    description: "Repositories, pull requests, issues, and Git operations.",
+    publisher: "Agena",
+    kind: "integration",
+    category: "developer_tools",
+    status: "available",
+    authKind: "oauth",
+    featured: true,
+    capabilities: ["Repositories", "Pull requests", "Git"],
+    enabled: false,
+  },
+  {
+    id: "mcp-playwright",
+    name: "Playwright MCP",
+    description: "Automate and inspect websites in a browser.",
+    publisher: "Microsoft",
+    kind: "mcp",
+    category: "automation",
+    status: "ready",
+    authKind: "none",
+    featured: true,
+    capabilities: ["Browser automation"],
+    enabled: true,
+  },
+];
+
+function updateMockPlugin(
+  id: string,
+  patch: Partial<PluginSummary>,
+): PluginSummary {
+  const plugin = mockPlugins.find((item) => item.id === id);
+  if (!plugin) throw bridgeError("NOT_FOUND", `plugin ${id} not found`);
+  Object.assign(plugin, patch);
+  return { ...plugin };
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -171,6 +212,8 @@ export function createMockBridge(): AgenaBridge {
   // ---- fake embedded browser (no real WebContentsView in a bare browser) ----
   const browserListeners = new Set<(state: BrowserState) => void>();
   let browserState: BrowserState = {
+    tabs: [],
+    activeTabId: null,
     url: null,
     title: null,
     loading: false,
@@ -181,15 +224,39 @@ export function createMockBridge(): AgenaBridge {
     browserState = { ...browserState, ...patch };
     for (const cb of browserListeners) cb(browserState);
   };
-  const fakeLoad = (url: string): string => {
+  const fakeLoad = (url: string, newTab = false): string => {
     let host = url;
     try {
       host = new URL(url).host || url;
     } catch {
       // keep the raw string as the title
     }
-    emitBrowser({ url, title: host, loading: true, canGoBack: true });
-    setTimeout(() => emitBrowser({ loading: false, title: host }), 200);
+    const tabId =
+      !newTab && browserState.activeTabId
+        ? browserState.activeTabId
+        : crypto.randomUUID();
+    const tab = {
+      tabId,
+      url,
+      title: host,
+      loading: true,
+      canGoBack: true,
+      canGoForward: false,
+    };
+    emitBrowser({
+      tabs: [...browserState.tabs.filter((item) => item.tabId !== tabId), tab],
+      activeTabId: tabId,
+      url,
+      title: host,
+      loading: true,
+      canGoBack: true,
+    });
+    setTimeout(() => {
+      const tabs = browserState.tabs.map((item) =>
+        item.tabId === tabId ? { ...item, loading: false } : item,
+      );
+      emitBrowser({ tabs, loading: false, title: host });
+    }, 200);
     return url;
   };
 
@@ -673,6 +740,23 @@ export function createMockBridge(): AgenaBridge {
       };
     },
 
+    async listUserMessages(sessionId: string): Promise<UserMessageAnchor[]> {
+      requireConnected();
+      return getSession(sessionId).events.flatMap((event) => {
+        if (event.type !== "message.user.created") return [];
+        return [
+          {
+            messageId: String(
+              (event.payload as { messageId?: unknown }).messageId ?? event.seq,
+            ),
+            seq: event.seq,
+            preview: eventText(event)?.text.slice(0, 320) ?? "",
+            createdAt: event.createdAt,
+          },
+        ];
+      });
+    },
+
     async search(
       query: string,
       opts?: { sessionId?: string; allProjects?: boolean; limit?: number },
@@ -852,6 +936,28 @@ export function createMockBridge(): AgenaBridge {
     async listPtys(): Promise<PtySummary[]> {
       requireConnected();
       return [];
+    },
+
+    async listPlugins(): Promise<PluginSummary[]> {
+      return mockPlugins.map((plugin) => ({ ...plugin }));
+    },
+    async installPlugin(id: string): Promise<PluginSummary> {
+      return updateMockPlugin(id, { status: "installed", enabled: true });
+    },
+    async updatePlugin(id: string): Promise<PluginSummary> {
+      return updateMockPlugin(id, { status: "ready", enabled: true });
+    },
+    async setPluginEnabled(
+      id: string,
+      enabled: boolean,
+    ): Promise<PluginSummary> {
+      return updateMockPlugin(id, {
+        status: enabled ? "installed" : "disabled",
+        enabled,
+      });
+    },
+    async removePlugin(id: string): Promise<PluginSummary> {
+      return updateMockPlugin(id, { status: "available", enabled: false });
     },
 
     async listProviders(): Promise<ProviderAuthSummary[]> {
@@ -1082,14 +1188,32 @@ export function createMockBridge(): AgenaBridge {
     },
 
     // ---- embedded browser (fake: no native WebContentsView in a bare browser) -----
-    async browserOpen(
-      url: string,
-      _opts?: BrowserOpenOptions,
-    ): Promise<string> {
-      return fakeLoad(url);
+    async browserOpen(url: string, opts?: BrowserOpenOptions): Promise<string> {
+      return fakeLoad(url, opts?.newTab);
     },
     async browserNavigate(action: BrowserNavAction): Promise<void> {
-      if (action.kind === "url") fakeLoad(action.url);
+      if (action.kind === "activate") {
+        const tab = browserState.tabs.find(
+          (item) => item.tabId === action.tabId,
+        );
+        if (tab) {
+          emitBrowser({ activeTabId: tab.tabId, ...tab });
+        }
+      } else if (action.kind === "close") {
+        const tabs = browserState.tabs.filter(
+          (item) => item.tabId !== action.tabId,
+        );
+        const tab = tabs.at(-1);
+        emitBrowser({
+          tabs,
+          activeTabId: tab?.tabId ?? null,
+          url: tab?.url ?? null,
+          title: tab?.title ?? null,
+          loading: tab?.loading ?? false,
+          canGoBack: tab?.canGoBack ?? false,
+          canGoForward: tab?.canGoForward ?? false,
+        });
+      } else if (action.kind === "url") fakeLoad(action.url);
       else if (action.kind === "reload" && browserState.url) {
         fakeLoad(browserState.url);
       } else if (action.kind === "stop") emitBrowser({ loading: false });
@@ -1104,6 +1228,8 @@ export function createMockBridge(): AgenaBridge {
     },
     async browserClose(): Promise<void> {
       emitBrowser({
+        tabs: [],
+        activeTabId: null,
         url: null,
         title: null,
         loading: false,

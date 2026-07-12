@@ -21,6 +21,8 @@ type BrowserStore = BrowserState & {
 };
 
 const initial: BrowserState & { address: string; focusNonce: number } = {
+  tabs: [],
+  activeTabId: null,
   url: null,
   title: null,
   loading: false,

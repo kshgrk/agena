@@ -36,10 +36,31 @@ export interface CreateRuntimeSessionInput {
   runtimeSessionRef?: string; // Pi JSONL path when rehydrating
   model?: ModelRef;
   visibleBrowser?: VisibleBrowserController;
+  subagents?: SubagentController;
+  /** Explicit runtime tool allowlist. Omitted for ordinary primary sessions. */
+  toolNames?: string[];
 }
 
 export interface VisibleBrowserController {
   request(action: VisibleBrowserAction): Promise<VisibleBrowserResult>;
+}
+
+/** Runtime-neutral bridge for the model-facing delegation tool. */
+export interface SubagentController {
+  run(input: {
+    parentSessionId: string;
+    parentToolCallId: string;
+    tasks: Array<{ role: string; task: string; model?: ModelRef }>;
+    signal?: AbortSignal;
+  }): Promise<{
+    tasks: Array<{
+      taskId: string;
+      childSessionId: string;
+      role: string;
+      status: "completed" | "failed" | "cancelled";
+      summary: ContentBlock[];
+    }>;
+  }>;
 }
 
 export interface RuntimeSession {

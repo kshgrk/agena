@@ -39,6 +39,7 @@ import type {
   UserBlock,
 } from "../../store/types.ts";
 import { Badge, cx } from "../../ui/index.ts";
+import { SubagentReceipt } from "../agents/task-group.tsx";
 import { Markdown } from "./markdown.tsx";
 import { ThinkingDisclosure } from "./thinking.tsx";
 import { ToolCard, textOf } from "./tool-card.tsx";
@@ -367,6 +368,7 @@ function MarkerRow({ block }: { block: MarkerBlock }) {
 
 export type BlockViewProps = {
   block: Block;
+  sessionId?: string;
   /** Tool-card grouping flags from rowMeta (design.md §7 stacked groups). */
   flushTop?: boolean;
   flushBottom?: boolean;
@@ -375,6 +377,7 @@ export type BlockViewProps = {
 /** Memoized: settled blocks keep stable identity; only patched blocks re-render. */
 export const BlockView = memo(function BlockView({
   block,
+  sessionId,
   flushTop,
   flushBottom,
 }: BlockViewProps) {
@@ -384,6 +387,15 @@ export const BlockView = memo(function BlockView({
     case "assistant":
       return <AssistantRow block={block} />;
     case "tool":
+      if (block.name === "subagent" && sessionId) {
+        return (
+          <SubagentReceipt
+            parentSessionId={sessionId}
+            parentToolCallId={block.toolCallId}
+            running={block.status === "running"}
+          />
+        );
+      }
       return (
         <ToolCard block={block} flushTop={flushTop} flushBottom={flushBottom} />
       );

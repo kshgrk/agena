@@ -39,8 +39,10 @@ import {
   type MapperState,
   mapPiEvent,
 } from "./event-map.ts";
+import { PiPackageService } from "./package-service.ts";
 import { PiProviderService } from "./provider-service.ts";
 import { sessionNameExtension } from "./session-name-extension.ts";
+import { createSubagentTool } from "./subagent-tool.ts";
 import { createVisibleBrowserTool } from "./visible-browser-tool.ts";
 
 /** The exact-pinned Pi SDK version (§8.9), surfaced at /v1/diagnostics. */
@@ -48,6 +50,8 @@ export const PI_SDK_VERSION: string = VERSION;
 
 /** Pi reads its config root from this env var — the plan's "PI_DIR" (§3.3). */
 export const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
+
+const CORE_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 export interface PiRuntimeOptions {
   /** Pi state root (§3.3). Default: $AGENA_STATE_DIR/pi, else /var/lib/agena/pi. */
@@ -69,6 +73,7 @@ export function containedResourceLoader(
   cwd: string,
   agentDir: string,
   visibleBrowser?: CreateRuntimeSessionInput["visibleBrowser"],
+  packageSources: string[] = [],
 ): DefaultResourceLoader {
   const browser = browserExtensionSource();
   const mcp = mcpExtensionSource();
@@ -80,7 +85,11 @@ export function containedResourceLoader(
     // Opt-in agent browser tool only (AGENA_BROWSER_TOOL=1). additionalExtensionPaths
     // still load under noExtensions:true — only filesystem auto-discovery is disabled —
     // so containment is unchanged when the tool is off (browser === null → []).
-    additionalExtensionPaths: [...(browser ? [browser] : []), mcp],
+    additionalExtensionPaths: [
+      ...(browser ? [browser] : []),
+      mcp,
+      ...packageSources,
+    ],
     extensionFactories: [
       sessionNameExtension,
       ...(visibleBrowser ? [mcpSystemOAuthExtension(visibleBrowser)] : []),
@@ -92,6 +101,20 @@ export function containedResourceLoader(
     additionalSkillPaths: [skillRoot],
     noPromptTemplates: true,
     noThemes: true,
+    extensionsOverride: (result) => {
+      const extensions = result.extensions.filter((extension) => {
+        const conflict = CORE_TOOL_NAMES.find((name) =>
+          extension.tools.has(name),
+        );
+        if (!conflict) return true;
+        result.errors.push({
+          path: extension.path,
+          error: `extension cannot override Agena core tool "${conflict}"`,
+        });
+        return false;
+      });
+      return { ...result, extensions };
+    },
   });
 }
 
@@ -177,6 +200,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly version = PI_SDK_VERSION;
   readonly piDir: string;
   readonly providers: PiProviderService;
+  readonly packages: PiPackageService;
   #capturesDir: string;
   #defaultModel: string | undefined;
   #sessions = new Map<string, PiRuntimeSession>();
@@ -201,6 +225,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       piDir: this.piDir,
       onCredentialsChanged: () => this.reloadExtensions(),
     });
+    this.packages = new PiPackageService({
+      piDir: this.piDir,
+    });
   }
 
   async createSession(
@@ -222,11 +249,20 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       input.cwd,
       this.piDir,
       input.visibleBrowser,
+      this.packages.extensionSources,
     );
     await resourceLoader.reload();
-    const customTools = input.visibleBrowser
-      ? [createVisibleBrowserTool(input.visibleBrowser, input.sessionId)]
-      : [];
+    const extensionTools = resourceLoader
+      .getExtensions()
+      .extensions.flatMap((extension) => [...extension.tools.keys()]);
+    const customTools = [
+      ...(input.visibleBrowser
+        ? [createVisibleBrowserTool(input.visibleBrowser, input.sessionId)]
+        : []),
+      ...(input.subagents
+        ? [createSubagentTool(input.subagents, input.sessionId)]
+        : []),
+    ];
 
     const { session, extensionsResult, modelFallbackMessage } =
       await createAgentSession({
@@ -244,18 +280,20 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         // named here. agent_browser joins only when its extension actually
         // resolved (same gate the loader uses), so a missing package degrades
         // to exactly the baseline toolset.
-        tools: [
-          "read",
-          "bash",
-          "edit",
-          "write",
-          "grep",
-          "find",
-          "ls",
-          ...(input.visibleBrowser ? ["visible_browser"] : []),
-          ...(browserExtensionSource() !== null ? ["agent_browser"] : []),
-          "mcp",
-        ],
+        tools: (
+          input.toolNames ?? [
+            ...new Set([
+              ...CORE_TOOL_NAMES,
+              ...(input.visibleBrowser ? ["visible_browser"] : []),
+              ...(input.subagents ? ["subagent"] : []),
+              ...(browserExtensionSource() !== null ? ["agent_browser"] : []),
+              "mcp",
+              ...extensionTools,
+            ]),
+          ]
+        ).filter((name) =>
+          input.toolNames ? input.toolNames.includes(name) : true,
+        ),
         customTools,
         ...(model ? { model } : {}), // absent → Pi settings default (§8.3 fallback)
       });
