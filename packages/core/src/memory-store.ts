@@ -1,6 +1,7 @@
 // InMemoryEventStore (§7.4, §3.2): the M1 production store AND the permanent
 // test double (P8/P16). Daemon-lifetime only — a restart loses history, by design.
 
+import { createHash } from "node:crypto";
 import type {
   AgenaEvent,
   SessionStatus,
@@ -11,6 +12,7 @@ import { ulid } from "ulid";
 import {
   type AppendEventsInput,
   type AppendEventsResult,
+  type CreateDerivedSessionInput,
   type CreateSessionInput,
   type CreateSnapshotRecordInput,
   type EventStore,
@@ -36,6 +38,18 @@ export class InMemoryEventStore implements EventStore {
   #sessions = new Map<string, SessionState>();
   #snapshots = new Map<string, SnapshotSummary>();
   #listeners = new Set<CommitListener>();
+  #blobs = new Map<string, { bytes: Uint8Array; mimeType: string }>();
+
+  async putBlob(bytes: Uint8Array, mimeType: string) {
+    const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    this.#blobs.set(hash, { bytes: bytes.slice(), mimeType });
+    return { blob: hash, sizeBytes: bytes.byteLength, mimeType };
+  }
+
+  async readBlob(hash: string) {
+    const blob = this.#blobs.get(hash);
+    return blob ? { bytes: blob.bytes.slice(), mimeType: blob.mimeType } : null;
+  }
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const now = new Date().toISOString();
@@ -76,6 +90,116 @@ export class InMemoryEventStore implements EventStore {
       ],
     });
     return record;
+  }
+
+  async createDerivedSession(
+    input: CreateDerivedSessionInput,
+  ): Promise<SessionRecord> {
+    const parent = this.#sessions.get(input.parentSessionId);
+    if (!parent) {
+      throw new StoreError(
+        "session_not_found",
+        `unknown session ${input.parentSessionId}`,
+      );
+    }
+    if (input.mode === "fork" && !input.sourceMessageId) {
+      throw new StoreError(
+        "invalid_payload",
+        "sourceMessageId is required for fork",
+      );
+    }
+    if (
+      input.sourceMessageId &&
+      !parent.events.some(
+        (event) =>
+          (event.type === "message.user.created" ||
+            event.type === "message.assistant.completed") &&
+          (event.payload as { messageId?: unknown }).messageId ===
+            input.sourceMessageId,
+      )
+    ) {
+      throw new StoreError(
+        "invalid_payload",
+        "sourceMessageId does not belong to parent session",
+      );
+    }
+    const now = new Date().toISOString();
+    const record: SessionRecord = {
+      sessionId: ulid(),
+      workspaceId: parent.record.workspaceId,
+      ...((input.title ?? parent.record.title)
+        ? { title: input.title ?? parent.record.title }
+        : {}),
+      rootBranchId: ulid(),
+      lastSeq: 0,
+      createdAt: now,
+      updatedAt: now,
+      status: "active",
+      origin: parent.record.origin,
+      scope: parent.record.scope,
+      ...(parent.record.projectId
+        ? { projectId: parent.record.projectId }
+        : {}),
+      ...(parent.record.projectRoot
+        ? { projectRoot: parent.record.projectRoot }
+        : {}),
+      cwd: parent.record.cwd,
+      ...(parent.record.hostCwdHint
+        ? { hostCwdHint: parent.record.hostCwdHint }
+        : {}),
+      sessionKind: "primary",
+      parentSessionId: parent.record.sessionId,
+      derivedFrom: {
+        parentSessionId: parent.record.sessionId,
+        ...(input.sourceMessageId
+          ? { sourceMessageId: input.sourceMessageId }
+          : {}),
+        mode: input.mode,
+      },
+    };
+    this.#sessions.set(record.sessionId, { record, events: [] });
+    await this.appendEvents({
+      sessionId: record.sessionId,
+      branchId: record.rootBranchId,
+      events: [
+        {
+          type: "session.created",
+          v: 1,
+          source: input.source ?? { kind: "user" },
+          payload: {
+            workspaceId: record.workspaceId,
+            ...(record.title ? { title: record.title } : {}),
+            runtime: "pi",
+            origin: record.origin,
+            scope: record.scope,
+            ...(record.projectId ? { projectId: record.projectId } : {}),
+            ...(record.projectRoot ? { projectRoot: record.projectRoot } : {}),
+            cwd: record.cwd,
+            ...(record.hostCwdHint ? { hostCwdHint: record.hostCwdHint } : {}),
+            rootBranchId: record.rootBranchId,
+            derivedFrom: record.derivedFrom,
+          },
+        },
+      ],
+    });
+    return record;
+  }
+
+  async getRuntimeMessageRef(
+    sessionId: string,
+    messageId: string,
+  ): Promise<string | null> {
+    const event = this.#sessions
+      .get(sessionId)
+      ?.events.find(
+        (candidate) =>
+          candidate.type === "message.runtime.ref" &&
+          (candidate.payload as { messageId?: unknown }).messageId ===
+            messageId,
+      );
+    const runtimeEntryId = (event?.payload as { runtimeEntryId?: unknown })
+      ?.runtimeEntryId;
+    return typeof runtimeEntryId === "string" ? runtimeEntryId : null;
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | null> {

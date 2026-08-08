@@ -18,7 +18,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import type { Server } from "node:http";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type {
@@ -40,18 +41,23 @@ import type {
 import {
   AgentOrchestrator,
   InMemoryEventStore,
+  OrchestratorError,
   PathViolation,
   resolveWorkspacePath,
   SessionOrchestrator,
+  StoreError,
 } from "@agena/core";
 import { synthesizeEvents } from "@agena/importer";
 import {
   type CreateSessionRequest,
   completeMcpOAuthRequestSchema,
+  createDerivedSessionRequestSchema,
+  createPairingRequestSchema,
   createProjectRequestSchema,
   createPtyRequestSchema,
   createSessionRequestSchema,
   createSnapshotRequestSchema,
+  createWsTicketRequestSchema,
   type DeleteProjectResponse,
   type DiscoveryEntry,
   type FileEntry,
@@ -59,18 +65,23 @@ import {
   fileContentQuerySchema,
   fileUploadQuerySchema,
   type ImportLedgerEntry,
+  type ImportSessionRequest,
+  type ImportSessionResponse,
   importMcpRequestSchema,
   importSessionRequestSchema,
+  importSessionsRequestSchema,
   importSkillRequestSchema,
   type ListSessionsQuery,
   listApprovalsQuerySchema,
   listFilesQuerySchema,
   listImportsQuerySchema,
   listSessionsQuerySchema,
+  navigateSessionRequestSchema,
   PROTOCOL_VERSION,
   pluginIdParamsSchema,
   providerIdParamsSchema,
   providerOAuthFlowParamsSchema,
+  redeemPairingRequestSchema,
   respondProviderOAuthRequestSchema,
   restoreSnapshotRequestSchema,
   type SessionSummary,
@@ -88,12 +99,33 @@ import type { DaemonConfig } from "./config.ts";
 import { DAEMON_VERSION, Gateway } from "./gateway.ts";
 import { log } from "./log.ts";
 import { McpService } from "./mcp-service.ts";
+import { OneTimeTokenStore } from "./one-time-tokens.ts";
 import { PluginService } from "./plugin-service.ts";
 import { ProviderAuthService } from "./provider-auth-service.ts";
 import { PtyManager } from "./pty-manager.ts";
 import { SkillService } from "./skill-service.ts";
 import { SnapshotManager } from "./snapshots.ts";
 import { TunnelManager } from "./tunnel-manager.ts";
+
+function sniffImageMime(bytes: Uint8Array): string | null {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return "image/jpeg";
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  )
+    return "image/png";
+  const ascii = (start: number, value: string) =>
+    [...value].every(
+      (character, index) => bytes[start + index] === character.charCodeAt(0),
+    );
+  if (ascii(0, "GIF87a") || ascii(0, "GIF89a")) return "image/gif";
+  if (ascii(0, "RIFF") && ascii(8, "WEBP")) return "image/webp";
+  if (ascii(0, "BM")) return "image/bmp";
+  return null;
+}
 
 export interface Daemon {
   port: number;
@@ -174,19 +206,20 @@ function pluginError(c: Context, error: unknown) {
   );
 }
 
-/** WS upgrades also accept `?token=` — browser WebSocket cannot set headers. */
 function upgradeTokenOk(
   req: {
     headers: { authorization?: string | undefined };
     url?: string | undefined;
   },
   token: string,
+  tickets: OneTimeTokenStore,
+  path: string,
 ): boolean {
   if (tokenOk(req.headers.authorization, token)) return true;
   const qs = (req.url ?? "").split("?")[1];
   if (!qs) return false;
-  const given = new URLSearchParams(qs).get("token");
-  return given !== null && tokenValueOk(given, token);
+  const ticket = new URLSearchParams(qs).get("ticket");
+  return ticket !== null && tickets.consume(ticket, path);
 }
 
 async function validateSessionScope(
@@ -275,7 +308,11 @@ function projectIdFor(name: string): string {
   return `prj_${name.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
 }
 
-async function createProject(workspaceDir: string, name: string) {
+async function createProject(
+  workspaceDir: string,
+  name: string,
+  reuseExisting = false,
+) {
   const slug = projectSlug(name);
   const absolute = await resolveWorkspacePath(workspaceDir, slug, {
     forWrite: true,
@@ -283,7 +320,8 @@ async function createProject(workspaceDir: string, name: string) {
   try {
     const info = await lstat(absolute);
     if (!info.isDirectory()) throw new Error("PROJECT_EXISTS");
-    if ((await readdir(absolute)).length > 0) throw new Error("PROJECT_EXISTS");
+    if (!reuseExisting && (await readdir(absolute)).length > 0)
+      throw new Error("PROJECT_EXISTS");
   } catch (err) {
     const code = err instanceof Error ? (err as { code?: string }).code : "";
     if (code !== "ENOENT") throw err;
@@ -512,6 +550,8 @@ export async function startDaemon(
   }
 
   const startedAt = Date.now();
+  const wsTickets = new OneTimeTokenStore();
+  const pairings = new OneTimeTokenStore();
   const app = new Hono();
   // §9.3: /health is unauthenticated by design.
   app.get("/health", (c) =>
@@ -538,6 +578,10 @@ export async function startDaemon(
   // §9.3 session routes.
   // ponytail: GET/PATCH /v1/sessions/:id lands with richer session management.
   app.use("/v1/*", async (c, next) => {
+    if (c.req.path === "/v1/pairings/redeem") {
+      await next();
+      return;
+    }
     if (!tokenOk(c.req.header("authorization"), config.token)) {
       return c.json(
         { code: "UNAUTHORIZED", message: "invalid token", retryable: false },
@@ -545,6 +589,43 @@ export async function startDaemon(
       );
     }
     await next();
+  });
+  app.post("/v1/ws-tickets", async (c) => {
+    const parsed = createWsTicketRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success) return invalidProviderRequest(c);
+    const created = wsTickets.create(parsed.data.path, 30_000);
+    return c.json({
+      ticket: created.token,
+      expiresAt: created.expiresAt.toISOString(),
+    });
+  });
+  app.post("/v1/pairings", async (c) => {
+    const parsed = createPairingRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success) return invalidProviderRequest(c);
+    const created = pairings.create(parsed.data.daemonUrl, 5 * 60_000);
+    const uri = new URL("agena://pair");
+    uri.searchParams.set("url", parsed.data.daemonUrl);
+    uri.searchParams.set("token", created.token);
+    return c.json({
+      pairingUri: uri.toString(),
+      expiresAt: created.expiresAt.toISOString(),
+    });
+  });
+  app.post("/v1/pairings/redeem", async (c) => {
+    const header = c.req.header("authorization");
+    const pairingToken = header?.startsWith("Bearer ")
+      ? header.slice("Bearer ".length)
+      : "";
+    const daemonUrl = pairingToken ? pairings.take(pairingToken) : null;
+    if (!daemonUrl) {
+      return c.json(
+        { code: "UNAUTHORIZED", message: "invalid pairing", retryable: false },
+        401,
+      );
+    }
+    const parsed = redeemPairingRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success) return invalidProviderRequest(c);
+    return c.json({ daemonUrl, token: config.token });
   });
   app.get("/v1/diagnostics", async (c) =>
     c.json({
@@ -554,6 +635,52 @@ export async function startDaemon(
       discovery: await discoverAgena(config.workspaceDir),
     }),
   );
+  app.post("/v1/images", async (c) => {
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > 3_000_000) {
+      return c.json(
+        {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "image must be between 1 byte and 3 MB",
+          retryable: false,
+        },
+        413,
+      );
+    }
+    const mimeType = sniffImageMime(bytes);
+    if (!mimeType) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "supported images are JPEG, PNG, GIF, WebP, and BMP",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    return c.json({
+      ref: await store.putBlob(bytes, mimeType),
+    });
+  });
+  app.get("/v1/blobs/:hash", async (c) => {
+    const stored = await store.readBlob(`sha256:${c.req.param("hash")}`);
+    if (!stored) {
+      return c.json(
+        { code: "NOT_FOUND", message: "blob not found", retryable: false },
+        404,
+      );
+    }
+    const body = stored.bytes.buffer.slice(
+      stored.bytes.byteOffset,
+      stored.bytes.byteOffset + stored.bytes.byteLength,
+    ) as ArrayBuffer;
+    return new Response(body, {
+      headers: {
+        "content-type": stored.mimeType ?? "application/octet-stream",
+        "cache-control": "private, max-age=31536000, immutable",
+      },
+    });
+  });
   app.get("/v1/mcps", (c) => c.json({ mcps: mcps?.list() ?? [] }));
   app.get("/v1/plugins", (c) => c.json({ plugins: plugins.list() }));
   app.post("/v1/plugins/:id/install", async (c) => {
@@ -897,7 +1024,11 @@ export async function startDaemon(
     }
     try {
       return c.json(
-        await createProject(config.workspaceDir, parsed.data.name),
+        await createProject(
+          config.workspaceDir,
+          parsed.data.name,
+          parsed.data.reuseExisting,
+        ),
         201,
       );
     } catch (err) {
@@ -977,223 +1108,18 @@ export async function startDaemon(
         400,
       );
     }
-    const imports = importStore(store);
-    if (!imports) {
-      return c.json(
-        {
-          code: "INTERNAL",
-          message: "store does not support imports",
-          retryable: false,
-        },
-        500,
-      );
-    }
-    const fp = parsed.data.sourceFingerprint;
-    const subagent = parsed.data.subagent;
-    const existing = imports.findImport(
-      fp.machineId,
-      fp.harness,
-      fp.sourceSessionId,
-    );
-    if (existing?.sessionId) {
-      return c.json({
-        sessionId: existing.sessionId,
-        seededEvents: 0,
-        alreadyImported: true,
-      });
-    }
-    const header = piSessionHeader(parsed.data.piSession);
-    if (!header) {
-      return c.json(
-        {
-          code: "INVALID_PAYLOAD",
-          message: "piSession must be pi v3 JSONL with a session header",
-          retryable: false,
-        },
-        400,
-      );
-    }
     try {
-      const scope = await validateSessionScope(config.workspaceDir, {
-        scope: "project",
-        projectId: parsed.data.projectId,
-        projectRoot: parsed.data.projectRoot,
-      });
-      // Same layout SessionManager writes (`--<cwd-dashes>--/<ts>_<id>.jsonl`)
-      // under the piDir the runtime adapter derives from AGENA_STATE_DIR.
-      const sessionFile = join(
-        config.stateDir,
-        "pi",
-        "sessions",
-        `--${header.cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
-        `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`,
-      );
-      await mkdir(dirname(sessionFile), { recursive: true });
-      await writeFile(sessionFile, parsed.data.piSession);
-      const origin =
-        fp.harness === "claude"
-          ? ("import.claude" as const)
-          : fp.harness === "codex"
-            ? ("import.codex" as const)
-            : undefined; // pi sources are already pi-native
-      const parent = subagent
-        ? imports.findImport(
-            fp.machineId,
-            fp.harness,
-            subagent.parentSourceSessionId,
-          )
-        : null;
-      const parentSessionId = parent?.sessionId;
-      if (subagent && !parentSessionId) {
-        return c.json(
-          {
-            code: "INVALID_PAYLOAD",
-            message: "parent session must be imported before its subagents",
-            retryable: false,
-          },
-          400,
-        );
-      }
-      const taskId = subagent
-        ? `import:${fp.harness}:${fp.sourceSessionId}`
-        : null;
-      const taskStore = subagent ? agentTasks(store) : null;
-      if (subagent && !taskStore) {
-        return c.json(
-          {
-            code: "INTERNAL",
-            message: "store does not support imported subagents",
-            retryable: false,
-          },
-          500,
-        );
-      }
-      let session: SessionRecord;
-      if (subagent && taskStore && parentSessionId && taskId) {
-        session = (
-          await taskStore.createSubagentSession({
-            parentSessionId,
-            title: parsed.data.title ?? subagent.role,
-            source: { kind: "importer" },
-            ...(origin ? { origin } : {}),
-            task: {
-              taskId,
-              parentRunId: `import:${subagent.parentSourceSessionId}`,
-              parentMessageId: `import:${subagent.parentSourceSessionId}`,
-              parentToolCallId: `import:${subagent.agentId}`,
-              role: subagent.role,
-              task: subagent.task,
-              execution: subagent.execution,
-              context: "fresh",
-              workspaceMode: "shared_readonly",
-              requestedModel: subagent.model,
-              resolvedModel: subagent.model,
-            },
-          })
-        ).session;
-      } else {
-        session = await store.createSession({
-          workspaceId: "default",
-          ...(parsed.data.title !== undefined
-            ? { title: parsed.data.title }
-            : {}),
-          scope: "project",
-          cwd: scope.cwd,
-          ...(scope.projectId ? { projectId: scope.projectId } : {}),
-          ...(scope.projectRoot ? { projectRoot: scope.projectRoot } : {}),
-          source: { kind: "importer" },
-          ...(origin ? { origin } : {}),
-        });
-      }
-      // Claim the fingerprint right after creating the session: a concurrent
-      // duplicate POST loses on UNIQUE(machine_id, harness, source_session_id)
-      // here, and a later failure (event seeding) still leaves the ledger row,
-      // so a retry dedupes instead of duplicating the session.
-      // ponytail: not one transaction — a crash between createSession and this
-      // insert can orphan one session; a store-level import txn fixes it.
-      try {
-        imports.insertImport({
-          sessionId: session.sessionId,
-          projectId: parsed.data.projectId,
-          machineId: fp.machineId,
-          harness: fp.harness,
-          sourcePath: fp.sourcePath,
-          sourceSessionId: fp.sourceSessionId,
-          sourceMtimeMs: fp.mtimeMs,
-          sourceSize: fp.size,
-        });
-      } catch (err) {
-        const winner = imports.findImport(
-          fp.machineId,
-          fp.harness,
-          fp.sourceSessionId,
-        );
-        if (!winner?.sessionId) throw err;
-        // lost the race — hide the extra session and defer to the winner
-        await sessionStatusStore(store)?.updateSessionStatus(
-          session.sessionId,
-          "archived",
-        );
-        return c.json({
-          sessionId: winner.sessionId,
-          seededEvents: 0,
-          alreadyImported: true,
-        });
-      }
-      await imports.updateRuntimeSessionRef(session.sessionId, sessionFile);
-      const events = synthesizeEvents(
-        parsed.data.piSession,
-        parsed.data.title !== undefined ? { title: parsed.data.title } : {},
-      );
-      await store.appendEvents({
-        sessionId: session.sessionId,
-        branchId: session.rootBranchId,
-        events,
-      });
-      if (subagent && taskId && parentSessionId) {
-        const parentSession = await store.getSession(parentSessionId);
-        if (!parentSession)
-          throw new Error("imported parent session disappeared");
-        await store.appendEvents({
-          sessionId: parentSessionId,
-          branchId: parentSession.rootBranchId,
-          events: [
-            {
-              type: "agent.task.started",
-              v: 1,
-              source: { kind: "importer" },
-              payload: { taskId, startedAt: header.timestamp },
-            },
-            {
-              type: "agent.task.completed",
-              v: 1,
-              source: { kind: "importer" },
-              payload: {
-                taskId,
-                resultMessageId: `import:${fp.sourceSessionId}:result`,
-                summary: [],
-              },
-            },
-          ],
-        });
-      }
-      return c.json(
-        {
-          sessionId: session.sessionId,
-          seededEvents: events.length,
-          alreadyImported: false,
-        },
-        201,
-      );
+      const result = await importSession(store, config, parsed.data);
+      return c.json(result, result.alreadyImported ? 200 : 201);
     } catch (err) {
-      if (err instanceof Error && err.message === "INVALID_CWD") {
+      if (err instanceof ImportRequestError) {
         return c.json(
           {
-            code: "INVALID_PAYLOAD",
-            message: "projectRoot must exist under /workspace",
+            code: err.code,
+            message: err.message,
             retryable: false,
           },
-          400,
+          err.status,
         );
       }
       log("error", "session import failed", { err: String(err) });
@@ -1206,6 +1132,43 @@ export async function startDaemon(
         500,
       );
     }
+  });
+  app.post("/v1/imports/sessions", async (c) => {
+    const parsed = importSessionsRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid session import batch",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    const sessions = [];
+    for (const input of parsed.data.sessions) {
+      try {
+        sessions.push({
+          sourcePath: input.sourceFingerprint.sourcePath,
+          result: await importSession(store, config, input),
+        });
+      } catch (err) {
+        const message =
+          err instanceof ImportRequestError
+            ? err.message
+            : "session import failed";
+        if (!(err instanceof ImportRequestError))
+          log("error", "batched session import failed", { err: String(err) });
+        sessions.push({
+          sourcePath: input.sourceFingerprint.sourcePath,
+          error: message,
+        });
+      }
+    }
+    return c.json({ sessions });
   });
   app.get("/v1/imports", async (c) => {
     const parsed = listImportsQuerySchema.safeParse(c.req.query());
@@ -1223,6 +1186,7 @@ export async function startDaemon(
     const imports = importStore(store);
     return c.json({
       imports: imports ? imports.listImports(parsed.data.machineId) : [],
+      capabilities: { session: true, batch: true },
     });
   });
   app.post("/v1/sessions", async (c) => {
@@ -1266,6 +1230,85 @@ export async function startDaemon(
             retryable: false,
           },
           400,
+        );
+      }
+      throw err;
+    }
+  });
+  app.post("/v1/sessions/:id/derived", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = createDerivedSessionRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid derived session request",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      const session = await orchestrator.forkSession({
+        parentSessionId: c.req.param("id"),
+        mode: parsed.data.mode,
+        ...(parsed.data.sourceMessageId
+          ? { sourceMessageId: parsed.data.sourceMessageId }
+          : {}),
+        ...(parsed.data.title ? { title: parsed.data.title } : {}),
+      });
+      return c.json({ sessionId: session.sessionId }, 201);
+    } catch (err) {
+      if (err instanceof OrchestratorError) {
+        const status = err.code === "SESSION_NOT_FOUND" ? 404 : 409;
+        return c.json(
+          { code: err.code, message: err.message, retryable: false },
+          status,
+        );
+      }
+      if (err instanceof StoreError) {
+        return c.json(
+          {
+            code:
+              err.code === "session_not_found"
+                ? "SESSION_NOT_FOUND"
+                : "INVALID_PAYLOAD",
+            message: err.message,
+            retryable: false,
+          },
+          err.code === "session_not_found" ? 404 : 400,
+        );
+      }
+      throw err;
+    }
+  });
+  app.post("/v1/sessions/:id/navigate", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = navigateSessionRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid session navigation request",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      return c.json(
+        await orchestrator.navigateToMessage(
+          c.req.param("id"),
+          parsed.data.sourceMessageId,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof OrchestratorError) {
+        return c.json(
+          { code: err.code, message: err.message, retryable: false },
+          err.code === "SESSION_NOT_FOUND" ? 404 : 409,
         );
       }
       throw err;
@@ -1736,14 +1779,14 @@ export async function startDaemon(
   );
 
   server.on("upgrade", (req, socket, head) => {
-    if (!upgradeTokenOk(req, config.token)) {
+    const path = (req.url ?? "").split("?")[0] ?? "";
+    if (!upgradeTokenOk(req, config.token, wsTickets, path)) {
       socket.write(
         "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
       );
       socket.destroy();
       return;
     }
-    const path = (req.url ?? "").split("?")[0] ?? "";
     const tunnelMatch = /^\/v1\/tunnels\/(\d+)\/ws$/.exec(path);
     if (tunnelMatch?.[1]) {
       tunnels.handleUpgrade(req, socket, head, Number(tunnelMatch[1]));
@@ -1869,6 +1912,212 @@ function piSessionHeader(
   return { id: h.id, timestamp: h.timestamp, cwd: h.cwd };
 }
 
+class ImportRequestError extends Error {
+  readonly code: "INVALID_PAYLOAD" | "INTERNAL";
+  readonly status: 400 | 500;
+
+  constructor(
+    code: "INVALID_PAYLOAD" | "INTERNAL",
+    status: 400 | 500,
+    message: string,
+  ) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+async function importSession(
+  store: EventStore,
+  config: DaemonConfig,
+  input: ImportSessionRequest,
+): Promise<ImportSessionResponse> {
+  const imports = importStore(store);
+  if (!imports)
+    throw new ImportRequestError(
+      "INTERNAL",
+      500,
+      "store does not support imports",
+    );
+  const fp = input.sourceFingerprint;
+  const subagent = input.subagent;
+  const existing = imports.findImport(
+    fp.machineId,
+    fp.harness,
+    fp.sourceSessionId,
+  );
+  if (existing?.sessionId)
+    return {
+      sessionId: existing.sessionId,
+      seededEvents: 0,
+      alreadyImported: true,
+    };
+  const header = piSessionHeader(input.piSession);
+  if (!header)
+    throw new ImportRequestError(
+      "INVALID_PAYLOAD",
+      400,
+      "piSession must be pi v3 JSONL with a session header",
+    );
+  let scope: Awaited<ReturnType<typeof validateSessionScope>>;
+  try {
+    scope = await validateSessionScope(config.workspaceDir, {
+      scope: "project",
+      projectId: input.projectId,
+      projectRoot: input.projectRoot,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "INVALID_CWD")
+      throw new ImportRequestError(
+        "INVALID_PAYLOAD",
+        400,
+        "projectRoot must exist under /workspace",
+      );
+    throw err;
+  }
+  const sessionFile = join(
+    config.stateDir,
+    "pi",
+    "sessions",
+    `--${header.cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
+    `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`,
+  );
+  await mkdir(dirname(sessionFile), { recursive: true });
+  await writeFile(sessionFile, input.piSession);
+  const origin =
+    fp.harness === "claude"
+      ? ("import.claude" as const)
+      : fp.harness === "codex"
+        ? ("import.codex" as const)
+        : undefined;
+  const parent = subagent
+    ? imports.findImport(
+        fp.machineId,
+        fp.harness,
+        subagent.parentSourceSessionId,
+      )
+    : null;
+  const parentSessionId = parent?.sessionId;
+  if (subagent && !parentSessionId)
+    throw new ImportRequestError(
+      "INVALID_PAYLOAD",
+      400,
+      "parent session must be imported before its subagents",
+    );
+  const taskId = subagent ? `import:${fp.harness}:${fp.sourceSessionId}` : null;
+  const taskStore = subagent ? agentTasks(store) : null;
+  if (subagent && !taskStore)
+    throw new ImportRequestError(
+      "INTERNAL",
+      500,
+      "store does not support imported subagents",
+    );
+  let session: SessionRecord;
+  if (subagent && taskStore && parentSessionId && taskId) {
+    session = (
+      await taskStore.createSubagentSession({
+        parentSessionId,
+        title: input.title ?? subagent.role,
+        source: { kind: "importer" },
+        ...(origin ? { origin } : {}),
+        task: {
+          taskId,
+          parentRunId: `import:${subagent.parentSourceSessionId}`,
+          parentMessageId: `import:${subagent.parentSourceSessionId}`,
+          parentToolCallId: `import:${subagent.agentId}`,
+          role: subagent.role,
+          task: subagent.task,
+          execution: subagent.execution,
+          context: "fresh",
+          workspaceMode: "shared_readonly",
+          requestedModel: subagent.model,
+          resolvedModel: subagent.model,
+        },
+      })
+    ).session;
+  } else {
+    session = await store.createSession({
+      workspaceId: "default",
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      scope: "project",
+      cwd: scope.cwd,
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+      ...(scope.projectRoot ? { projectRoot: scope.projectRoot } : {}),
+      source: { kind: "importer" },
+      ...(origin ? { origin } : {}),
+    });
+  }
+  try {
+    imports.insertImport({
+      sessionId: session.sessionId,
+      projectId: input.projectId,
+      machineId: fp.machineId,
+      harness: fp.harness,
+      sourcePath: fp.sourcePath,
+      sourceSessionId: fp.sourceSessionId,
+      sourceMtimeMs: fp.mtimeMs,
+      sourceSize: fp.size,
+    });
+  } catch (err) {
+    const winner = imports.findImport(
+      fp.machineId,
+      fp.harness,
+      fp.sourceSessionId,
+    );
+    if (!winner?.sessionId) throw err;
+    await sessionStatusStore(store)?.updateSessionStatus(
+      session.sessionId,
+      "archived",
+    );
+    return {
+      sessionId: winner.sessionId,
+      seededEvents: 0,
+      alreadyImported: true,
+    };
+  }
+  await imports.updateRuntimeSessionRef(session.sessionId, sessionFile);
+  const events = synthesizeEvents(
+    input.piSession,
+    input.title !== undefined ? { title: input.title } : {},
+  );
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events,
+  });
+  if (subagent && taskId && parentSessionId) {
+    const parentSession = await store.getSession(parentSessionId);
+    if (!parentSession) throw new Error("imported parent session disappeared");
+    await store.appendEvents({
+      sessionId: parentSessionId,
+      branchId: parentSession.rootBranchId,
+      events: [
+        {
+          type: "agent.task.started",
+          v: 1,
+          source: { kind: "importer" },
+          payload: { taskId, startedAt: header.timestamp },
+        },
+        {
+          type: "agent.task.completed",
+          v: 1,
+          source: { kind: "importer" },
+          payload: {
+            taskId,
+            resultMessageId: `import:${fp.sourceSessionId}:result`,
+            summary: [],
+          },
+        },
+      ],
+    });
+  }
+  return {
+    sessionId: session.sessionId,
+    seededEvents: events.length,
+    alreadyImported: false,
+  };
+}
+
 function closableStore(store: EventStore): ClosableStore | null {
   return "close" in store ? (store as EventStore & ClosableStore) : null;
 }
@@ -1885,9 +2134,12 @@ async function uploadTar(
   });
   const root = await resolveWorkspacePath(workspaceDir, ".");
   const rel = relative(root, target) || ".";
-  const tmp = await mkdtemp(join(root, ".agena-upload-"));
+  // Keep archive validation and extraction off the mounted workspace Volume:
+  // it is slower for short-lived metadata-heavy work than container-local SSD.
+  const tmp = await mkdtemp(join(tmpdir(), "agena-upload-"));
   const archive = join(tmp, "upload.tar");
   const extractDir = join(tmp, "content");
+  const stage = join(root, `.agena-upload-${basename(tmp)}`);
   try {
     await pipeline(
       Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]),
@@ -1905,9 +2157,12 @@ async function uploadTar(
     const fileCount = await countExtractedFiles(extractDir);
     await ensureReplaceableDirectory(target);
     await mkdir(dirname(target), { recursive: true });
-    await rename(extractDir, target);
+    await mkdir(stage);
+    await execOut("cp", ["-a", `${extractDir}/.`, stage]);
+    await rename(stage, target);
     return { path: rel, fileCount };
   } finally {
+    await rm(stage, { recursive: true, force: true });
     await rm(tmp, { recursive: true, force: true });
   }
 }

@@ -23,6 +23,7 @@ import type {
   SearchHit,
   SessionStatus,
   SessionSummary,
+  SetFastModeAck,
   SetModelAck,
   SetThinkingLevelAck,
   SnapshotSummary,
@@ -192,6 +193,7 @@ function eventText(
 }
 
 export function createMockBridge(): AgenaBridge {
+  const imageBlobs = new Map<string, Uint8Array>();
   const world = new World();
   const { seeds, ids } = buildFixtureSessions();
   for (const seed of seeds) world.addSession(seed);
@@ -510,6 +512,19 @@ export function createMockBridge(): AgenaBridge {
         thinkingLevel: s.runtime.thinkingLevel,
         availableModels: MODELS,
         availableThinkingLevels: THINKING_LEVELS,
+        fastMode: {
+          enabled: s.runtime.fastMode,
+          available: true,
+          active: s.runtime.fastMode,
+        },
+        sessionUsage: {
+          inputTokens: 6_310,
+          outputTokens: 420,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 6_730,
+          costUsd: 0.03,
+        },
         slashCommands: [],
       };
     },
@@ -543,6 +558,17 @@ export function createMockBridge(): AgenaBridge {
         SRC.daemon,
       );
       return { thinkingLevel };
+    },
+
+    async setFastMode(
+      sessionId: string,
+      enabled: boolean,
+    ): Promise<SetFastModeAck> {
+      requireConnected();
+      const s = getSession(sessionId);
+      s.runtime.fastMode = enabled;
+      world.append(sessionId, "fast.mode.changed", { enabled }, SRC.daemon);
+      return { enabled, available: true, active: enabled };
     },
 
     async compact(sessionId: string): Promise<CompactAck> {
@@ -622,6 +648,82 @@ export function createMockBridge(): AgenaBridge {
         SRC.daemon,
       );
       return sessionId;
+    },
+
+    async forkSession(sourceSessionId, sourceMessageId, mode) {
+      requireConnected();
+      const source = getSession(sourceSessionId);
+      if (mode === "fork" && !sourceMessageId) {
+        throw bridgeError(
+          "INVALID_PAYLOAD",
+          "a fork needs a source message",
+          false,
+        );
+      }
+      const sessionId = ulid();
+      const rootBranchId = ulid();
+      const now = new Date().toISOString();
+      const summary: SessionSummary = {
+        ...source.summary,
+        sessionId,
+        rootBranchId,
+        lastSeq: 0,
+        createdAt: now,
+        updatedAt: now,
+        status: "idle",
+        parentSessionId: sourceSessionId,
+        sessionKind: "primary",
+      };
+      world.addSession({
+        summary,
+        events: [],
+        live: null,
+        runtime: source.runtime,
+      });
+      world.append(
+        sessionId,
+        "session.created",
+        {
+          workspaceId: WORKSPACE_ID,
+          runtime: "pi",
+          origin: "native",
+          scope: source.summary.scope,
+          ...(source.summary.projectId
+            ? { projectId: source.summary.projectId }
+            : {}),
+          ...(source.summary.projectRoot
+            ? { projectRoot: source.summary.projectRoot }
+            : {}),
+          cwd: source.summary.cwd,
+          rootBranchId,
+          derivedFrom: {
+            parentSessionId: sourceSessionId,
+            ...(sourceMessageId ? { sourceMessageId } : {}),
+            mode,
+          },
+        },
+        SRC.daemon,
+      );
+      return { sessionId };
+    },
+
+    async navigateSession(sessionId, sourceMessageId) {
+      requireConnected();
+      const source = getSession(sessionId);
+      const event = source.events.find(
+        (candidate) =>
+          candidate.type === "message.user.created" &&
+          (candidate.payload as { messageId?: unknown }).messageId ===
+            sourceMessageId,
+      );
+      if (!event) {
+        throw bridgeError(
+          "INVALID_PAYLOAD",
+          "message is not in this session",
+          false,
+        );
+      }
+      return eventText(event)?.text ?? "";
     },
 
     async createProject(name: string): Promise<OpenedProject> {
@@ -817,6 +919,25 @@ export function createMockBridge(): AgenaBridge {
       }
       return new TextEncoder().encode(content);
     },
+    async uploadImage(bytes: Uint8Array, mimeType: string) {
+      const source = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      const digest = Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", source)),
+      )
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      const blob = `sha256:${digest}`;
+      imageBlobs.set(blob, bytes.slice());
+      return { blob, sizeBytes: bytes.byteLength, mimeType };
+    },
+    async readBlob(hash: string) {
+      const bytes = imageBlobs.get(hash);
+      if (!bytes) throw new Error("mock image blob not found");
+      return bytes.slice();
+    },
 
     async listSnapshots(): Promise<SnapshotSummary[]> {
       requireConnected();
@@ -930,6 +1051,15 @@ export function createMockBridge(): AgenaBridge {
             },
           ],
         },
+      };
+    },
+    async createPairing(daemonUrl: string) {
+      const link = new URL("agena://pair");
+      link.searchParams.set("url", daemonUrl);
+      link.searchParams.set("token", "mock-pairing-token");
+      return {
+        pairingUri: link.toString(),
+        expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
       };
     },
 

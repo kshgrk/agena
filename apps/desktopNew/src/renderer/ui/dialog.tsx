@@ -14,20 +14,28 @@ const sizeCls: Record<DialogSize, string> = {
 
 export type DialogProps = ComponentProps<typeof RadixDialog.Root> & {
   size?: DialogSize;
+  bottomSheet?: boolean;
   /** Content className. */
   className?: string;
   /** Include a <DialogTitle> for accessibility. */
   children: ReactNode;
 };
 
-export function Dialog({ size = "md", className, children, ...root }: DialogProps) {
+export function Dialog({
+  size = "md",
+  bottomSheet = false,
+  className,
+  children,
+  ...root
+}: DialogProps) {
   return (
     <RadixDialog.Root {...root}>
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="fixed inset-0 z-40 bg-canvas/60 animate-fade-in" />
         <RadixDialog.Content
           className={cx(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 z-50 w-[calc(100vw-32px)] -translate-x-1/2",
+            bottomSheet ? "bottom-0" : "top-1/2 -translate-y-1/2",
             "rounded-xl border border-border bg-overlay p-4 shadow-overlay",
             "animate-fade-in",
             sizeCls[size],

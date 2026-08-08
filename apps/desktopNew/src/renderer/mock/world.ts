@@ -103,14 +103,18 @@ export type MockSession = {
   live: LiveTurn | null;
   subscribed: boolean;
   onFirstSubscribe: (() => void) | null;
-  runtime: { model: ModelRef; thinkingLevel: ThinkingLevel };
+  runtime: { model: ModelRef; thinkingLevel: ThinkingLevel; fastMode: boolean };
 };
 
 export type SessionSeed = {
   summary: SessionSummary;
   events: AgenaEvent[];
   live: LiveTurn | null;
-  runtime?: { model: ModelRef; thinkingLevel: ThinkingLevel };
+  runtime?: {
+    model: ModelRef;
+    thinkingLevel: ThinkingLevel;
+    fastMode?: boolean;
+  };
 };
 
 function devAssertValid(e: AgenaEvent): void {
@@ -137,9 +141,10 @@ export class World {
       live: seed.live,
       subscribed: false,
       onFirstSubscribe: null,
-      runtime: seed.runtime ?? {
-        model: DEFAULT_MODEL,
-        thinkingLevel: "medium",
+      runtime: {
+        model: seed.runtime?.model ?? DEFAULT_MODEL,
+        thinkingLevel: seed.runtime?.thinkingLevel ?? "medium",
+        fastMode: seed.runtime?.fastMode ?? false,
       },
     });
   }

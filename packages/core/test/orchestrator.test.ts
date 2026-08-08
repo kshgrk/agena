@@ -17,6 +17,16 @@ const runCompleted = (store: InMemoryEventStore) =>
     });
   });
 
+const runFailed = (store: InMemoryEventStore) =>
+  new Promise<void>((resolve) => {
+    const off = store.onCommitted((batch) => {
+      if (batch.events.some((e) => e.type === "run.failed")) {
+        off();
+        setTimeout(resolve, 0);
+      }
+    });
+  });
+
 const approvalRequested = (store: InMemoryEventStore) =>
   new Promise<void>((resolve) => {
     const off = store.onCommitted((batch) => {
@@ -95,6 +105,26 @@ test("happy path: prompt yields the exact durable sequence plus delta frames", a
   expect(frames.every((f) => f.branchId === session.rootBranchId)).toBe(true);
 });
 
+test("image prompts reject missing blobs before creating a user event", async () => {
+  const store = new InMemoryEventStore();
+  const orch = new SessionOrchestrator(store, new FakeRuntimeAdapter({}));
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+
+  await expect(
+    orch.handlePrompt(session.sessionId, [
+      {
+        type: "image",
+        ref: {
+          blob: `sha256:${"0".repeat(64)}`,
+          sizeBytes: 10,
+          mimeType: "image/png",
+        },
+      },
+    ]),
+  ).rejects.toMatchObject({ code: "INVALID_PAYLOAD" });
+  expect((await store.readEvents(session.sessionId, 0)).events).toHaveLength(1);
+});
+
 test("prompt while a turn is in flight fails SESSION_BUSY; idle again after completion", async () => {
   const store = new InMemoryEventStore();
   const orch = new SessionOrchestrator(
@@ -133,6 +163,96 @@ test("prompt on an unknown session fails SESSION_NOT_FOUND", async () => {
   await expect(
     orch.handlePrompt("nope", [{ type: "text", text: "hi" }]),
   ).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+});
+
+test("forks an immutable primary child from a persisted runtime message ref", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const orch = new SessionOrchestrator(store, adapter);
+  const parent = await orch.createSession({ workspaceId: "ws-1" });
+  const messageId = "01MESSAGE";
+  await store.appendEvents({
+    sessionId: parent.sessionId,
+    branchId: parent.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: { messageId, content: [{ type: "text", text: "branch" }] },
+      },
+      {
+        type: "message.runtime.ref",
+        v: 1,
+        source: { kind: "runtime" },
+        payload: { messageId, runtimeEntryId: "pi-entry-1" },
+      },
+    ],
+  });
+
+  const child = await orch.forkSession({
+    parentSessionId: parent.sessionId,
+    sourceMessageId: messageId,
+    mode: "fork",
+  });
+
+  expect(child).toMatchObject({
+    sessionKind: "primary",
+    parentSessionId: parent.sessionId,
+    derivedFrom: {
+      parentSessionId: parent.sessionId,
+      sourceMessageId: messageId,
+      mode: "fork",
+    },
+  });
+  expect(adapter.forkInputs[0]).toMatchObject({
+    runtimeEntryId: "pi-entry-1",
+    position: "before",
+  });
+});
+
+test("editing a previous message stays in the same session", async () => {
+  const store = new InMemoryEventStore();
+  const orch = new SessionOrchestrator(store, new FakeRuntimeAdapter());
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: {
+          messageId: "01EDIT",
+          content: [{ type: "text", text: "edit me" }],
+        },
+      },
+      {
+        type: "message.runtime.ref",
+        v: 1,
+        source: { kind: "runtime" },
+        payload: { messageId: "01EDIT", runtimeEntryId: "pi-entry-edit" },
+      },
+    ],
+  });
+
+  await expect(
+    orch.navigateToMessage(session.sessionId, "01EDIT"),
+  ).resolves.toEqual({ editorText: "" });
+  expect((await store.listSessions()).map((item) => item.sessionId)).toEqual([
+    session.sessionId,
+  ]);
+
+  const done = runCompleted(store);
+  const next = await orch.handlePrompt(session.sessionId, [
+    { type: "text", text: "edited" },
+  ]);
+  await done;
+  const { events } = await store.readEvents(session.sessionId, next.seq - 1);
+  expect(events[0]?.payload).toMatchObject({
+    editedFromMessageId: "01EDIT",
+  });
 });
 
 test("runtime starts in the durable session cwd", async () => {
@@ -179,6 +299,23 @@ test("runtime rehydrates with the persisted runtime session ref", async () => {
     sessionId: session.sessionId,
     runtimeSessionRef: `fake:${session.sessionId}`,
   });
+});
+
+test("runtime pump failure is discarded so the next prompt rehydrates", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter({ failFirstPump: true });
+  const orch = new SessionOrchestrator(store, adapter);
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+
+  const failed = runFailed(store);
+  await orch.handlePrompt(session.sessionId, [{ type: "text", text: "one" }]);
+  await failed;
+
+  const completed = runCompleted(store);
+  await orch.handlePrompt(session.sessionId, [{ type: "text", text: "two" }]);
+  await completed;
+
+  expect(adapter.createInputs).toHaveLength(2);
 });
 
 test("abort terminalizes active work as aborted, not failed", async () => {

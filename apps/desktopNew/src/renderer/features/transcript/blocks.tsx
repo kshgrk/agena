@@ -27,7 +27,8 @@ import {
   Split,
   Terminal,
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, type ReactNode, useEffect, useState } from "react";
+import { peekBridge } from "../../lib/bridge.ts";
 import { formatRelativeTime, formatTokens } from "../../lib/format.ts";
 import type {
   ApprovalBlock,
@@ -41,12 +42,61 @@ import type {
 import { Badge, cx } from "../../ui/index.ts";
 import { SubagentReceipt } from "../agents/task-group.tsx";
 import { Markdown } from "./markdown.tsx";
+import { UserMessageActions } from "./session-actions.tsx";
 import { ThinkingDisclosure } from "./thinking.tsx";
 import { ToolCard, textOf } from "./tool-card.tsx";
 
 // ---- shared -----------------------------------------------------------------
 
-/** Text → markdown, thinking → disclosure, blobs → chips, unknown → nothing. */
+function TranscriptImage({
+  block,
+}: {
+  block: Extract<ContentBlock, { type: "image" }>;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let objectUrl: string | null = null;
+    void peekBridge()
+      ?.readBlob(block.ref.blob)
+      .then((bytes) => {
+        if (disposed) return;
+        objectUrl = URL.createObjectURL(
+          new Blob(
+            [
+              bytes.buffer.slice(
+                bytes.byteOffset,
+                bytes.byteOffset + bytes.byteLength,
+              ) as ArrayBuffer,
+            ],
+            { type: block.ref.mimeType ?? "application/octet-stream" },
+          ),
+        );
+        setUrl(objectUrl);
+      });
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [block.ref.blob, block.ref.mimeType]);
+  return url ? (
+    <a href={url} target="_blank" rel="noreferrer" className="my-2 block w-fit">
+      <img
+        src={url}
+        alt={block.alt ?? "Attached image"}
+        loading="lazy"
+        className="max-h-[28rem] max-w-full rounded-xl border border-border object-contain"
+      />
+    </a>
+  ) : (
+    <Badge className="my-1">
+      <Paperclip className="size-3" />
+      Loading image…
+    </Badge>
+  );
+}
+
+/** Text → markdown, thinking → disclosure, images → lazy previews, unknown → nothing. */
 export function ContentView({ content }: { content: readonly ContentBlock[] }) {
   return (
     <>
@@ -58,12 +108,7 @@ export function ContentView({ content }: { content: readonly ContentBlock[] }) {
           case "thinking":
             return <ThinkingDisclosure key={key} text={b.text} />;
           case "image":
-            return (
-              <Badge key={key} className="my-1">
-                <Paperclip className="size-3" />
-                image{b.alt ? ` — ${b.alt}` : ""}
-              </Badge>
-            );
+            return <TranscriptImage key={key} block={b} />;
           case "file":
             return (
               <Badge key={key} className="my-1">
@@ -82,7 +127,15 @@ export function ContentView({ content }: { content: readonly ContentBlock[] }) {
 }
 
 /** Hover-revealed time + copy row (design.md §6: no inline timestamps). */
-function HoverMeta({ at, copyText }: { at: string; copyText: string }) {
+function HoverMeta({
+  at,
+  copyText,
+  children,
+}: {
+  at: string;
+  copyText: string;
+  children?: ReactNode;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="pointer-events-none absolute -top-4 right-0 flex items-center gap-1.5 opacity-0 transition-opacity duration-100 group-hover/turn:pointer-events-auto group-hover/turn:opacity-100">
@@ -107,16 +160,27 @@ function HoverMeta({ at, copyText }: { at: string; copyText: string }) {
           <Copy className="size-3" />
         )}
       </button>
+      {children}
     </div>
   );
 }
 
 // ---- user ---------------------------------------------------------------------
 
-function UserRow({ block }: { block: UserBlock }) {
+function UserRow({
+  block,
+  sessionId,
+}: {
+  block: UserBlock;
+  sessionId?: string;
+}) {
   return (
     <div className="group/turn relative">
-      <HoverMeta at={block.at} copyText={textOf(block.content)} />
+      <HoverMeta at={block.at} copyText={textOf(block.content)}>
+        {sessionId ? (
+          <UserMessageActions sessionId={sessionId} block={block} />
+        ) : null}
+      </HoverMeta>
       <div className="rounded-lg border border-border-subtle bg-surface px-4 py-3">
         {block.queued ? (
           <Badge tone="accent" className="mb-1.5">
@@ -383,7 +447,11 @@ export const BlockView = memo(function BlockView({
 }: BlockViewProps) {
   switch (block.kind) {
     case "user":
-      return <UserRow block={block} />;
+      return sessionId ? (
+        <UserRow block={block} sessionId={sessionId} />
+      ) : (
+        <UserRow block={block} />
+      );
     case "assistant":
       return <AssistantRow block={block} />;
     case "tool":

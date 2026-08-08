@@ -3,11 +3,13 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   AppendEventsInput,
   AppendEventsResult,
+  CreateDerivedSessionInput,
   CreateSessionInput,
   CreateSnapshotRecordInput,
   EventStore,
@@ -65,6 +67,8 @@ type SessionRow = {
   parent_session_id: string | null;
   parent_task_id: string | null;
   session_kind: "primary" | "subagent";
+  source_message_id: string | null;
+  derived_mode: "fork" | "clone" | null;
 };
 
 type UserMessageRow = {
@@ -238,10 +242,15 @@ function skillFromRow(row: SkillRow): SkillSummary {
 
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
+  #blobDir: string;
   #listeners = new Set<CommitListener>();
 
-  constructor(dbPath: string) {
+  constructor(
+    dbPath: string,
+    blobDir = resolve(dirname(dbPath), "..", "blobs", "sha256"),
+  ) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    this.#blobDir = blobDir;
     this.#db = new DatabaseSync(dbPath);
     // WAL sidecar files are fragile on Docker bind mounts when host tools
     // inspect the DB live; Agena has one writer, so rollback journaling stays
@@ -276,6 +285,8 @@ export class SqliteEventStore implements EventStore {
         is_control       INTEGER NOT NULL DEFAULT 0,
         parent_session_id TEXT REFERENCES sessions(id),
         parent_task_id    TEXT,
+        source_message_id TEXT,
+        derived_mode      TEXT CHECK (derived_mode IN ('fork','clone')),
         session_kind      TEXT NOT NULL DEFAULT 'primary'
                           CHECK (session_kind IN ('primary','subagent'))
       ) STRICT;
@@ -316,6 +327,13 @@ export class SqliteEventStore implements EventStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_id ON events(id);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(session_id, type, seq);
       CREATE INDEX IF NOT EXISTS idx_events_branch ON events(session_id, branch_id, seq);
+
+      CREATE TABLE IF NOT EXISTS runtime_message_refs (
+        session_id       TEXT NOT NULL REFERENCES sessions(id),
+        message_id       TEXT NOT NULL,
+        runtime_entry_id TEXT NOT NULL,
+        PRIMARY KEY (session_id, message_id)
+      ) STRICT;
 
       CREATE TABLE IF NOT EXISTS messages (
         id         TEXT PRIMARY KEY,
@@ -460,6 +478,51 @@ export class SqliteEventStore implements EventStore {
     `);
   }
 
+  async putBlob(bytes: Uint8Array, mimeType: string) {
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const hash = `sha256:${digest}`;
+    const dir = join(this.#blobDir, digest.slice(0, 2));
+    const path = join(dir, digest);
+    await mkdir(dir, { recursive: true });
+    const temporary = `${path}.${ulid()}.tmp`;
+    const handle = await open(temporary, "wx");
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+    this.#db
+      .prepare(
+        `INSERT INTO blobs (hash, size_bytes, mime, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(hash) DO NOTHING`,
+      )
+      .run(hash, bytes.byteLength, mimeType, new Date().toISOString());
+    return { blob: hash, sizeBytes: bytes.byteLength, mimeType };
+  }
+
+  async readBlob(hash: string) {
+    const digest = hash.startsWith("sha256:") ? hash.slice(7) : "";
+    if (!/^[0-9a-f]{64}$/.test(digest)) return null;
+    const row = this.#db
+      .prepare("SELECT mime FROM blobs WHERE hash = ?")
+      .get(hash) as { mime: string | null } | undefined;
+    if (!row) return null;
+    try {
+      return {
+        bytes: new Uint8Array(
+          await readFile(join(this.#blobDir, digest.slice(0, 2), digest)),
+        ),
+        ...(row.mime ? { mimeType: row.mime } : {}),
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const now = new Date().toISOString();
     const scope = normalizeSessionScope(input);
@@ -551,6 +614,146 @@ export class SqliteEventStore implements EventStore {
       lastSeq: 1,
     });
     return record;
+  }
+
+  async createDerivedSession(
+    input: CreateDerivedSessionInput,
+  ): Promise<SessionRecord> {
+    const parent = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(input.parentSessionId) as SessionRow | undefined;
+    if (!parent) {
+      throw new StoreError(
+        "session_not_found",
+        `unknown session ${input.parentSessionId}`,
+      );
+    }
+    if (input.mode === "fork" && !input.sourceMessageId) {
+      throw new StoreError(
+        "invalid_payload",
+        "sourceMessageId is required for fork",
+      );
+    }
+    if (input.sourceMessageId) {
+      const source = this.#db
+        .prepare(
+          `SELECT 1 FROM events
+           WHERE session_id = ?
+             AND type IN ('message.user.created', 'message.assistant.completed')
+             AND json_extract(payload, '$.messageId') = ?
+           LIMIT 1`,
+        )
+        .get(input.parentSessionId, input.sourceMessageId);
+      if (!source) {
+        throw new StoreError(
+          "invalid_payload",
+          "sourceMessageId does not belong to parent session",
+        );
+      }
+    }
+    const now = new Date().toISOString();
+    const sessionId = ulid();
+    const rootBranchId = ulid();
+    const title = input.title ?? parent.title ?? undefined;
+    const derivedFrom = {
+      parentSessionId: parent.id,
+      ...(input.sourceMessageId
+        ? { sourceMessageId: input.sourceMessageId }
+        : {}),
+      mode: input.mode,
+    } as const;
+    const session: SessionRecord = {
+      sessionId,
+      workspaceId: parent.workspace_id,
+      ...(title ? { title } : {}),
+      rootBranchId,
+      lastSeq: 1,
+      createdAt: now,
+      updatedAt: now,
+      scope: parent.scope,
+      status: "active",
+      origin: parent.origin,
+      ...(parent.project_id ? { projectId: parent.project_id } : {}),
+      ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
+      cwd: parent.cwd,
+      ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
+      sessionKind: "primary",
+      parentSessionId: parent.id,
+      derivedFrom,
+    };
+    const event: AgenaEvent = {
+      sessionId,
+      branchId: rootBranchId,
+      seq: 1,
+      type: "session.created",
+      v: 1,
+      source: input.source ?? { kind: "user" },
+      payload: {
+        workspaceId: parent.workspace_id,
+        ...(title ? { title } : {}),
+        runtime: "pi",
+        origin: parent.origin,
+        scope: parent.scope,
+        ...(parent.project_id ? { projectId: parent.project_id } : {}),
+        ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
+        cwd: parent.cwd,
+        ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
+        rootBranchId,
+        derivedFrom,
+      },
+      createdAt: now,
+    };
+    this.#transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO sessions
+           (id, workspace_id, title, active_branch_id, last_seq, created_at,
+            pi_session_path, updated_at, scope, project_id, project_root, cwd,
+            host_cwd_hint, origin, status, is_control, parent_session_id, source_message_id,
+            derived_mode, session_kind)
+           VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, 'primary')`,
+        )
+        .run(
+          sessionId,
+          parent.workspace_id,
+          title ?? null,
+          rootBranchId,
+          now,
+          now,
+          parent.scope,
+          parent.project_id,
+          parent.project_root,
+          parent.cwd,
+          parent.host_cwd_hint,
+          parent.origin,
+          parent.id,
+          input.sourceMessageId ?? null,
+          input.mode,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO branches
+           (id, session_id, parent_branch_id, forked_from_seq, name, created_at)
+           VALUES (?, ?, NULL, NULL, NULL, ?)`,
+        )
+        .run(rootBranchId, sessionId, now);
+      this.#insertEvent(event);
+    });
+    this.#emitCommitted({ sessionId, events: [event], lastSeq: 1 });
+    return session;
+  }
+
+  async getRuntimeMessageRef(
+    sessionId: string,
+    messageId: string,
+  ): Promise<string | null> {
+    const row = this.#db
+      .prepare(
+        `SELECT runtime_entry_id FROM runtime_message_refs
+         WHERE session_id = ? AND message_id = ?`,
+      )
+      .get(sessionId, messageId) as { runtime_entry_id: string } | undefined;
+    return row?.runtime_entry_id ?? null;
   }
 
   async createSubagentSession(input: CreateSubagentSessionInput): Promise<{
@@ -1181,6 +1384,7 @@ export class SqliteEventStore implements EventStore {
           .run(...sessionIds, ...sessionIds);
         for (const table of [
           "events",
+          "runtime_message_refs",
           "messages",
           "tool_calls",
           "messages_fts",
@@ -1228,6 +1432,9 @@ export class SqliteEventStore implements EventStore {
           .prepare("DELETE FROM messages WHERE session_id = ?")
           .run(sessionId);
         this.#db
+          .prepare("DELETE FROM runtime_message_refs WHERE session_id = ?")
+          .run(sessionId);
+        this.#db
           .prepare("DELETE FROM tool_calls WHERE session_id = ?")
           .run(sessionId);
         this.#db
@@ -1238,6 +1445,7 @@ export class SqliteEventStore implements EventStore {
           .run(sessionId);
       } else {
         this.#db.prepare("DELETE FROM messages").run();
+        this.#db.prepare("DELETE FROM runtime_message_refs").run();
         this.#db.prepare("DELETE FROM tool_calls").run();
         this.#db.prepare("DELETE FROM messages_fts").run();
         this.#db.prepare("DELETE FROM agent_tasks").run();
@@ -1318,6 +1526,11 @@ export class SqliteEventStore implements EventStore {
     add("pi_session_path", "pi_session_path TEXT");
     add("parent_session_id", "parent_session_id TEXT REFERENCES sessions(id)");
     add("parent_task_id", "parent_task_id TEXT");
+    add("source_message_id", "source_message_id TEXT");
+    add(
+      "derived_mode",
+      "derived_mode TEXT CHECK (derived_mode IN ('fork','clone'))",
+    );
     add(
       "session_kind",
       "session_kind TEXT NOT NULL DEFAULT 'primary' CHECK (session_kind IN ('primary','subagent'))",
@@ -1427,6 +1640,18 @@ export class SqliteEventStore implements EventStore {
         return;
       case "message.user.created":
         this.#insertMessage(event, "user", "completed", p.content, null, null);
+        return;
+      case "message.runtime.ref":
+        this.#db
+          .prepare(
+            `INSERT OR REPLACE INTO runtime_message_refs
+             (session_id, message_id, runtime_entry_id) VALUES (?, ?, ?)`,
+          )
+          .run(
+            event.sessionId,
+            stringField(p, "messageId"),
+            stringField(p, "runtimeEntryId"),
+          );
         return;
       case "message.runtime.created":
         this.#insertMessage(
@@ -1718,6 +1943,17 @@ function sessionFromRow(row: SessionRow): SessionRecord {
       : {}),
     ...(row.parent_task_id !== null
       ? { parentTaskId: row.parent_task_id }
+      : {}),
+    ...(row.derived_mode !== null && row.parent_session_id !== null
+      ? {
+          derivedFrom: {
+            parentSessionId: row.parent_session_id,
+            ...(row.source_message_id !== null
+              ? { sourceMessageId: row.source_message_id }
+              : {}),
+            mode: row.derived_mode,
+          },
+        }
       : {}),
   };
 }

@@ -61,8 +61,9 @@ Screenshots are large. Until blob spill lands (M7), tool output above the
 
 Two things are required: the binaries in the image, and the runtime env gate.
 
-1. **Image** — the container image (`docker/Dockerfile`) installs Debian
-   `chromium`, and globally installs `agent-browser` + `pi-agent-browser-native`.
+1. **Image** — the Node 24 container image (`docker/Dockerfile`) installs Debian
+   `chromium`, and globally installs the verified pair `agent-browser@0.33.2` +
+   `pi-agent-browser-native@0.3.0` alongside Agena's Pi 0.84.0 runtime.
    `AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium` points the CLI at the
    system browser, so no Chrome-for-Testing download is needed. This is already
    baked in — no action needed at build time.
@@ -75,6 +76,12 @@ Two things are required: the binaries in the image, and the runtime env gate.
 
 Optional override: `AGENA_BROWSER_EXTENSION` may point at an explicit extension
 source directory if the package is installed somewhere non-standard.
+
+For ordinary public research, add either `EXA_API_KEY` or `BRAVE_API_KEY` to the
+daemon environment. The extension then registers `agent_browser_web_search`;
+without either credential, direct URL browsing still works but the search tool
+is intentionally absent. Managed-session restore-policy rejections from an
+automatic reuse attempt are retried once with `sessionMode: "fresh"`.
 
 ## Requirements note
 

@@ -16,6 +16,7 @@ import { pane as settingsPane } from "./features/settings/index.ts";
 import { pane as toastsPane } from "./features/toasts/index.ts";
 import { peekBridge } from "./lib/bridge.ts";
 import { DockLayout } from "./shell/layout.tsx";
+import { MobileShell, useMobileHost } from "./shell/mobile.tsx";
 import {
   parseSavedLayout,
   type SavedLayout,
@@ -58,6 +59,7 @@ export function App() {
   const connDetail = useConnection((s) => s.detail);
   const connInfo = useConnection((s) => s.info);
   const sidebarCollapsed = useShellUi((s) => s.sidebarCollapsed);
+  const mobile = useMobileHost();
   const autoCollapsed = useRef(false);
 
   useEffect(() => {
@@ -130,37 +132,43 @@ export function App() {
             {connState === "closed" ? (
               <DisconnectedBanner detail={connDetail} />
             ) : null}
-            <div className="flex min-h-0 flex-1">
-              {/* hidden, never unmounted: the rail owns the session.* commands
+            {mobile ? (
+              <div className="min-h-0 flex-1">
+                {persisted ? <MobileShell /> : null}
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1">
+                {/* hidden, never unmounted: the rail owns the session.* commands
                   (mod+n dialog, mod+o, mod+alt+arrows) — unmounting it would
                   unregister them exactly when the sidebar is collapsed */}
-              <aside
-                className={cx(
-                  "w-[260px] shrink-0 border-r border-border-subtle bg-surface",
-                  sidebarCollapsed && "hidden",
-                )}
-              >
-                <sessionsPane.Component />
-              </aside>
-              <main className="relative min-w-0 flex-1">
-                {sidebarCollapsed ? (
-                  <div className="absolute left-2 top-2 z-20">
-                    <IconButton
-                      label="Show sessions sidebar"
-                      onClick={() =>
-                        useShellUi.getState().setSidebarCollapsed(false)
-                      }
-                    >
-                      <PanelLeftOpen />
-                    </IconButton>
-                  </div>
-                ) : null}
-                {persisted ? <DockLayout saved={savedLayout} /> : null}
-              </main>
-            </div>
+                <aside
+                  className={cx(
+                    "w-[260px] shrink-0 border-r border-border-subtle bg-surface",
+                    sidebarCollapsed && "hidden",
+                  )}
+                >
+                  <sessionsPane.Component />
+                </aside>
+                <main className="relative min-w-0 flex-1">
+                  {sidebarCollapsed ? (
+                    <div className="absolute left-2 top-2 z-20">
+                      <IconButton
+                        label="Show sessions sidebar"
+                        onClick={() =>
+                          useShellUi.getState().setSidebarCollapsed(false)
+                        }
+                      >
+                        <PanelLeftOpen />
+                      </IconButton>
+                    </div>
+                  ) : null}
+                  {persisted ? <DockLayout saved={savedLayout} /> : null}
+                </main>
+              </div>
+            )}
           </>
         )}
-        <StatusBar />
+        {mobile ? null : <StatusBar />}
       </div>
       <toastsPane.Component />
       <approvalsPane.Component />

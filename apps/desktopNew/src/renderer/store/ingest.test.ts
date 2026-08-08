@@ -8,6 +8,7 @@ import {
   buildCursorRecord,
   ingestBatch,
   useApprovals,
+  useConnection,
   useSessions,
   useTranscripts,
 } from "./index.ts";
@@ -16,10 +17,7 @@ const AT = "2026-07-06T00:00:00.000Z";
 const text = (t: string) => ({ type: "text" as const, text: t });
 
 /** Partial match: every key in `expected` deep-equals the actual value. */
-function matchObject(
-  actual: unknown,
-  expected: Record<string, unknown>,
-): void {
+function matchObject(actual: unknown, expected: Record<string, unknown>): void {
   assert.ok(
     actual !== null && typeof actual === "object",
     `expected an object, got ${String(actual)}`,
@@ -229,6 +227,31 @@ describe("ingestBatch", () => {
     });
   });
 
+  it("syncs fast mode changes into loaded runtime controls", () => {
+    useConnection.getState().setRuntime("s1", {
+      thinkingLevel: "medium",
+      availableModels: [],
+      availableThinkingLevels: ["medium"],
+      fastMode: { enabled: false, available: true, active: false },
+      slashCommands: [],
+    });
+    ingestBatch(
+      batch({
+        events: [
+          {
+            event: ev(1, "fast.mode.changed", { enabled: true }),
+            replayed: false,
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(useConnection.getState().runtime.s1?.fastMode, {
+      enabled: true,
+      available: true,
+      active: true,
+    });
+  });
+
   it("creates transcripts on first sight and dedupes re-delivered events", () => {
     const e = {
       event: ev(1, "message.user.created", {
@@ -244,7 +267,7 @@ describe("ingestBatch", () => {
     assert.equal(t?.rawEvents.length, 1);
   });
 
-  it("bumps session summaries and applies session.status.updated frames", () => {
+  it("bumps session summaries and applies runtime status frames", () => {
     useSessions.getState().setAll([summary]);
     ingestBatch(
       batch({
@@ -257,19 +280,59 @@ describe("ingestBatch", () => {
             replayed: false,
           },
         ],
-        frames: [frame("session.status.updated", { status: "idle" })],
+        syncs: [{ sessionId: "s1", branchId: "b1", upToSeq: 5 }],
+        frames: [
+          frame("session.status.updated", {
+            state: "compacting",
+            detail: "reducing task context",
+          }),
+        ],
       }),
     );
     const s = useSessions.getState().byId.s1;
     assert.equal(s?.lastSeq, 5);
-    assert.equal(s?.status, "idle");
-    // intercepted frames never create a transcript entry for the session
+    assert.equal(s?.status, "active");
     assert.equal(useTranscripts.getState().bySession.s1?.blocks.length, 1);
-    // garbage status payloads are ignored
+    assert.deepEqual(useTranscripts.getState().bySession.s1?.runtimeStatus, {
+      state: "compacting",
+      detail: "reducing task context",
+    });
+    // malformed runtime states are ignored
     ingestBatch(
-      batch({ frames: [frame("session.status.updated", { status: "🦖" })] }),
+      batch({ frames: [frame("session.status.updated", { state: "🦖" })] }),
     );
-    assert.equal(useSessions.getState().byId.s1?.status, "idle");
+    assert.deepEqual(useTranscripts.getState().bySession.s1?.runtimeStatus, {
+      state: "compacting",
+      detail: "reducing task context",
+    });
+  });
+
+  it("moves a session to the top as soon as a durable event arrives", () => {
+    useSessions.getState().setAll([
+      { ...summary, updatedAt: "2026-07-01T00:00:00.000Z" },
+      {
+        ...summary,
+        sessionId: "s2",
+        updatedAt: "2026-07-05T00:00:00.000Z",
+      },
+    ]);
+    assert.deepEqual(useSessions.getState().order, ["s2", "s1"]);
+
+    ingestBatch(
+      batch({
+        events: [
+          {
+            event: ev(1, "message.user.created", {
+              messageId: "mu",
+              content: [text("latest")],
+            }),
+            replayed: false,
+          },
+        ],
+      }),
+    );
+
+    assert.deepEqual(useSessions.getState().order, ["s1", "s2"]);
   });
 
   it("routes session.title.changed to the sessions store", () => {

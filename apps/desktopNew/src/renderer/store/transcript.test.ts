@@ -8,6 +8,7 @@ import type {
   ModelRef,
 } from "@agena/protocol";
 import {
+  activeBranchBlocks,
   applyEvent,
   applyFrame,
   applySnapshot,
@@ -87,6 +88,92 @@ const started = (messageId: string) =>
   });
 
 describe("applyEvent + applyFrame", () => {
+  it("renders only the active Pi edit branch", () => {
+    let state = markSynced(emptyTranscript("s1"), 0);
+    const events = [
+      ev(1, "message.user.created", { messageId: "a", content: [text("a")] }),
+      ev(2, "message.assistant.started", {
+        messageId: "ra",
+        runId: "r1",
+        turnId: "t1",
+        model: MODEL,
+        inResponseTo: "a",
+      }),
+      ev(3, "message.assistant.completed", {
+        messageId: "ra",
+        content: [text("ra")],
+        model: MODEL,
+        stopReason: "end_turn",
+      }),
+      ev(4, "message.user.created", { messageId: "b", content: [text("b")] }),
+      ev(5, "message.assistant.started", {
+        messageId: "rb",
+        runId: "r2",
+        turnId: "t2",
+        model: MODEL,
+        inResponseTo: "b",
+      }),
+      ev(6, "message.assistant.completed", {
+        messageId: "rb",
+        content: [text("rb")],
+        model: MODEL,
+        stopReason: "end_turn",
+      }),
+      ev(7, "message.user.created", {
+        messageId: "a2",
+        content: [text("a edited")],
+        editedFromMessageId: "a",
+      }),
+      ev(8, "message.assistant.started", {
+        messageId: "ra2",
+        runId: "r3",
+        turnId: "t3",
+        model: MODEL,
+        inResponseTo: "a2",
+      }),
+      ev(9, "message.assistant.completed", {
+        messageId: "ra2",
+        content: [text("ra2")],
+        model: MODEL,
+        stopReason: "end_turn",
+      }),
+    ];
+    for (const event of events) state = applyEvent(state, event, false);
+
+    assert.deepEqual(
+      activeBranchBlocks(state.rawEvents, state.blocks).map((block) =>
+        block.kind === "user"
+          ? block.messageId
+          : block.kind === "assistant"
+            ? block.messageId
+            : block.kind,
+      ),
+      ["a2", "ra2"],
+    );
+
+    let secondState = markSynced(emptyTranscript("s1"), 0);
+    const secondEvents = [
+      ev(1, "message.user.created", { messageId: "a", content: [text("a")] }),
+      ev(2, "message.user.created", { messageId: "b", content: [text("b")] }),
+      ev(3, "message.user.created", { messageId: "c", content: [text("c")] }),
+      ev(4, "message.user.created", {
+        messageId: "b2",
+        content: [text("b edited")],
+        editedFromMessageId: "b",
+      }),
+      ev(5, "message.user.created", { messageId: "d", content: [text("d")] }),
+    ];
+    for (const event of secondEvents) {
+      secondState = applyEvent(secondState, event, false);
+    }
+    assert.deepEqual(
+      activeBranchBlocks(secondState.rawEvents, secondState.blocks)
+        .filter((block) => block.kind === "user")
+        .map((block) => block.messageId),
+      ["a", "b2", "d"],
+    );
+  });
+
   it("runs a full happy turn; completed content replaces accumulated deltas", () => {
     let s = markSynced(emptyTranscript("s1"), 0);
     s = applyEvent(

@@ -263,6 +263,22 @@ describe("AgenaClient", () => {
     });
     await expect(thinking).resolves.toEqual({ thinkingLevel: "high" });
 
+    const fast = client.setFastMode("s1", true);
+    expect(sock.lastCmd()).toMatchObject({
+      name: "setFastMode",
+      payload: { sessionId: "s1", enabled: true },
+    });
+    sock.receive({
+      kind: "ack",
+      requestId: sock.lastCmd().requestId,
+      result: { enabled: true, available: true, active: true },
+    });
+    await expect(fast).resolves.toEqual({
+      enabled: true,
+      available: true,
+      active: true,
+    });
+
     const approval = client.respondToApproval("s1", "a1", {
       kind: "confirm",
       accepted: true,
@@ -460,7 +476,7 @@ describe("AgenaClient", () => {
       },
     ]);
 
-    const reattached = client.connectPty("/v1/ptys/pty_1/ws");
+    const reattached = await client.connectPty("/v1/ptys/pty_1/ws");
     expect(reattached.binaryType).toBe("arraybuffer");
     expect(ptySockets).toHaveLength(2);
     expect(ptySocketCalls.at(-1)).toEqual({
@@ -687,6 +703,56 @@ describe("AgenaClient", () => {
         "content-type": "application/x-tar",
       },
     });
+  });
+
+  it("falls back to ordered single-session imports when batch import is unavailable", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/v1/imports/sessions"))
+        return new Response("Not Found", { status: 404 });
+      return new Response(
+        JSON.stringify({
+          sessionId: `session-${fetchMock.mock.calls.length}`,
+          seededEvents: 1,
+          alreadyImported: false,
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777",
+      token: "secret",
+    });
+    const request = (sourcePath: string, sourceSessionId: string) => ({
+      projectId: "prj_harp",
+      projectRoot: "harp",
+      sourceFingerprint: {
+        harness: "codex" as const,
+        machineId: "mac",
+        sourcePath,
+        sourceSessionId,
+        mtimeMs: 1,
+        size: 1,
+      },
+      piSession: '{"type":"session"}',
+    });
+
+    await expect(
+      client.importSessions({
+        sessions: [request("one.jsonl", "one"), request("two.jsonl", "two")],
+      }),
+    ).resolves.toMatchObject({
+      sessions: [
+        { sourcePath: "one.jsonl", result: { alreadyImported: false } },
+        { sourcePath: "two.jsonl", result: { alreadyImported: false } },
+      ],
+    });
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      "http://127.0.0.1:7777/v1/imports/sessions",
+      "http://127.0.0.1:7777/v1/imports/session",
+      "http://127.0.0.1:7777/v1/imports/session",
+    ]);
   });
 
   it("wraps event paging and PTY management HTTP routes", async () => {

@@ -473,14 +473,14 @@ export type UiSlice = {
 
 Actions on top of `SessionsState` + `lost: readonly string[]`:
 
-- `setAll(summaries)` — rebuilds `byId`, `order` = newest-first (`Object.keys(byId).sort((a,b) =>
-  b.localeCompare(a))` — ULIDs, lexicographic desc = time desc), clears loading/error.
+- `setAll(summaries)` — rebuilds `byId`, `order` = most-recently-used first by
+  `updatedAt`, with session id as a deterministic tie-breaker; clears loading/error.
 - `upsert(summary)` — merges and re-sorts.
 - `setActive(sessionId | null)` — also fire-and-forget `savePersisted({ lastActiveSessionId })`.
 - `setStatus(sessionId, status)` / `setTitle(sessionId, title)` — no-op if unknown/unchanged.
 - `markLost(sessionId)` — appends to `lost` (dedup).
-- `bump(sessionId, seq, at)` — ingest-internal; updates `lastSeq`/`updatedAt` only if
-  `seq > cur.lastSeq`.
+- `bump(sessionId, seq, at)` — ingest-internal; updates `lastSeq`/`updatedAt` and
+  immediately re-sorts `order` only if `seq > cur.lastSeq`.
 - `setLoading(loading)`, `setError(error)` (setError also flips loading false).
 
 ### 2.4 useApprovals (`store/approvals.ts`)
@@ -547,6 +547,8 @@ export type TranscriptsStore = {
   loadingOlder: Readonly<Record<string, boolean>>;
   /** ingest-internal: apply a reducer to one session's transcript. */
   update: (sessionId: string, fn: (t: TranscriptState) => TranscriptState) => void;
+  /** Load the newest page before the first subscription to avoid full replay. */
+  primeRecent: (sessionId: string, headSeq: number) => Promise<number>;
   /** Backward-page older events for a session via the bridge. */
   prependOlder: (sessionId: string) => Promise<void>;
 };
@@ -554,6 +556,8 @@ export type TranscriptsStore = {
 
 - `update` seeds `emptyTranscript(sessionId)` when absent; skips the set when the reducer
   returns the same reference AND the session already existed.
+- `primeRecent` fetches and applies the newest PAGE events in one store update, returning the
+  last loaded seq so the initial WS subscription replays only newer events.
 - `prependOlder` (PAGE = 200): guard against no-bridge / unknown session / already loading;
   `oldest = rawEvents[0]?.seq ?? lastSeq + 1`; return if `oldest <= 1`;
   `fromSeq = max(0, oldest - 1 - PAGE)`; set `loadingOlder[sessionId]=true`;
@@ -572,9 +576,9 @@ export async function ensureSubscribed(sessionId: string, fromSeq?: number): Pro
 
 - Module-level `subscribedIds: Set<string>` — first call per session wins (no double-subscribe).
 - Adds to the set BEFORE awaiting; removes and rethrows on failure (callers toast).
-- When `fromSeq` is undefined: persisted cursors are loaded ONCE per app run
-  (`cursorsPromise ??= bridge.loadPersisted().then(p => p.cursors)`); default
-  `cursors[sessionId]?.seq ?? 0`. New sessions are subscribed with explicit `fromSeq = 0`.
+- When `fromSeq` is undefined: reuse an already loaded cursor; otherwise fetch the newest
+  PAGE events from the summary's `lastSeq` and subscribe from the last loaded event. Persisted
+  cursors are the fallback if paging fails. New sessions subscribe with explicit `fromSeq = 0`.
 - Callers: SessionWorkspace effect (re-runs on activeSessionId/connState — heals reconnect
   races), connect bootstrap, sessions-rail activate/create.
 

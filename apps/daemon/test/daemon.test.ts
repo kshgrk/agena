@@ -101,8 +101,14 @@ function compactErrorAdapter(errorMessage: string): RuntimeAdapter {
         },
         async setModel() {},
         async setThinkingLevel() {},
+        async setFastMode(enabled) {
+          return { enabled, available: true, active: enabled };
+        },
         async compact() {
           throw new Error(errorMessage);
+        },
+        async navigateTree() {
+          return {};
         },
         async respondToApproval() {},
         getInFlightSnapshot() {
@@ -325,6 +331,70 @@ test("bad or missing token ⇒ raw HTTP 401 upgrade rejection; /health stays ope
     status: "ok",
     protocolVersion: PROTOCOL_VERSION,
   });
+});
+
+test("Conductor pairing and browser WS tickets are short-lived one-use credentials", async () => {
+  const daemon = await boot();
+  const base = `http://127.0.0.1:${daemon.port}`;
+  const auth = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  };
+
+  const ticketResponse = await fetch(`${base}/v1/ws-tickets`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({ path: "/v1/ws" }),
+  });
+  expect(ticketResponse.status).toBe(200);
+  const ticket = (await ticketResponse.json()) as { ticket: string };
+  const ticketUrl = `${base.replace("http:", "ws:")}/v1/ws?ticket=${encodeURIComponent(ticket.ticket)}`;
+  const socket = new WebSocket(ticketUrl, WS_SUBPROTOCOL);
+  await new Promise<void>((resolve, reject) => {
+    socket.on("open", resolve);
+    socket.on("error", reject);
+  });
+  socket.terminate();
+  expect(
+    await new Promise<number>((resolve) => {
+      const replay = new WebSocket(ticketUrl, WS_SUBPROTOCOL);
+      replay.on("unexpected-response", (_req, res) => {
+        resolve(res.statusCode ?? 0);
+        replay.terminate();
+      });
+      replay.on("error", () => {});
+    }),
+  ).toBe(401);
+
+  const pairingResponse = await fetch(`${base}/v1/pairings`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({ daemonUrl: "https://agena.example" }),
+  });
+  expect(pairingResponse.status).toBe(200);
+  const pairing = (await pairingResponse.json()) as { pairingUri: string };
+  const pairingToken = new URL(pairing.pairingUri).searchParams.get("token");
+  expect(pairingToken).toBeTruthy();
+  const redeem = () =>
+    fetch(`${base}/v1/pairings/redeem`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${pairingToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        clientId: "client-phone",
+        deviceName: "Test phone",
+        platform: "ios",
+      }),
+    });
+  const redeemed = await redeem();
+  expect(redeemed.status).toBe(200);
+  expect(await redeemed.json()).toEqual({
+    daemonUrl: "https://agena.example",
+    token: TOKEN,
+  });
+  expect((await redeem()).status).toBe(401);
 });
 
 test("POST/GET /v1/sessions: bearer-gated create + list (the `agena` boot path)", async () => {
@@ -664,6 +734,33 @@ test("POST /v1/projects creates workspace projects", async () => {
     cwd: "my-app",
   });
   expect(existsSync(join(workspace, "my-app"))).toBe(true);
+
+  writeFileSync(join(workspace, "my-app", "partial.txt"), "uploaded");
+  const collision = await fetch(`http://127.0.0.1:${daemon.port}/v1/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ name: "My App" }),
+  });
+  expect(collision.status).toBe(409);
+
+  const resumed = await fetch(`http://127.0.0.1:${daemon.port}/v1/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ name: "My App", reuseExisting: true }),
+  });
+  expect(resumed.status).toBe(201);
+  expect(await resumed.json()).toEqual({
+    name: "my-app",
+    projectId: "prj_my-app",
+    projectRoot: "my-app",
+    cwd: "my-app",
+  });
 });
 
 test("POST /v1/files/upload extracts safe tar and rejects unsafe entries", async () => {

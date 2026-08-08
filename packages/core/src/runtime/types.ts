@@ -8,6 +8,7 @@ import type {
   ApprovalRequested,
   ApprovalResponse,
   ContentBlock,
+  FastModeState,
   ModelRef,
   RuntimeInfoAck,
   ThinkingLevel,
@@ -20,10 +21,19 @@ export type RuntimeId = "pi" | "fake";
 export type RunTrigger = "prompt" | "steer" | "followUp";
 export type AssistantStopReason = "end_turn" | "tool_use" | "max_tokens";
 
+export type RuntimeInput = {
+  messageId: string;
+  text: string;
+  images: Array<{ data: Uint8Array; mimeType: string }>;
+};
+
 export interface RuntimeAdapter {
   readonly id: RuntimeId;
   readonly version: string; // the pinned Pi SDK version
   createSession(input: CreateRuntimeSessionInput): Promise<RuntimeSession>;
+  createForkSession?(
+    input: CreateForkRuntimeSessionInput,
+  ): Promise<RuntimeSession>;
   /** Reload runtime extensions after workspace-owned tool configuration changes. */
   reloadExtensions?(): Promise<void>;
   dispose(): Promise<void>; // graceful-shutdown path
@@ -39,6 +49,14 @@ export interface CreateRuntimeSessionInput {
   subagents?: SubagentController;
   /** Explicit runtime tool allowlist. Omitted for ordinary primary sessions. */
   toolNames?: string[];
+}
+
+/** Opaque runtime refs keep Pi session-entry details behind RuntimeAdapter. */
+export interface CreateForkRuntimeSessionInput
+  extends CreateRuntimeSessionInput {
+  sourceRuntimeSessionRef: string;
+  runtimeEntryId?: string;
+  position: "before" | "at";
 }
 
 export interface VisibleBrowserController {
@@ -74,18 +92,21 @@ export interface RuntimeSession {
 
   /** Resolves when the run is ACCEPTED, not when it finishes; completion arrives
       as run-completed RuntimeEvents. */
-  prompt(input: { messageId: string; text: string }): Promise<void>;
-  steer(input: { messageId: string; text: string }): Promise<void>;
-  followUp(input: { messageId: string; text: string }): Promise<void>;
+  prompt(input: RuntimeInput): Promise<void>;
+  steer(input: RuntimeInput): Promise<void>;
+  followUp(input: RuntimeInput): Promise<void>;
   abort(): Promise<void>;
   info(): Promise<RuntimeInfoAck>;
   setModel(model: ModelRef): Promise<void>;
   setThinkingLevel(thinkingLevel: ThinkingLevel): Promise<void>;
+  setFastMode(enabled: boolean): Promise<FastModeState>;
   compact(): Promise<{
     summary: string;
     tokensBefore?: number;
     tokensAfter?: number;
   }>;
+  /** Move Pi's active leaf within this session; history stays in the same JSONL. */
+  navigateTree(runtimeEntryId: string): Promise<{ editorText?: string }>;
   respondToApproval(
     approvalId: string,
     response: ApprovalResponse,
@@ -98,6 +119,7 @@ export interface RuntimeSession {
 
 // Closed union, kebab-case (§8.2 / §4.3) — M1 subset.
 export type RuntimeEvent =
+  | { type: "message-runtime-ref"; messageId: string; runtimeEntryId: string }
   | {
       type: "run-started";
       runId: string;
@@ -177,6 +199,27 @@ export type RuntimeEvent =
   | {
       type: "run-failed";
       runId: string;
+      error: { code: string; message: string };
+    }
+  | {
+      type: "retry-started";
+      runId: string;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      errorSummary: string;
+    }
+  | { type: "retry-ended"; runId: string; outcome: "recovered" | "exhausted" }
+  | { type: "compaction-started"; trigger: "auto" }
+  | {
+      type: "compaction-completed";
+      summary: string;
+      tokensBefore: number;
+      tokensAfter: number;
+      trigger: "auto";
+    }
+  | {
+      type: "compaction-failed";
       error: { code: string; message: string };
     }
   | { type: "model-changed"; from?: ModelRef; to: ModelRef }

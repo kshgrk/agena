@@ -1,9 +1,10 @@
 // Statusbar per design.md §5: 24px, bg-canvas, top hairline, text-2xs
 // fg-muted, tabular-nums. Left: connection (dot + profile) · session status.
-// Right: pending-approvals chip · model · thinking level · token usage.
+// Right: pending approvals · model · thinking level · quota or session cost.
+import { Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import type { BridgeConnectionState } from "../../shared/bridge.ts";
-import { formatTokens } from "../lib/format.ts";
+import { formatUsageStatus } from "../lib/runtime-status.ts";
 import {
   pushToast,
   runCommand,
@@ -12,7 +13,7 @@ import {
   useSessions,
   useTranscripts,
 } from "../store/index.ts";
-import { latestUsage, OPEN_APPROVAL_EVENT } from "./panes.ts";
+import { OPEN_APPROVAL_EVENT } from "./panes.ts";
 
 const CONN_LABEL: Record<BridgeConnectionState, string> = {
   connecting: "Connecting…",
@@ -120,6 +121,9 @@ function RuntimeItem({ sessionId }: { sessionId: string }) {
       title="Model · thinking level — click to change in the composer"
       onClick={() => runCommand("composer.focus")}
     >
+      {runtime.fastMode?.active ? (
+        <Zap className="size-3.5 text-warn" aria-label="Fast mode active" />
+      ) : null}
       <span className="font-mono">
         {runtime.model ? runtime.model.id : "default model"} ·{" "}
         {runtime.thinkingLevel}
@@ -129,16 +133,22 @@ function RuntimeItem({ sessionId }: { sessionId: string }) {
 }
 
 function UsageItem({ sessionId }: { sessionId: string }) {
-  // latestUsage inside the selector: usage refs are stable (blocks are only
-  // replaced wholesale), so Object.is skips the re-render on every streaming
-  // frame — this leaf updates only when usage actually changes.
-  const usage = useTranscripts((s) =>
-    latestUsage(s.bySession[sessionId]?.blocks),
+  const runtime = useConnection((s) => s.runtime[sessionId]);
+  const label = formatUsageStatus(
+    runtime?.subscriptionUsage,
+    runtime?.sessionUsage,
   );
-  if (!usage) return null;
+  if (!label) return null;
   return (
-    <span className="px-1 font-mono" title="Last turn token usage (in → out)">
-      {formatTokens(usage.inputTokens)} → {formatTokens(usage.outputTokens)} tok
+    <span
+      className="px-1 font-mono"
+      title={
+        runtime?.subscriptionUsage
+          ? "ChatGPT Codex weekly quota remaining"
+          : "Cumulative cost for this session"
+      }
+    >
+      {label}
     </span>
   );
 }

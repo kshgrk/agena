@@ -1,7 +1,7 @@
 // Import orchestration (docs/settings_import_plan.md §8): per selected project
 // createProject → optional tar upload → convert each ticked-harness session via
-// @agena/importer → POST /v1/imports/session. Sequential; every session import
-// is independent — one failure never aborts the batch.
+// @agena/importer → bounded POST /v1/imports/sessions batches. Each server
+// batch remains ordered so imported parents exist before child agents.
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -68,9 +68,11 @@ export async function runImport(plan, { client, machineId, userData }) {
   for (const project of plan.projects) {
     let created;
     try {
-      created = await client.createProject(project.name);
+      created = await client.createProject(project.name, {
+        reuseExisting: project.copyFiles,
+      });
     } catch (err) {
-      // 409 slug collision etc. — surface it, keep the rest of the batch going
+      // Invalid names and non-directory collisions stay isolated per project.
       sessions.push({
         sourcePath: project.cwd,
         status: "error",
@@ -199,15 +201,17 @@ export async function runImport(plan, { client, machineId, userData }) {
         });
       }
     }
-    const importSource = async (source, subagent) => {
-      const converted = convertToPi(source, { targetCwd: created.cwd });
-      if (!converted) {
-        sessions.push({ sourcePath: source.sourcePath, status: "skipped" });
-        return;
-      }
-      try {
-        const res = await withRetry(() =>
-          client.importSession({
+    const importSources = async (items) => {
+      const requests = [];
+      for (const { source, subagent } of items) {
+        const converted = convertToPi(source, { targetCwd: created.cwd });
+        if (!converted) {
+          sessions.push({ sourcePath: source.sourcePath, status: "skipped" });
+          continue;
+        }
+        requests.push({
+          sourcePath: source.sourcePath,
+          request: {
             projectId: created.projectId,
             projectRoot: created.projectRoot,
             title:
@@ -219,25 +223,50 @@ export async function runImport(plan, { client, machineId, userData }) {
             sourceFingerprint: { ...converted.sourceFingerprint, machineId },
             ...(subagent ? { subagent } : {}),
             piSession: converted.jsonl,
-          }),
-        );
-        sessions.push({
-          sourcePath: source.sourcePath,
-          status: "ok",
-          sessionId: res.sessionId,
+          },
         });
-      } catch (err) {
-        sessions.push({
-          sourcePath: source.sourcePath,
-          status: "error",
-          error: message(err),
-        });
+      }
+      // ponytail: bounded JSON batches avoid a new archive protocol while
+      // removing per-session request latency; add compressed streams only when
+      // measured session batches approach Modal's request window.
+      for (const batch of chunks(requests, 32)) {
+        try {
+          const response = await withRetry(() =>
+            client.importSessions({
+              sessions: batch.map((item) => item.request),
+            }),
+          );
+          for (const [index, result] of response.sessions.entries()) {
+            const item = batch[index];
+            if (!item) continue;
+            if (result.result) {
+              sessions.push({
+                sourcePath: item.sourcePath,
+                status: "ok",
+                sessionId: result.result.sessionId,
+              });
+            } else {
+              sessions.push({
+                sourcePath: item.sourcePath,
+                status: "error",
+                error: result.error ?? "session import failed",
+              });
+            }
+          }
+        } catch (err) {
+          for (const item of batch)
+            sessions.push({
+              sourcePath: item.sourcePath,
+              status: "error",
+              error: message(err),
+            });
+        }
       }
     };
     const primary = grouped.filter(
       (source) => !codexRelations.has(source.sourceSessionId),
     );
-    await pool(primary, (source) => importSource(source));
+    await importSources(primary.map((source) => ({ source })));
     const importedSourceIds = new Set(
       primary.map((source) => source.sourceSessionId),
     );
@@ -253,47 +282,39 @@ export async function runImport(plan, { client, machineId, userData }) {
       // ponytail: a corrupt edge must not block ordinary import; flat is safer
       // than inventing a parent. Valid Codex graphs always make progress here.
       if (ready.length === 0) {
-        await pool(pending, (source) => importSource(source));
+        await importSources(pending.map((source) => ({ source })));
         break;
       }
-      await pool(ready, (source) => {
-        const relation = codexRelations.get(source.sourceSessionId);
-        const label = codexSubagentName(relation);
-        return importSource(source, {
-          parentSourceSessionId: relation.parentSourceSessionId,
-          agentId: source.sourceSessionId,
-          role: label,
-          task: label,
-          execution: "foreground",
-          model: modelOf(source) ?? { provider: "openai", id: "gpt-5" },
-        });
-      });
+      await importSources(
+        ready.map((source) => {
+          const relation = codexRelations.get(source.sourceSessionId);
+          const label = codexSubagentName(relation);
+          return {
+            source,
+            subagent: {
+              parentSourceSessionId: relation.parentSourceSessionId,
+              agentId: source.sourceSessionId,
+              role: label,
+              task: label,
+              execution: "foreground",
+              model: modelOf(source) ?? { provider: "openai", id: "gpt-5" },
+            },
+          };
+        }),
+      );
       for (const source of ready) importedSourceIds.add(source.sourceSessionId);
       const readyIds = new Set(ready.map((source) => source.sourceSessionId));
       pending = pending.filter(
         (source) => !readyIds.has(source.sourceSessionId),
       );
     }
-    await pool(claudeChildren, ({ source, subagent }) =>
-      importSource(source, subagent),
-    );
+    await importSources(claudeChildren);
   }
   return { sessions };
 }
 
-// ponytail: 4-wide — SQLite is a single writer behind the route; wider mostly
-// queues on busy_timeout. Bump only if measured.
-const CONCURRENCY = 4;
-
-async function pool(items, worker) {
-  const queue = [...items];
-  await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-      for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
-        await worker(item);
-      }
-    }),
-  );
+function* chunks(items, size) {
+  for (let i = 0; i < items.length; i += size) yield items.slice(i, i + size);
 }
 
 async function withRetry(fn, attempts = 3) {
@@ -301,7 +322,7 @@ async function withRetry(fn, attempts = 3) {
     try {
       return await fn();
     } catch (err) {
-      if (i >= attempts) throw err;
+      if (i >= attempts || err?.retryable === false) throw err;
       await new Promise((r) => setTimeout(r, i * 1000));
     }
   }

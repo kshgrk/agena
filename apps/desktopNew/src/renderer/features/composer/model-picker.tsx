@@ -7,7 +7,14 @@ import { Command } from "cmdk";
 import { Check, ChevronDown, Cpu } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useUi } from "../../store/index.ts";
-import { cx, Popover, PopoverContent, PopoverTrigger } from "../../ui/index.ts";
+import {
+  cx,
+  Dialog,
+  DialogTitle,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../../ui/index.ts";
 
 const ITEM_CLS =
   "mx-1.5 flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-sm text-fg-secondary " +
@@ -25,12 +32,14 @@ export function ModelPicker({
   label,
   chipCls,
   onPick,
+  mobile = false,
 }: {
   models: readonly ModelRef[];
   current: ModelRef | null | undefined;
   label: string;
   chipCls: string;
   onPick: (model: ModelRef) => void;
+  mobile?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const enterOverlay = useUi((s) => s.enterOverlay);
@@ -63,65 +72,100 @@ export function ModelPicker({
     else exitOverlay();
   };
 
+  const trigger = (
+    <button
+      type="button"
+      aria-label="Model"
+      className={chipCls}
+      onClick={mobile ? () => onOpenChange(true) : undefined}
+    >
+      <Cpu />
+      <span className="truncate">{label}</span>
+      <ChevronDown />
+    </button>
+  );
+  const picker = (
+    <Command loop className="outline-none">
+      <Command.Input
+        autoFocus
+        placeholder="Filter models…"
+        className={cx(
+          "w-full border-b border-border-subtle bg-transparent px-3 text-fg outline-none placeholder:text-fg-muted",
+          mobile ? "h-12 text-base" : "h-9 text-sm",
+        )}
+      />
+      <Command.List
+        className={cx(
+          "overflow-y-auto overscroll-contain py-1",
+          mobile ? "max-h-[50dvh]" : "max-h-80",
+        )}
+      >
+        <Command.Empty className="px-3 py-6 text-center text-sm text-fg-muted">
+          No authenticated models
+        </Command.Empty>
+        {groups.map((g) => (
+          <Command.Group key={g.name} heading={g.name} className={GROUP_CLS}>
+            {g.models.map((m) => {
+              const isCurrent =
+                m.id === current?.id && m.provider === current?.provider;
+              return (
+                <Command.Item
+                  key={`${m.provider}/${m.id}`}
+                  // provider searchable too: "bedrock sonnet" narrows both
+                  value={`${m.provider} ${m.id}`}
+                  onSelect={() => {
+                    onOpenChange(false);
+                    onPick(m);
+                  }}
+                  className={cx(
+                    ITEM_CLS,
+                    mobile && "h-11 px-3 text-base",
+                    isCurrent && "text-accent",
+                  )}
+                >
+                  <Check
+                    className={cx(
+                      "size-3.5 shrink-0",
+                      isCurrent ? "opacity-100" : "opacity-0",
+                    )}
+                  />
+                  <span className="truncate">{m.id}</span>
+                </Command.Item>
+              );
+            })}
+          </Command.Group>
+        ))}
+      </Command.List>
+      {models.length > 0 ? (
+        <div className="border-t border-border-subtle px-3 py-1.5 text-2xs text-fg-muted">
+          {models.length} models · type to filter
+        </div>
+      ) : null}
+    </Command>
+  );
+
+  if (mobile) {
+    return (
+      <>
+        {trigger}
+        <Dialog
+          open={open}
+          onOpenChange={onOpenChange}
+          bottomSheet
+          className="w-full max-w-none rounded-b-none p-0 pb-[env(safe-area-inset-bottom)]"
+        >
+          <DialogTitle className="sr-only">Choose model</DialogTitle>
+          {picker}
+        </Dialog>
+      </>
+    );
+  }
+
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
-      <PopoverTrigger>
-        <button type="button" aria-label="Model" className={chipCls}>
-          <Cpu />
-          <span className="truncate">{label}</span>
-          <ChevronDown />
-        </button>
-      </PopoverTrigger>
+      <PopoverTrigger>{trigger}</PopoverTrigger>
       <PopoverContent className="w-88 p-0" align="start" side="top">
-        <Command loop className="outline-none">
-          <Command.Input
-            autoFocus
-            placeholder="Filter models…"
-            className="h-9 w-full border-b border-border-subtle bg-transparent px-3 text-sm text-fg outline-none placeholder:text-fg-muted"
-          />
-          <Command.List className="max-h-80 overflow-y-auto overscroll-contain py-1">
-            <Command.Empty className="px-3 py-6 text-center text-sm text-fg-muted">
-              No authenticated models
-            </Command.Empty>
-            {groups.map((g) => (
-              <Command.Group
-                key={g.name}
-                heading={g.name}
-                className={GROUP_CLS}
-              >
-                {g.models.map((m) => {
-                  const isCurrent =
-                    m.id === current?.id && m.provider === current?.provider;
-                  return (
-                    <Command.Item
-                      key={`${m.provider}/${m.id}`}
-                      // provider searchable too: "bedrock sonnet" narrows both
-                      value={`${m.provider} ${m.id}`}
-                      onSelect={() => {
-                        onOpenChange(false);
-                        onPick(m);
-                      }}
-                      className={cx(ITEM_CLS, isCurrent && "text-accent")}
-                    >
-                      <Check
-                        className={cx(
-                          "size-3.5 shrink-0",
-                          isCurrent ? "opacity-100" : "opacity-0",
-                        )}
-                      />
-                      <span className="truncate">{m.id}</span>
-                    </Command.Item>
-                  );
-                })}
-              </Command.Group>
-            ))}
-          </Command.List>
-          {models.length > 0 ? (
-            <div className="border-t border-border-subtle px-3 py-1.5 text-2xs text-fg-muted">
-              {models.length} models · type to filter
-            </div>
-          ) : null}
-        </Command>
+        {picker}
       </PopoverContent>
     </Popover>
   );

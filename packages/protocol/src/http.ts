@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { modelRefSchema } from "./content.ts";
+import { blobRefSchema, modelRefSchema } from "./content.ts";
+
+export const uploadImageResponseSchema = z.object({ ref: blobRefSchema });
+export type UploadImageResponse = z.infer<typeof uploadImageResponseSchema>;
+
 import {
   agentTaskSummarySchema,
   approvalRequestedSchema,
@@ -366,6 +370,43 @@ export const createSessionResponseSchema = z.object({
 });
 export type CreateSessionResponse = z.infer<typeof createSessionResponseSchema>;
 
+export const createDerivedSessionRequestSchema = z
+  .object({
+    sourceMessageId: z.string().min(1).optional(),
+    mode: z.enum(["fork", "clone"]),
+    title: z.string().min(1).max(160).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.mode === "fork" && !value.sourceMessageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sourceMessageId"],
+        message: "sourceMessageId is required for fork",
+      });
+    }
+  });
+export type CreateDerivedSessionRequest = z.infer<
+  typeof createDerivedSessionRequestSchema
+>;
+export const createDerivedSessionResponseSchema = createSessionResponseSchema;
+export type CreateDerivedSessionResponse = z.infer<
+  typeof createDerivedSessionResponseSchema
+>;
+
+export const navigateSessionRequestSchema = z.object({
+  sourceMessageId: z.string().min(1),
+});
+export type NavigateSessionRequest = z.infer<
+  typeof navigateSessionRequestSchema
+>;
+
+export const navigateSessionResponseSchema = z.object({
+  editorText: z.string(),
+});
+export type NavigateSessionResponse = z.infer<
+  typeof navigateSessionResponseSchema
+>;
+
 const queryBooleanSchema = z
   .union([z.boolean(), z.enum(["true", "1", "false", "0"])])
   .transform((v) => v === true || v === "true" || v === "1");
@@ -435,6 +476,13 @@ export const sessionSummarySchema = z.object({
   sessionKind: z.enum(["primary", "subagent"]).optional(),
   parentSessionId: z.string().min(1).optional(),
   parentTaskId: z.string().min(1).optional(),
+  derivedFrom: z
+    .object({
+      parentSessionId: z.string().min(1),
+      sourceMessageId: z.string().min(1).optional(),
+      mode: z.enum(["fork", "clone"]),
+    })
+    .optional(),
   subagent: agentTaskSummarySchema
     .pick({
       taskId: true,
@@ -502,6 +550,50 @@ export const listPtysResponseSchema = z.object({
   ptys: z.array(ptySummarySchema),
 });
 export type ListPtysResponse = z.infer<typeof listPtysResponseSchema>;
+
+const websocketPathSchema = z
+  .string()
+  .refine(
+    (path) =>
+      path === "/v1/ws" ||
+      /^\/v1\/ptys\/[^/?#]+\/ws$/.test(path) ||
+      /^\/v1\/tunnels\/\d+\/ws$/.test(path),
+    "must be an exact Agena WebSocket path",
+  );
+
+export const createWsTicketRequestSchema = z.object({
+  path: websocketPathSchema,
+});
+export type CreateWsTicketRequest = z.infer<typeof createWsTicketRequestSchema>;
+export const createWsTicketResponseSchema = z.object({
+  ticket: z.string().min(1),
+  expiresAt: z.string(),
+});
+export type CreateWsTicketResponse = z.infer<
+  typeof createWsTicketResponseSchema
+>;
+
+export const createPairingRequestSchema = z.object({
+  daemonUrl: z.string().url(),
+});
+export type CreatePairingRequest = z.infer<typeof createPairingRequestSchema>;
+export const createPairingResponseSchema = z.object({
+  pairingUri: z.string().url(),
+  expiresAt: z.string(),
+});
+export type CreatePairingResponse = z.infer<typeof createPairingResponseSchema>;
+
+export const redeemPairingRequestSchema = z.object({
+  clientId: z.string().min(1),
+  deviceName: z.string().min(1).max(128),
+  platform: z.enum(["ios", "android"]),
+});
+export type RedeemPairingRequest = z.infer<typeof redeemPairingRequestSchema>;
+export const redeemPairingResponseSchema = z.object({
+  daemonUrl: z.string().url(),
+  token: z.string().min(1),
+});
+export type RedeemPairingResponse = z.infer<typeof redeemPairingResponseSchema>;
 
 export const pendingApprovalSummarySchema = z.object({
   sessionId: z.string().min(1),
@@ -611,6 +703,8 @@ export type FileArchiveQuery = z.infer<typeof fileArchiveQuerySchema>;
 
 export const createProjectRequestSchema = z.object({
   name: z.string().min(1),
+  /** Import recovery may reuse a project directory created by an interrupted run. */
+  reuseExisting: z.boolean().optional(),
 });
 export type CreateProjectRequest = z.infer<typeof createProjectRequestSchema>;
 
@@ -708,6 +802,13 @@ export const importSessionRequestSchema = z.object({
 });
 export type ImportSessionRequest = z.infer<typeof importSessionRequestSchema>;
 
+// Keep a batch bounded: the desktop submits independent batches sequentially so
+// imported parent sessions exist before their child-agent sessions.
+export const importSessionsRequestSchema = z.object({
+  sessions: z.array(importSessionRequestSchema).min(1).max(32),
+});
+export type ImportSessionsRequest = z.infer<typeof importSessionsRequestSchema>;
+
 export const importSessionResponseSchema = z.object({
   sessionId: z.string().min(1),
   seededEvents: z.number().int().nonnegative(),
@@ -715,6 +816,19 @@ export const importSessionResponseSchema = z.object({
   alreadyImported: z.boolean(),
 });
 export type ImportSessionResponse = z.infer<typeof importSessionResponseSchema>;
+
+export const importSessionsResponseSchema = z.object({
+  sessions: z.array(
+    z.object({
+      sourcePath: z.string().min(1),
+      result: importSessionResponseSchema.optional(),
+      error: z.string().min(1).optional(),
+    }),
+  ),
+});
+export type ImportSessionsResponse = z.infer<
+  typeof importSessionsResponseSchema
+>;
 
 export const listImportsQuerySchema = z.object({
   machineId: z.string().min(1).optional(),
@@ -739,6 +853,12 @@ export type ImportLedgerEntry = z.infer<typeof importLedgerEntrySchema>;
 
 export const importsResponseSchema = z.object({
   imports: z.array(importLedgerEntrySchema),
+  capabilities: z
+    .object({
+      session: z.boolean(),
+      batch: z.boolean(),
+    })
+    .optional(),
 });
 export type ImportsResponse = z.infer<typeof importsResponseSchema>;
 
@@ -747,11 +867,43 @@ export function tunnelWsPath(port: number): string {
 }
 
 export const PTY_HTTP_ROUTES = {
+  createPairing: {
+    method: "POST",
+    path: "/v1/pairings",
+    request: createPairingRequestSchema,
+    response: createPairingResponseSchema,
+  },
+  redeemPairing: {
+    method: "POST",
+    path: "/v1/pairings/redeem",
+    request: redeemPairingRequestSchema,
+    response: redeemPairingResponseSchema,
+  },
+  createWsTicket: {
+    method: "POST",
+    path: "/v1/ws-tickets",
+    request: createWsTicketRequestSchema,
+    response: createWsTicketResponseSchema,
+  },
   createSession: {
     method: "POST",
     path: "/v1/sessions",
     request: createSessionRequestSchema,
     response: createSessionResponseSchema,
+  },
+  createDerivedSession: {
+    method: "POST",
+    path: "/v1/sessions/:id/derived",
+    params: sessionIdParamsSchema,
+    request: createDerivedSessionRequestSchema,
+    response: createDerivedSessionResponseSchema,
+  },
+  navigateSession: {
+    method: "POST",
+    path: "/v1/sessions/:id/navigate",
+    params: sessionIdParamsSchema,
+    request: navigateSessionRequestSchema,
+    response: navigateSessionResponseSchema,
   },
   listSessions: {
     method: "GET",
@@ -866,6 +1018,12 @@ export const PTY_HTTP_ROUTES = {
     path: "/v1/imports/session",
     request: importSessionRequestSchema,
     response: importSessionResponseSchema,
+  },
+  importSessions: {
+    method: "POST",
+    path: "/v1/imports/sessions",
+    request: importSessionsRequestSchema,
+    response: importSessionsResponseSchema,
   },
   listImports: {
     method: "GET",

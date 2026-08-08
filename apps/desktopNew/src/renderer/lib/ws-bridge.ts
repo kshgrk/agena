@@ -5,9 +5,8 @@
 //
 // Differences from the Electron host (apps/desktop/electron/bridge.mjs, whose
 // UiBatch composition is ported verbatim below):
-//   - auth: browsers cannot set WS headers, so the token also rides as a
-//     `?token=` query param on every WebSocket URL (HTTP fetch still sends the
-//     Bearer header via the SDK).
+//   - auth: HTTP uses the bearer token; each browser WS gets a one-use,
+//     path-scoped ticket because browser WebSocket cannot set headers.
 //   - persistence: localStorage instead of userData/persisted.json, same
 //     shallow top-level merge semantics.
 //   - local-machine-only methods (host filesystem scans, native pickers, the
@@ -47,6 +46,16 @@ if (!g.process.env) g.process.env = {};
 
 export type WsConfig = { url: string; token: string };
 
+type MobileConnectionHost = {
+  connection: WsConfig | null;
+  setConnection(config: WsConfig | null): void;
+};
+
+function mobileHost(): MobileConnectionHost | undefined {
+  return (globalThis as { __AGENA_MOBILE__?: MobileConnectionHost })
+    .__AGENA_MOBILE__;
+}
+
 const WS_CONFIG_KEY = "agena.connection";
 const PERSISTED_KEY = "agena.persisted";
 const CLIENT_ID_KEY = "agena.clientId";
@@ -61,6 +70,8 @@ function storage(): Storage | null {
 
 /** Read {url, token} from localStorage["agena.connection"]; null when absent/invalid. */
 export function getWsConfig(): WsConfig | null {
+  const native = mobileHost();
+  if (native) return native.connection;
   const raw = storage()?.getItem(WS_CONFIG_KEY);
   if (!raw) return null;
   try {
@@ -83,6 +94,11 @@ export function getWsConfig(): WsConfig | null {
  * decided once at boot — the connect feature should reload after changing this.
  */
 export function setWsConfig(cfg: WsConfig | null): void {
+  const native = mobileHost();
+  if (native) {
+    native.setConnection(cfg);
+    return;
+  }
   const s = storage();
   if (!s) return;
   if (cfg) s.setItem(WS_CONFIG_KEY, JSON.stringify(cfg));
@@ -367,6 +383,7 @@ export type WsBridgeOptions = {
   createSocket?: (url: string, init: SocketInit) => WsLike;
   createPtySocket?: (url: string, init: SocketInit) => PtyWsLike;
   schedule?: (flush: () => void) => void;
+  fetch?: typeof fetch;
 };
 
 export function createWsBridge(
@@ -383,14 +400,6 @@ export function createWsBridge(
     for (const cb of batchSubs) cb(b);
   }, opts.schedule);
 
-  // Browsers cannot set the Authorization header on a WebSocket, so the token
-  // rides as a query param on WS URLs (main WS and PTY WS alike). Applied
-  // before the factory so injected test sockets see the real URL too.
-  const tokenized = (url: string): string => {
-    const u = new URL(url);
-    u.searchParams.set("token", cfg.token);
-    return u.toString();
-  };
   const rawSocket =
     opts.createSocket ??
     ((url: string, init: SocketInit): WsLike =>
@@ -427,8 +436,11 @@ export function createWsBridge(
       clientId,
       clientName: "agena-desktop-web",
       clientVersion: "0.1.0",
-      createSocket: (url, init) => rawSocket(tokenized(url), init),
-      createPtySocket: (url, init) => rawPtySocket(tokenized(url), init),
+      platform: "web",
+      socketAuth: "ticket",
+      createSocket: rawSocket,
+      createPtySocket: rawPtySocket,
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
     });
     c.onEvent = (event, replayed) => batcher.pushEvent(event, replayed);
     c.onFrame = (f) => batcher.pushFrame(f);
@@ -483,12 +495,22 @@ export function createWsBridge(
       need().respondToApproval(sessionId, approvalId, response),
     runtimeInfo: (sessionId) => need().runtimeInfo(sessionId),
     setModel: (sessionId, model) => need().setModel(sessionId, model),
+    setFastMode: (sessionId, enabled) => need().setFastMode(sessionId, enabled),
     setThinkingLevel: (sessionId, thinkingLevel) =>
       need().setThinkingLevel(sessionId, thinkingLevel),
     compact: (sessionId) => need().compact(sessionId),
 
     // HTTP
     createSession: (input) => need().createSession(input ?? {}),
+    forkSession: async (sourceSessionId, sourceMessageId, mode) => ({
+      sessionId: await need().forkSession(
+        sourceSessionId,
+        sourceMessageId,
+        mode,
+      ),
+    }),
+    navigateSession: (sessionId, sourceMessageId) =>
+      need().navigateSession(sessionId, sourceMessageId),
     createProject: async (name) => ({
       ...(await need().createProject(name)),
       fileCount: 0,
@@ -504,12 +526,15 @@ export function createWsBridge(
     listApprovals: () => need().listApprovals(),
     listFiles: (o) => need().listFiles(o ?? {}),
     readFile: (path) => need().readFile(path),
+    uploadImage: (bytes, mimeType) => need().uploadImage(bytes, mimeType),
+    readBlob: (hash) => need().readBlob(hash),
     listSnapshots: () => need().listSnapshots(),
     createSnapshot: (input) => need().createSnapshot(input ?? {}),
     restoreSnapshot: (snapshotId, input) =>
       need().restoreSnapshot(snapshotId, input ?? {}),
     deleteSnapshot: (snapshotId) => need().deleteSnapshot(snapshotId),
     diagnostics: () => need().diagnostics(),
+    createPairing: (daemonUrl) => need().createPairing(daemonUrl),
     listPtys: () => need().listPtys(),
     listPlugins: async () => (await need().listPlugins()).plugins,
     installPlugin: async (id) => (await need().installPlugin(id)).plugin,

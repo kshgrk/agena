@@ -3,10 +3,11 @@
 import {
   type AgenaEvent,
   approvalRequestedSchema,
-  type SessionStatus,
+  fastModeChangedSchema,
 } from "@agena/protocol";
 import type { UiBatch } from "../../shared/bridge.ts";
 import { useApprovals } from "./approvals.ts";
+import { useConnection } from "./connection.ts";
 import { useSessions } from "./sessions.ts";
 import {
   applyEvent,
@@ -28,8 +29,9 @@ const subscribedIds = new Set<string>();
 
 /**
  * THE single subscribe path (no double-subscribe): first call per session wins;
- * fromSeq defaults to the persisted replay cursor. Rejects with the bridge
- * error so callers can toast.
+ * Without an explicit cursor, uncached sessions load their newest HTTP page
+ * before subscribing; persisted replay is the fallback. Rejects with the
+ * bridge error so callers can toast.
  */
 export async function ensureSubscribed(
   sessionId: string,
@@ -43,7 +45,19 @@ export async function ensureSubscribed(
     let seq = fromSeq;
     if (seq === undefined) {
       cursorsPromise ??= bridge.loadPersisted().then((p) => p.cursors);
-      seq = (await cursorsPromise)[sessionId]?.seq ?? 0;
+      const savedSeq = (await cursorsPromise)[sessionId]?.seq ?? 0;
+      const loadedSeq = useTranscripts.getState().bySession[sessionId]?.lastSeq;
+      seq = loadedSeq && loadedSeq > 0 ? loadedSeq : savedSeq;
+      if (!loadedSeq) {
+        const headSeq = useSessions.getState().byId[sessionId]?.lastSeq ?? 0;
+        try {
+          seq =
+            (await useTranscripts.getState().primeRecent(sessionId, headSeq)) ||
+            seq;
+        } catch {
+          // HTTP paging is an optimization; WS replay remains the recovery path.
+        }
+      }
     }
     await bridge.subscribe(sessionId, seq);
   } catch (err) {
@@ -64,12 +78,6 @@ export function resetSubscriptions(): void {
 }
 
 // ---- batch ingest ---------------------------------------------------------------
-
-const SESSION_STATUSES: readonly SessionStatus[] = [
-  "active",
-  "idle",
-  "archived",
-];
 
 function routeApprovalEvent(event: AgenaEvent): void {
   if (event.type === "approval.requested") {
@@ -95,6 +103,15 @@ function routeApprovalEvent(event: AgenaEvent): void {
 }
 
 function routeSessionEvent(event: AgenaEvent): void {
+  if (event.type === "fast.mode.changed") {
+    const payload = fastModeChangedSchema.safeParse(event.payload);
+    if (payload.success) {
+      useConnection
+        .getState()
+        .setFastMode(event.sessionId, payload.data.enabled);
+    }
+    return;
+  }
   if (event.type !== "session.title.changed") return;
   const title = (event.payload as { title?: unknown } | null)?.title;
   if (typeof title === "string") {
@@ -127,14 +144,6 @@ export function ingestBatch(batch: UiBatch): void {
   }
 
   for (const frame of batch.frames) {
-    // session.status.updated frames never touch transcripts: they patch the rail
-    if (frame.type === "session.status.updated") {
-      const status = (frame.payload as { status?: unknown } | null)?.status;
-      if (SESSION_STATUSES.includes(status as SessionStatus)) {
-        sessions.setStatus(frame.sessionId, status as SessionStatus);
-      }
-      continue;
-    }
     transcripts.update(frame.sessionId, (t) => applyFrame(t, frame));
   }
 

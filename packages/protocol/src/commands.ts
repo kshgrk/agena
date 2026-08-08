@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { modelRefSchema, textBlockSchema } from "./content.ts";
+import {
+  imageBlockSchema,
+  modelRefSchema,
+  textBlockSchema,
+} from "./content.ts";
 
 // §5.4 command catalog.
 export const commandNameSchema = z.enum([
@@ -11,6 +15,7 @@ export const commandNameSchema = z.enum([
   "runtimeInfo",
   "setModel",
   "setThinkingLevel",
+  "setFastMode",
   "respondToApproval",
   "compact",
 ]);
@@ -24,10 +29,16 @@ export const subscribeCmdSchema = z.object({
 });
 export type SubscribeCmd = z.infer<typeof subscribeCmdSchema>;
 
-// v1 restricts prompt content to {type:"text"} blocks, schema-enforced (§5.4).
+const promptContentBlockSchema = z.discriminatedUnion("type", [
+  textBlockSchema,
+  imageBlockSchema,
+]);
+
+// Prompt content is intentionally narrow: text and images only. Other durable
+// content block kinds are runtime output or belong to later attachment slices.
 export const promptCmdSchema = z.object({
   sessionId: z.string().min(1),
-  content: z.array(textBlockSchema).min(1),
+  content: z.array(promptContentBlockSchema).min(1),
 });
 export type PromptCmd = z.infer<typeof promptCmdSchema>;
 
@@ -70,6 +81,12 @@ export const setThinkingLevelCmdSchema = z.object({
   thinkingLevel: thinkingLevelSchema,
 });
 export type SetThinkingLevelCmd = z.infer<typeof setThinkingLevelCmdSchema>;
+
+export const setFastModeCmdSchema = z.object({
+  sessionId: z.string().min(1),
+  enabled: z.boolean(),
+});
+export type SetFastModeCmd = z.infer<typeof setFastModeCmdSchema>;
 
 export const approvalResponseSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("confirm"), accepted: z.boolean() }),
@@ -119,11 +136,41 @@ export const setThinkingLevelAckSchema = z.object({
 });
 export type SetThinkingLevelAck = z.infer<typeof setThinkingLevelAckSchema>;
 
+export const fastModeStateSchema = z.object({
+  enabled: z.boolean(),
+  available: z.boolean(),
+  active: z.boolean(),
+});
+export type FastModeState = z.infer<typeof fastModeStateSchema>;
+
+export const sessionUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cacheReadTokens: z.number().int().nonnegative(),
+  cacheWriteTokens: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  costUsd: z.number().nonnegative(),
+});
+export type SessionUsage = z.infer<typeof sessionUsageSchema>;
+
+export const subscriptionUsageSchema = z.object({
+  period: z.literal("weekly"),
+  remainingPercent: z.number().min(0).max(100),
+  resetsAt: z.iso.datetime().optional(),
+});
+export type SubscriptionUsage = z.infer<typeof subscriptionUsageSchema>;
+
+export const setFastModeAckSchema = fastModeStateSchema;
+export type SetFastModeAck = z.infer<typeof setFastModeAckSchema>;
+
 export const runtimeInfoAckSchema = z.object({
   model: modelRefSchema.optional(),
   thinkingLevel: thinkingLevelSchema,
   availableModels: z.array(modelRefSchema),
   availableThinkingLevels: z.array(thinkingLevelSchema),
+  fastMode: fastModeStateSchema.optional(),
+  sessionUsage: sessionUsageSchema.optional(),
+  subscriptionUsage: subscriptionUsageSchema.optional(),
   slashCommands: z.array(
     z.object({
       name: z.string().min(1),
@@ -156,6 +203,10 @@ export const commandSchemas = {
   setThinkingLevel: {
     payload: setThinkingLevelCmdSchema,
     ack: setThinkingLevelAckSchema,
+  },
+  setFastMode: {
+    payload: setFastModeCmdSchema,
+    ack: setFastModeAckSchema,
   },
   respondToApproval: {
     payload: respondToApprovalCmdSchema,

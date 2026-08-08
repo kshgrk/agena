@@ -9,7 +9,6 @@ import type {
   ConnectedInfo,
 } from "../../shared/bridge.ts";
 import { useApprovals } from "./approvals.ts";
-import { ensureSubscribed, resetSubscriptions } from "./ingest.ts";
 import { useSessions } from "./sessions.ts";
 import { getBridge } from "./transcript.ts";
 import type { ConnectionSlice } from "./types.ts";
@@ -20,6 +19,7 @@ export type ConnectionStore = ConnectionSlice & {
   setInfo: (info: ConnectedInfo | null) => void;
   /** Fill runtime controls lazily from a runtimeInfo() ack. */
   setRuntime: (sessionId: string, info: RuntimeInfoAck) => void;
+  setFastMode: (sessionId: string, enabled: boolean) => void;
 };
 
 export const connectionInitial: ConnectionSlice = {
@@ -41,10 +41,33 @@ export const useConnection = create<ConnectionStore>((set) => ({
           thinkingLevel: info.thinkingLevel,
           availableModels: info.availableModels,
           availableThinkingLevels: info.availableThinkingLevels,
+          ...(info.fastMode ? { fastMode: info.fastMode } : {}),
+          ...(info.sessionUsage ? { sessionUsage: info.sessionUsage } : {}),
+          ...(info.subscriptionUsage
+            ? { subscriptionUsage: info.subscriptionUsage }
+            : {}),
           ...(info.model ? { model: info.model } : {}),
         },
       },
     })),
+  setFastMode: (sessionId, enabled) =>
+    set((s) => {
+      const runtime = s.runtime[sessionId];
+      if (!runtime?.fastMode) return {};
+      return {
+        runtime: {
+          ...s.runtime,
+          [sessionId]: {
+            ...runtime,
+            fastMode: {
+              ...runtime.fastMode,
+              enabled,
+              active: enabled && runtime.fastMode.available,
+            },
+          },
+        },
+      };
+    }),
 }));
 
 /** Refresh every session whose model controls have already been loaded. */
@@ -81,6 +104,7 @@ export async function connectAndBootstrap(profileName?: string): Promise<void> {
   }
 
   // A fresh connect() tears down main's client + subscriptions — mirror that.
+  const { ensureSubscribed, resetSubscriptions } = await import("./ingest.ts");
   resetSubscriptions();
   const persisted = await loadPersistedState();
 

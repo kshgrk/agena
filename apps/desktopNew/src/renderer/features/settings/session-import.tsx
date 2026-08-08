@@ -14,7 +14,14 @@ import type {
 import { getBridge } from "../../lib/bridge.ts";
 import { formatBridgeError, isDesktopOnlyError } from "../../lib/errors.ts";
 import { pushToast } from "../../store/index.ts";
-import { Badge, Button, Checkbox, cx, Progress, Spinner } from "../../ui/index.ts";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  cx,
+  Progress,
+  Spinner,
+} from "../../ui/index.ts";
 import {
   DesktopOnlyState,
   EmptyRow,
@@ -66,7 +73,9 @@ function SourceCards({
             key={h}
             className="rounded-lg border border-border-subtle bg-surface p-3"
           >
-            <div className="text-sm font-medium text-fg">{HARNESS_LABEL[h]}</div>
+            <div className="text-sm font-medium text-fg">
+              {HARNESS_LABEL[h]}
+            </div>
             <div className="mt-0.5 text-xs tabular-nums text-fg-muted">
               {count} session{count === 1 ? "" : "s"} · {humanBytes(bytes)}
             </div>
@@ -168,26 +177,29 @@ function ProjectRow({
       </div>
       {expanded ? (
         <div className="space-y-1.5 pb-2.5 pl-[46px] pr-3">
-          <div className="text-2xs text-fg-muted">{counts || "no sessions"}</div>
+          <div className="text-2xs text-fg-muted">
+            {counts || "no sessions"}
+          </div>
           {available.map((h) => {
             const info = project.byHarness[h];
             if (!info) return null;
             return (
-              <label
+              <div
                 key={h}
-                className="flex w-fit cursor-pointer items-center gap-2 text-xs text-fg-secondary"
+                className="flex w-fit items-center gap-2 text-xs text-fg-secondary"
               >
                 <Checkbox
                   checked={selected?.has(h) ?? false}
                   disabled={disabled}
                   onCheckedChange={() => onToggleHarness(h)}
+                  aria-label={`Import ${HARNESS_LABEL[h]} sessions`}
                 />
                 {HARNESS_LABEL[h]} ({info.count} session
                 {info.count === 1 ? "" : "s"}, {humanBytes(info.bytes)})
-              </label>
+              </div>
             );
           })}
-          <label
+          <div
             className={cx(
               "flex w-fit items-center gap-2 text-xs",
               defaultCopyFiles(project)
@@ -199,6 +211,7 @@ function ProjectRow({
               checked={copyFiles && defaultCopyFiles(project)}
               disabled={disabled || !defaultCopyFiles(project)}
               onCheckedChange={onToggleCopyFiles}
+              aria-label="Copy project files into the workspace"
             />
             Copy project files into the workspace
             {defaultCopyFiles(project)
@@ -206,7 +219,7 @@ function ProjectRow({
               : project.exists
                 ? " (not a git repo)"
                 : " (folder no longer exists)"}
-          </label>
+          </div>
         </div>
       ) : null}
     </div>
@@ -218,7 +231,11 @@ function ResultRow({ r }: { r: ImportRunResult["sessions"][number] }) {
     <div className="flex items-center gap-2 px-3 py-1.5">
       <Badge
         tone={
-          r.status === "ok" ? "success" : r.status === "skipped" ? "neutral" : "danger"
+          r.status === "ok"
+            ? "success"
+            : r.status === "skipped"
+              ? "neutral"
+              : "danger"
         }
       >
         {r.status === "skipped" ? "skipped · already imported" : r.status}
@@ -243,9 +260,9 @@ export function SessionImportSection() {
   // Daemon predates /v1/imports (404) — scan still renders, importing is off.
   const [daemonSupport, setDaemonSupport] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<Record<string, ReadonlySet<Harness>>>(
-    {},
-  );
+  const [selected, setSelected] = useState<
+    Record<string, ReadonlySet<Harness>>
+  >({});
   const [copyFiles, setCopyFiles] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [running, setRunning] = useState(false);
@@ -267,7 +284,7 @@ export function SessionImportSection() {
     }
     if (status.status === "fulfilled") {
       setImports(status.value.imports);
-      setDaemonSupport(true);
+      setDaemonSupport(status.value.capabilities?.session ?? true);
     } else {
       setImports([]);
       setDaemonSupport(false);

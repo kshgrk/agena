@@ -243,6 +243,18 @@ test("createWsBridge: connect, subscribe, events+frames flow into one batch", as
   const bridge = createWsBridge(
     { url: "http://127.0.0.1:7777", token: "tok-1" },
     {
+      fetch: async (input, init) => {
+        assert.equal(String(input), "http://127.0.0.1:7777/v1/ws-tickets");
+        assert.equal(
+          (init?.headers as Record<string, string>).authorization,
+          "Bearer tok-1",
+        );
+        assert.deepEqual(JSON.parse(String(init?.body)), { path: "/v1/ws" });
+        return Response.json({
+          ticket: "one-use-ticket",
+          expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        });
+      },
       createSocket: (url, init) => {
         const sock: FakeMain = {
           url,
@@ -272,9 +284,13 @@ test("createWsBridge: connect, subscribe, events+frames flow into one batch", as
   bridge.onStatus((s) => statuses.push(s));
 
   const connecting = bridge.connect();
+  await tick();
   const sock = socks[0]!;
-  // browser WS auth: token rides as a query param; subprotocol is agena.v1
-  assert.match(sock.url, /^ws:\/\/127\.0\.0\.1:7777\/v1\/ws\?token=tok-1$/);
+  // Browser WS auth uses a short-lived ticket; the reusable token stays in HTTP.
+  assert.match(
+    sock.url,
+    /^ws:\/\/127\.0\.0\.1:7777\/v1\/ws\?ticket=one-use-ticket$/,
+  );
   assert.deepEqual(sock.protocols, ["agena.v1"]);
 
   sock.onopen?.();

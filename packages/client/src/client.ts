@@ -7,6 +7,9 @@ import {
   COMMAND_ACK_TIMEOUT_MS,
   type CommandName,
   type CompactAck,
+  type ContentBlock,
+  type CreateDerivedSessionRequest,
+  type CreatePairingResponse,
   type CreateSessionRequest,
   compactAckSchema,
   type DeleteProjectResponse,
@@ -20,6 +23,8 @@ import {
   type ImportMcpResponse,
   type ImportSessionRequest,
   type ImportSessionResponse,
+  type ImportSessionsRequest,
+  type ImportSessionsResponse,
   type ImportSkillRequest,
   type ImportSkillResponse,
   type ImportsResponse,
@@ -29,6 +34,8 @@ import {
   type ListSessionsQuery,
   type McpSummary,
   type ModelRef,
+  type NavigateSessionRequest,
+  type NavigateSessionResponse,
   type PendingApprovalSummary,
   PING_INTERVAL_MS,
   type PluginResponse,
@@ -48,6 +55,7 @@ import {
   type SearchQuery,
   type SessionStatus,
   type SessionSummary,
+  type SetFastModeAck,
   type SetModelAck,
   type SetThinkingLevelAck,
   type SkillSummary,
@@ -55,11 +63,13 @@ import {
   type StartMcpOAuthResponse,
   type StartProviderOAuthResponse,
   type SubscribeAck,
+  setFastModeAckSchema,
   setModelAckSchema,
   setThinkingLevelAckSchema,
   subscribeAckSchema,
   type ThinkingLevel,
   type UserMessageAnchor,
+  uploadImageResponseSchema,
   VISIBLE_BROWSER_CAPABILITY,
   type VisibleBrowserAction,
   type VisibleBrowserResult,
@@ -97,11 +107,18 @@ export { ulid };
 export class AgenaClientError extends Error {
   readonly code: string;
   readonly retryable: boolean;
-  constructor(code: string, message: string, retryable = false) {
+  readonly status: number | undefined;
+  constructor(
+    code: string,
+    message: string,
+    retryable = false,
+    status?: number,
+  ) {
     super(message);
     this.name = "AgenaClientError";
     this.code = code;
     this.retryable = retryable;
+    this.status = status;
   }
 }
 
@@ -149,8 +166,11 @@ export type AgenaClientOptions = {
   clientId?: string; // stable ULID per installed client (P3)
   clientName?: string;
   clientVersion?: string;
+  platform?: string;
+  socketAuth?: "header" | "ticket";
   createSocket?: (url: string, init: WsInit) => WsLike; // test seam
   createPtySocket?: (url: string, init: WsInit) => PtyWsLike;
+  fetch?: typeof fetch;
 };
 
 export type OpenPtyOptions = {
@@ -211,8 +231,11 @@ export class AgenaClient {
   private readonly token: string;
   private readonly clientName: string;
   private readonly clientVersion: string;
+  private readonly platform: string;
+  private readonly socketAuth: "header" | "ticket";
   private readonly createSocket: (url: string, init: WsInit) => WsLike;
   private readonly createPtySocket: (url: string, init: WsInit) => PtyWsLike;
+  private readonly fetchImpl: typeof fetch;
 
   private sock: WsLike | null = null;
   private ready = false; // welcome received on the current socket
@@ -236,11 +259,14 @@ export class AgenaClient {
     this.clientId = opts.clientId ?? ulid();
     this.clientName = opts.clientName ?? "agena";
     this.clientVersion = opts.clientVersion ?? "0.0.0";
+    this.platform = opts.platform ?? process.platform;
+    this.socketAuth = opts.socketAuth ?? "header";
     this.createSocket =
       opts.createSocket ?? ((url, init) => new NativeWebSocket(url, init));
     this.createPtySocket =
       opts.createPtySocket ??
       ((url, init) => new NativeWebSocket(url, init) as PtyWsLike);
+    this.fetchImpl = (opts.fetch ?? fetch).bind(globalThis);
   }
 
   /** Open the WS, send hello, await welcome (incl. protocol-version check). */
@@ -264,26 +290,44 @@ export class AgenaClient {
     return this.sendSubscribe(sessionId, fromSeq);
   }
 
-  async prompt(sessionId: string, text: string): Promise<PromptAck> {
+  async prompt(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck> {
     const res = await this.command("prompt", {
       sessionId,
-      content: [{ type: "text", text }],
+      content:
+        typeof content === "string"
+          ? [{ type: "text", text: content }]
+          : content,
     });
     return promptAckSchema.parse(res);
   }
 
-  async steer(sessionId: string, text: string): Promise<PromptAck> {
+  async steer(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck> {
     const res = await this.command("steer", {
       sessionId,
-      content: [{ type: "text", text }],
+      content:
+        typeof content === "string"
+          ? [{ type: "text", text: content }]
+          : content,
     });
     return promptAckSchema.parse(res);
   }
 
-  async followUp(sessionId: string, text: string): Promise<PromptAck> {
+  async followUp(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck> {
     const res = await this.command("followUp", {
       sessionId,
-      content: [{ type: "text", text }],
+      content:
+        typeof content === "string"
+          ? [{ type: "text", text: content }]
+          : content,
     });
     return promptAckSchema.parse(res);
   }
@@ -312,6 +356,14 @@ export class AgenaClient {
       thinkingLevel,
     });
     return setThinkingLevelAckSchema.parse(res);
+  }
+
+  async setFastMode(
+    sessionId: string,
+    enabled: boolean,
+  ): Promise<SetFastModeAck> {
+    const res = await this.command("setFastMode", { sessionId, enabled });
+    return setFastModeAckSchema.parse(res);
   }
 
   async respondToApproval(
@@ -374,6 +426,38 @@ export class AgenaClient {
         : (input ?? {});
     const body = await this.fetchJson("POST", "/v1/sessions", request);
     return (body as { sessionId: string }).sessionId;
+  }
+
+  /** POST /v1/sessions/:id/derived -> immutable fork or clone session id. */
+  async forkSession(
+    sourceSessionId: string,
+    sourceMessageId: string | undefined,
+    mode: "fork" | "clone",
+  ): Promise<string> {
+    const request: CreateDerivedSessionRequest = {
+      mode,
+      ...(sourceMessageId ? { sourceMessageId } : {}),
+    };
+    const body = await this.fetchJson(
+      "POST",
+      `/v1/sessions/${encodeURIComponent(sourceSessionId)}/derived`,
+      request,
+    );
+    return (body as { sessionId: string }).sessionId;
+  }
+
+  /** Move the active Pi leaf within this session and return its editable prompt. */
+  async navigateSession(
+    sessionId: string,
+    sourceMessageId: string,
+  ): Promise<string> {
+    const request: NavigateSessionRequest = { sourceMessageId };
+    const body = await this.fetchJson(
+      "POST",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/navigate`,
+      request,
+    );
+    return (body as NavigateSessionResponse).editorText;
   }
 
   /** GET /v1/sessions -> session ids, newest first (ULIDs sort by time). */
@@ -445,13 +529,32 @@ export class AgenaClient {
     return this.fetchBytes("GET", filesContentPath(path));
   }
 
+  async uploadImage(bytes: Uint8Array, mimeType: string) {
+    const body = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    return uploadImageResponseSchema.parse(
+      await this.fetchBody("POST", "/v1/images", body, mimeType),
+    ).ref;
+  }
+
+  async readBlob(hash: string): Promise<Uint8Array> {
+    const digest = hash.startsWith("sha256:") ? hash.slice(7) : hash;
+    return this.fetchBytes("GET", `/v1/blobs/${encodeURIComponent(digest)}`);
+  }
+
   async archiveFiles(path: string): Promise<Uint8Array> {
     return this.fetchBytes("GET", filesArchivePath(path));
   }
 
-  async createProject(name: string): Promise<ProjectResponse> {
+  async createProject(
+    name: string,
+    opts: { reuseExisting?: boolean } = {},
+  ): Promise<ProjectResponse> {
     return this.fetchJson("POST", "/v1/projects", {
       name,
+      ...opts,
     }) as Promise<ProjectResponse>;
   }
 
@@ -471,6 +574,35 @@ export class AgenaClient {
       "/v1/imports/session",
       body,
     ) as Promise<ImportSessionResponse>;
+  }
+
+  async importSessions(
+    body: ImportSessionsRequest,
+  ): Promise<ImportSessionsResponse> {
+    try {
+      return (await this.fetchJson(
+        "POST",
+        "/v1/imports/sessions",
+        body,
+      )) as ImportSessionsResponse;
+    } catch (err) {
+      if (!(err instanceof AgenaClientError) || err.status !== 404) throw err;
+    }
+    const sessions: ImportSessionsResponse["sessions"] = [];
+    for (const input of body.sessions) {
+      try {
+        sessions.push({
+          sourcePath: input.sourceFingerprint.sourcePath,
+          result: await this.importSession(input),
+        });
+      } catch (err) {
+        sessions.push({
+          sourcePath: input.sourceFingerprint.sourcePath,
+          error: err instanceof Error ? err.message : "session import failed",
+        });
+      }
+    }
+    return { sessions };
   }
 
   /** Returns the {@link ImportsResponse} envelope verbatim — the bridge passes it through. */
@@ -674,11 +806,17 @@ export class AgenaClient {
     );
   }
 
+  async createPairing(daemonUrl: string): Promise<CreatePairingResponse> {
+    return this.fetchJson("POST", "/v1/pairings", {
+      daemonUrl,
+    }) as Promise<CreatePairingResponse>;
+  }
+
   async openPty(opts: OpenPtyOptions): Promise<PtyAttachment> {
     const body = await this.fetchJson("POST", "/v1/ptys", opts);
     const ptyId = stringField(body, "ptyId");
     const wsPath = stringField(body, "wsPath");
-    return { ptyId, wsPath, socket: this.connectPty(wsPath) };
+    return { ptyId, wsPath, socket: await this.connectPty(wsPath) };
   }
 
   async listPtys(): Promise<PtySummary[]> {
@@ -690,9 +828,12 @@ export class AgenaClient {
     await this.fetchJson("DELETE", `/v1/ptys/${encodeURIComponent(ptyId)}`);
   }
 
-  connectPty(wsPath: string): PtyWsLike {
-    const socket = this.createPtySocket(this.ptyWsUrl(wsPath), {
-      headers: { authorization: `Bearer ${this.token}` },
+  async connectPty(wsPath: string): Promise<PtyWsLike> {
+    const socket = this.createPtySocket(await this.authenticatedWsUrl(wsPath), {
+      headers:
+        this.socketAuth === "header"
+          ? { authorization: `Bearer ${this.token}` }
+          : {},
     });
     socket.binaryType = "arraybuffer";
     return socket;
@@ -732,7 +873,7 @@ export class AgenaClient {
   ): Promise<Response> {
     let res: Response;
     try {
-      res = await fetch(this.httpBase + path, {
+      res = await this.fetchImpl(this.httpBase + path, {
         method,
         headers: {
           authorization: `Bearer ${this.token}`,
@@ -762,6 +903,7 @@ export class AgenaClient {
         parsed?.code ?? fallback,
         parsed?.message ?? `${method} ${path} -> HTTP ${res.status}`,
         parsed?.retryable ?? false,
+        res.status,
       );
     }
     return res;
@@ -772,6 +914,17 @@ export class AgenaClient {
     return url.replace(/^http(s?):/, "ws$1:");
   }
 
+  private async authenticatedWsUrl(path: string): Promise<string> {
+    const url = path === WS_PATH ? this.wsUrl : this.ptyWsUrl(path);
+    if (this.socketAuth === "header") return url;
+    const body = (await this.fetchJson("POST", "/v1/ws-tickets", {
+      path,
+    })) as { ticket: string };
+    const ticketed = new URL(url);
+    ticketed.searchParams.set("ticket", body.ticket);
+    return ticketed.toString();
+  }
+
   // ---- connection machinery -------------------------------------------------
 
   private open(): Promise<WelcomeEnvelope> {
@@ -779,11 +932,20 @@ export class AgenaClient {
       this.everConnected ? "reconnecting" : "connecting",
       `attempt ${this.attempt + 1}`,
     );
+    return this.socketAuth === "ticket"
+      ? this.authenticatedWsUrl(WS_PATH).then((url) => this.openSocket(url))
+      : this.openSocket(this.wsUrl);
+  }
+
+  private openSocket(socketUrl: string): Promise<WelcomeEnvelope> {
     return new Promise((resolve, reject) => {
       this.welcomeWait = { resolve, reject };
-      const sock = this.createSocket(this.wsUrl, {
+      const sock = this.createSocket(socketUrl, {
         protocols: [WS_SUBPROTOCOL],
-        headers: { authorization: `Bearer ${this.token}` },
+        headers:
+          this.socketAuth === "header"
+            ? { authorization: `Bearer ${this.token}` }
+            : {},
       });
       this.sock = sock;
       this.ready = false;
@@ -797,7 +959,7 @@ export class AgenaClient {
             client: {
               name: this.clientName,
               version: this.clientVersion,
-              platform: process.platform,
+              platform: this.platform,
               ...(this.onVisibleBrowserRequest
                 ? { capabilities: [VISIBLE_BROWSER_CAPABILITY] }
                 : {}),

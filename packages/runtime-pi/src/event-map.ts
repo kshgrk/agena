@@ -17,6 +17,7 @@ export interface MapperState {
   turnId: string | null;
   messageId: string | null;
   lastAssistantMessageId: string | null;
+  failure: { code: string; message: string } | null;
   toolOutputs: Map<string, string>;
   warned: Set<string>;
 }
@@ -33,6 +34,7 @@ export function createMapperState(
     turnId: null,
     messageId: null,
     lastAssistantMessageId: null,
+    failure: null,
     toolOutputs: new Map(),
     warned: new Set(),
   };
@@ -72,23 +74,37 @@ export function mapPiEvent(
 ): RuntimeEvent[] {
   switch (ev.type) {
     case "agent_start": {
+      if (state.runId) {
+        state.failure = null;
+        return [];
+      }
+      if (!state.triggerMessageId) {
+        return drop(state, "agent_start_without_trigger");
+      }
       state.runId = state.mintId();
       return [
         {
           type: "run-started",
           runId: state.runId,
           trigger: "prompt", // M1: prompt is the only trigger (steer/followUp are M4)
-          triggerMessageId: state.triggerMessageId ?? "",
+          triggerMessageId: state.triggerMessageId,
         },
       ];
     }
     case "agent_end": {
-      if (ev.willRetry) return []; // Pi retries this run after backoff — not terminal
+      if (ev.willRetry) {
+        state.failure = null;
+        return [];
+      }
       if (!state.runId) return [];
       const runId = state.runId;
+      const failure = state.failure;
       state.runId = null;
       state.triggerMessageId = null;
-      return [{ type: "run-completed", runId }];
+      state.failure = null;
+      return failure
+        ? [{ type: "run-failed", runId, error: failure }]
+        : [{ type: "run-completed", runId }];
     }
     case "turn_start":
       state.turnId = state.mintId(); // turn events themselves are M2 frames
@@ -135,9 +151,8 @@ export function mapPiEvent(
       state.messageId = null;
       state.lastAssistantMessageId = messageId;
       if (m.stopReason === "error" || m.stopReason === "aborted") {
-        state.runId = null;
-        state.triggerMessageId = null;
         const message = m.errorMessage ?? `Pi stopped with ${m.stopReason}`;
+        state.failure = { code: m.stopReason, message };
         return [
           {
             type: "assistant-message-failed",
@@ -149,13 +164,9 @@ export function mapPiEvent(
             ),
             error: { code: m.stopReason, message },
           },
-          {
-            type: "run-failed",
-            runId,
-            error: { code: m.stopReason, message },
-          },
         ];
       }
+      state.failure = null;
       return [
         {
           type: "assistant-message-completed",
@@ -220,6 +231,59 @@ export function mapPiEvent(
       const title = normalizeTitle(ev.name);
       return title ? [{ type: "session-title-changed", title }] : [];
     }
+    case "auto_retry_start":
+      return state.runId
+        ? [
+            {
+              type: "retry-started",
+              runId: state.runId,
+              attempt: ev.attempt,
+              maxAttempts: ev.maxAttempts,
+              delayMs: ev.delayMs,
+              errorSummary: ev.errorMessage,
+            },
+          ]
+        : [];
+    case "auto_retry_end":
+      return state.runId
+        ? [
+            {
+              type: "retry-ended",
+              runId: state.runId,
+              outcome: ev.success ? "recovered" : "exhausted",
+            },
+          ]
+        : [];
+    case "compaction_start":
+      // Manual compaction is already finalized by handleCompact; automatic
+      // compaction only exists on this event stream.
+      return ev.reason === "manual"
+        ? []
+        : [{ type: "compaction-started", trigger: "auto" }];
+    case "compaction_end":
+      if (ev.reason === "manual") return [];
+      if (!ev.result) {
+        return [
+          {
+            type: "compaction-failed",
+            error: {
+              code: ev.aborted ? "aborted" : "compaction_error",
+              message:
+                ev.errorMessage ??
+                (ev.aborted ? "Compaction was aborted" : "Compaction failed"),
+            },
+          },
+        ];
+      }
+      return [
+        {
+          type: "compaction-completed",
+          summary: ev.result.summary,
+          tokensBefore: ev.result.tokensBefore,
+          tokensAfter: ev.result.estimatedTokensAfter ?? ev.result.tokensBefore,
+          trigger: "auto",
+        },
+      ];
     default:
       return drop(state, ev.type);
   }

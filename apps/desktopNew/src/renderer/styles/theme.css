@@ -493,3 +493,38 @@
     padding-inline: 1.25rem;
   }
 }
+
+@media (max-width: 767px) {
+  .transcript-column {
+    padding-inline: 0.875rem;
+  }
+
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+}
+
+/* Native/narrow Conductor adaptations. Desktop dimensions remain unchanged. */
+.agena-mobile .agena-composer-control {
+  min-width: 2.75rem;
+  height: 2.75rem;
+}
+
+.agena-mobile .agena-composer-segmented [role="radio"] {
+  min-height: 2.75rem;
+}
+
+.agena-mobile [role="menuitem"] {
+  min-height: 2.75rem;
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .agena-mobile-nav button {
+    min-height: 2.75rem;
+  }
+
+  .agena-mobile-nav button > span {
+    display: none;
+  }
+}

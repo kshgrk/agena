@@ -6,6 +6,7 @@ import type {
   AgentTaskCreated,
   AgentTaskSummary,
   ApprovalRequested,
+  BlobRef,
   ContentBlock,
   EventSource,
   SearchHit,
@@ -60,6 +61,20 @@ export interface CreateSessionInput {
   hostCwdHint?: string;
 }
 
+export interface CreateDerivedSessionInput {
+  parentSessionId: string;
+  sourceMessageId?: string;
+  mode: "fork" | "clone";
+  title?: string;
+  source?: EventSource;
+}
+
+export interface DerivedFrom {
+  parentSessionId: string;
+  sourceMessageId?: string;
+  mode: "fork" | "clone";
+}
+
 export interface SessionRecord {
   sessionId: string;
   workspaceId: string;
@@ -79,6 +94,7 @@ export interface SessionRecord {
   sessionKind?: "primary" | "subagent";
   parentSessionId?: string;
   parentTaskId?: string;
+  derivedFrom?: DerivedFrom;
 }
 
 export interface AgentTaskStore {
@@ -154,8 +170,19 @@ export class StoreError extends Error {
 }
 
 export interface EventStore {
+  putBlob(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  readBlob(
+    hash: string,
+  ): Promise<{ bytes: Uint8Array; mimeType?: string } | null>;
   /** Row + root branch + session.created, one atomic step (§7.4). */
   createSession(input: CreateSessionInput): Promise<SessionRecord>;
+  createDerivedSession(
+    input: CreateDerivedSessionInput,
+  ): Promise<SessionRecord>;
+  getRuntimeMessageRef(
+    sessionId: string,
+    messageId: string,
+  ): Promise<string | null>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
   listSessions(filter?: SessionFilter): Promise<SessionRecord[]>;
 

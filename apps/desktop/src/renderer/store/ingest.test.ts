@@ -206,6 +206,34 @@ describe("ingestBatch", () => {
     expect(useSessions.getState().byId.s1?.status).toBe("idle");
   });
 
+  it("moves a session to the top as soon as a durable event arrives", () => {
+    useSessions.getState().setAll([
+      { ...summary, updatedAt: "2026-07-01T00:00:00.000Z" },
+      {
+        ...summary,
+        sessionId: "s2",
+        updatedAt: "2026-07-05T00:00:00.000Z",
+      },
+    ]);
+    expect(useSessions.getState().order).toEqual(["s2", "s1"]);
+
+    ingestBatch(
+      batch({
+        events: [
+          {
+            event: ev(1, "message.user.created", {
+              messageId: "mu",
+              content: [text("latest")],
+            }),
+            replayed: false,
+          },
+        ],
+      }),
+    );
+
+    expect(useSessions.getState().order).toEqual(["s1", "s2"]);
+  });
+
   it("flags lost sessions in the sessions store", () => {
     ingestBatch(batch({ lostSessions: ["s9"] }));
     expect(useSessions.getState().lost).toEqual(["s9"]);

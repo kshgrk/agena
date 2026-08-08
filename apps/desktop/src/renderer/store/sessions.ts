@@ -29,10 +29,15 @@ export const sessionsInitial: SessionsState & { lost: readonly string[] } = {
   lost: [],
 };
 
-/** Newest-first: session ids are ULIDs, so lexicographic desc = time desc. */
-const sortNewestFirst = (
+/** Most recently used first; session id keeps equal timestamps deterministic. */
+const sortRecentFirst = (
   byId: Readonly<Record<string, SessionSummary>>,
-): string[] => Object.keys(byId).sort((a, b) => b.localeCompare(a));
+): string[] =>
+  Object.keys(byId).sort(
+    (a, b) =>
+      (byId[b]?.updatedAt ?? "").localeCompare(byId[a]?.updatedAt ?? "") ||
+      b.localeCompare(a),
+  );
 
 export const useSessions = create<SessionsStore>((set) => ({
   ...sessionsInitial,
@@ -42,7 +47,7 @@ export const useSessions = create<SessionsStore>((set) => ({
       for (const s of summaries) byId[s.sessionId] = s;
       return {
         byId,
-        order: sortNewestFirst(byId),
+        order: sortRecentFirst(byId),
         loading: false,
         error: null,
       };
@@ -50,7 +55,7 @@ export const useSessions = create<SessionsStore>((set) => ({
   upsert: (summary) =>
     set((s) => {
       const byId = { ...s.byId, [summary.sessionId]: summary };
-      return { byId, order: sortNewestFirst(byId) };
+      return { byId, order: sortRecentFirst(byId) };
     }),
   setActive: (sessionId) => {
     set({ activeSessionId: sessionId });
@@ -78,12 +83,11 @@ export const useSessions = create<SessionsStore>((set) => ({
     set((s) => {
       const cur = s.byId[sessionId];
       if (!cur || seq <= cur.lastSeq) return s;
-      return {
-        byId: {
-          ...s.byId,
-          [sessionId]: { ...cur, lastSeq: seq, updatedAt: at },
-        },
+      const byId = {
+        ...s.byId,
+        [sessionId]: { ...cur, lastSeq: seq, updatedAt: at },
       };
+      return { byId, order: sortRecentFirst(byId) };
     }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),

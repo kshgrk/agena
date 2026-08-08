@@ -28,8 +28,9 @@ const subscribedIds = new Set<string>();
 
 /**
  * THE single subscribe path (no double-subscribe): first call per session wins;
- * fromSeq defaults to the persisted replay cursor. Rejects with the bridge
- * error so callers can toast.
+ * Without an explicit cursor, uncached sessions load their newest HTTP page
+ * before subscribing; persisted replay is the fallback. Rejects with the
+ * bridge error so callers can toast.
  */
 export async function ensureSubscribed(
   sessionId: string,
@@ -43,7 +44,19 @@ export async function ensureSubscribed(
     let seq = fromSeq;
     if (seq === undefined) {
       cursorsPromise ??= bridge.loadPersisted().then((p) => p.cursors);
-      seq = (await cursorsPromise)[sessionId]?.seq ?? 0;
+      const savedSeq = (await cursorsPromise)[sessionId]?.seq ?? 0;
+      const loadedSeq = useTranscripts.getState().bySession[sessionId]?.lastSeq;
+      seq = loadedSeq && loadedSeq > 0 ? loadedSeq : savedSeq;
+      if (!loadedSeq) {
+        const headSeq = useSessions.getState().byId[sessionId]?.lastSeq ?? 0;
+        try {
+          seq =
+            (await useTranscripts.getState().primeRecent(sessionId, headSeq)) ||
+            seq;
+        } catch {
+          // HTTP paging is an optimization; WS replay remains the recovery path.
+        }
+      }
     }
     await bridge.subscribe(sessionId, seq);
   } catch (err) {

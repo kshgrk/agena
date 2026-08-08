@@ -5,18 +5,34 @@
 // ghost chips fed by runtimeInfo, Esc two-step abort, Enter/⌘Enter send,
 // per-session drafts persisted through the bridge, disabled while
 // disconnected. Ported from apps/desktop composer.tsx onto the new kit.
-import type { ModelRef, ThinkingLevel } from "@agena/protocol";
+import type {
+  BlobRef,
+  ContentBlock,
+  ModelRef,
+  ThinkingLevel,
+} from "@agena/protocol";
 import {
   ArrowUp,
   Brain,
   ChevronDown,
   Cpu,
   Ellipsis,
+  ImagePlus,
   Square,
+  X,
+  Zap,
 } from "lucide-react";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { create } from "zustand";
 import { peekBridge } from "../../lib/bridge.ts";
+import { formatUsageStatus } from "../../lib/runtime-status.ts";
 import {
   pushToast,
   registerCommands,
@@ -29,12 +45,14 @@ import {
   Badge,
   cx,
   Menu,
+  MenuCheckboxItem,
   MenuContent,
   MenuItem,
   MenuTrigger,
   Segmented,
   Tooltip,
 } from "../../ui/index.ts";
+import { clipboardImageFiles } from "./clipboard.ts";
 import { ModelPicker } from "./model-picker.tsx";
 import { errText, performSend } from "./send.ts";
 
@@ -99,8 +117,15 @@ async function abortTurn(sessionId: string): Promise<void> {
 
 async function compactHistory(sessionId: string): Promise<void> {
   try {
-    await peekBridge()?.compact(sessionId);
+    const bridge = peekBridge();
+    await bridge?.compact(sessionId);
     pushToast({ kind: "ok", title: "History compacted" });
+    if (bridge) {
+      void bridge
+        .runtimeInfo(sessionId)
+        .then((info) => useConnection.getState().setRuntime(sessionId, info))
+        .catch(() => {});
+    }
   } catch (e) {
     pushToast({ kind: "err", title: "Compaction failed", detail: errText(e) });
   }
@@ -117,13 +142,56 @@ const isActive = (
 // ---- ghost chips (design.md §6: model + thinking selectors) -------------------------
 
 const chipCls =
-  "inline-flex h-6 max-w-44 items-center gap-1 rounded-md px-2 text-xs " +
+  "agena-composer-control inline-flex h-6 max-w-44 items-center gap-1 rounded-md px-2 text-xs " +
   "text-fg-secondary transition-colors duration-100 hover:bg-fg/6 hover:text-fg " +
   "[&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg-muted";
 
+type DraftImage = {
+  id: string;
+  name: string;
+  ref: BlobRef;
+  previewUrl: string;
+};
+
+async function uploadableImage(
+  file: File,
+): Promise<{ bytes: Uint8Array; mimeType: string }> {
+  if (file.size <= 3_000_000) {
+    return {
+      bytes: new Uint8Array(await file.arrayBuffer()),
+      mimeType: file.type,
+    };
+  }
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  for (const quality of [0.82, 0.68, 0.52]) {
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", quality),
+    );
+    if (blob && blob.size <= 3_000_000) {
+      return {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        mimeType: "image/jpeg",
+      };
+    }
+  }
+  throw new Error("Image is too large after resizing");
+}
+
 // ---- component ------------------------------------------------------------------------
 
-export function Composer({ sessionId }: { sessionId: string }) {
+export function Composer({
+  sessionId,
+  mobile = false,
+}: {
+  sessionId: string;
+  mobile?: boolean;
+}) {
   const value = useComposerDrafts((s) => s.drafts[sessionId] ?? "");
   const setDraft = useComposerDrafts((s) => s.setDraft);
   const active = useTranscripts((s) => isActive(s.bySession[sessionId]));
@@ -141,8 +209,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const [queueMode, setQueueMode] = useState<"steer" | "followUp">("steer");
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [images, setImages] = useState<DraftImage[]>([]);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const lastInsertNonce = useRef(useUi.getState().composerInsert?.nonce ?? 0);
+  const wasActive = useRef(active);
 
   useEffect(() => hydrateDrafts(), []);
 
@@ -163,6 +235,16 @@ export function Composer({ sessionId }: { sessionId: string }) {
       .then((info) => useConnection.getState().setRuntime(sessionId, info))
       .catch(() => {});
   }, [sessionId, runtime, connected]);
+
+  useEffect(() => {
+    if (wasActive.current && !active && connected) {
+      void peekBridge()
+        ?.runtimeInfo(sessionId)
+        .then((info) => useConnection.getState().setRuntime(sessionId, info))
+        .catch(() => {});
+    }
+    wasActive.current = active;
+  }, [active, connected, sessionId]);
 
   // cross-pane "insert into composer" (nonce re-triggers on the same text;
   // an empty insert is the "focus composer" signal)
@@ -212,7 +294,22 @@ export function Composer({ sessionId }: { sessionId: string }) {
   async function doSend(): Promise<void> {
     const text = value.trim();
     const bridge = peekBridge();
-    if (!text || !connected || sending || !bridge) return;
+    if (
+      (!text && images.length === 0) ||
+      !connected ||
+      sending ||
+      uploading ||
+      !bridge
+    )
+      return;
+    const content: ContentBlock[] = [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      ...images.map((image) => ({
+        type: "image" as const,
+        ref: image.ref,
+        alt: image.name,
+      })),
+    ];
     setSending(true);
     try {
       const out = await performSend(
@@ -221,16 +318,87 @@ export function Composer({ sessionId }: { sessionId: string }) {
           steer: (t) => bridge.steer(sessionId, t),
           followUp: (t) => bridge.followUp(sessionId, t),
         },
-        { active, queueMode, text },
+        { active, queueMode, text, content },
       );
       if (out.notice) pushToast({ kind: "info", title: out.notice });
       setDraft(sessionId, "");
+      for (const image of images) URL.revokeObjectURL(image.previewUrl);
+      setImages([]);
     } catch (e) {
       pushToast({ kind: "err", title: "Send failed", detail: errText(e) });
     } finally {
       setSending(false);
       taRef.current?.focus();
     }
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    const bridge = peekBridge();
+    if (!bridge) return;
+    setUploading(true);
+    try {
+      const added = await Promise.all(
+        files.map(async (file) => {
+          const prepared = await uploadableImage(file);
+          const ref = await bridge.uploadImage(
+            prepared.bytes,
+            prepared.mimeType,
+          );
+          return {
+            id: crypto.randomUUID(),
+            name: file.name || "image",
+            ref,
+            previewUrl: URL.createObjectURL(file),
+          };
+        }),
+      );
+      setImages((current) => [...current, ...added]);
+    } catch (error) {
+      pushToast({
+        kind: "err",
+        title: "Image upload failed",
+        detail: errText(error),
+      });
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function addPickedImages(event: ChangeEvent<HTMLInputElement>): void {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    void addImageFiles(files);
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    const files = clipboardImageFiles(event.clipboardData);
+    if (files.length === 0) return;
+    event.preventDefault();
+    const pastedText = event.clipboardData.getData("text/plain");
+    if (pastedText) {
+      const start = event.currentTarget.selectionStart;
+      const end = event.currentTarget.selectionEnd;
+      setDraft(
+        sessionId,
+        `${value.slice(0, start)}${pastedText}${value.slice(end)}`,
+      );
+      queueMicrotask(() =>
+        taRef.current?.setSelectionRange(
+          start + pastedText.length,
+          start + pastedText.length,
+        ),
+      );
+    }
+    void addImageFiles(files);
+  }
+
+  function removeImage(id: string): void {
+    setImages((current) => {
+      const removed = current.find((image) => image.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((image) => image.id !== id);
+    });
   }
 
   function onStop(): void {
@@ -257,24 +425,53 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   async function pickModel(model: ModelRef): Promise<void> {
     try {
-      const ack = await peekBridge()?.setModel(sessionId, model);
-      if (!ack) return;
-      useConnection.setState((s) => {
-        const r = s.runtime[sessionId];
-        return r
+      const bridge = peekBridge();
+      if (!bridge) return;
+      const ack = await bridge.setModel(sessionId, model);
+      useConnection.setState((current) => {
+        const existing = current.runtime[sessionId];
+        return existing
           ? {
               runtime: {
-                ...s.runtime,
-                [sessionId]: { ...r, model: ack.model },
+                ...current.runtime,
+                [sessionId]: { ...existing, model: ack.model },
               },
             }
           : {};
       });
+      void bridge
+        .runtimeInfo(sessionId)
+        .then((info) => useConnection.getState().setRuntime(sessionId, info))
+        .catch(() => {});
     } catch (e) {
       pushToast({
         kind: "err",
         title: "Model change failed",
         detail: errText(e),
+      });
+    }
+  }
+
+  async function toggleFastMode(enabled: boolean): Promise<void> {
+    try {
+      const state = await peekBridge()?.setFastMode(sessionId, enabled);
+      if (!state) return;
+      useConnection.setState((current) => {
+        const existing = current.runtime[sessionId];
+        return existing
+          ? {
+              runtime: {
+                ...current.runtime,
+                [sessionId]: { ...existing, fastMode: state },
+              },
+            }
+          : {};
+      });
+    } catch (error) {
+      pushToast({
+        kind: "err",
+        title: "Fast mode change failed",
+        detail: errText(error),
       });
     }
   }
@@ -306,7 +503,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
   }
 
-  const canSend = connected && !sending && value.trim() !== "";
+  const canSend =
+    connected &&
+    !sending &&
+    !uploading &&
+    (value.trim() !== "" || images.length > 0);
   const modelAvailable = runtime?.availableModels.some(
     (model) =>
       model.provider === runtime.model?.provider &&
@@ -315,6 +516,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const modelLabel = modelAvailable
     ? (runtime?.model?.id ?? "model")
     : "Choose model";
+  const usageLabel = formatUsageStatus(
+    runtime?.subscriptionUsage,
+    runtime?.sessionUsage,
+  );
 
   return (
     <div className="transcript-column pb-3 pt-2">
@@ -342,6 +547,35 @@ export function Composer({ sessionId }: { sessionId: string }) {
       ) : null}
 
       <div className="rounded-2xl border border-border bg-surface transition-colors duration-100 focus-within:border-accent/50">
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
+          multiple
+          className="hidden"
+          onChange={addPickedImages}
+        />
+        {images.length > 0 ? (
+          <div className="flex gap-2 overflow-x-auto px-3 pt-3">
+            {images.map((image) => (
+              <div key={image.id} className="relative shrink-0">
+                <img
+                  src={image.previewUrl}
+                  alt={image.name}
+                  className="size-16 rounded-lg border border-border object-cover"
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove ${image.name}`}
+                  onClick={() => removeImage(image.id)}
+                  className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-surface-raised text-fg shadow"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <textarea
           ref={taRef}
           rows={1}
@@ -359,10 +593,26 @@ export function Composer({ sessionId }: { sessionId: string }) {
           aria-label="Composer"
           onChange={(e) => setDraft(sessionId, e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           className="block max-h-[40vh] min-h-11 w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 text-base text-fg outline-none placeholder:text-fg-muted disabled:opacity-50"
         />
 
         <div className="flex items-center gap-1 px-2.5 pb-2.5 pt-1">
+          <button
+            type="button"
+            aria-label="Add images"
+            disabled={!connected || uploading}
+            onClick={() => imageInputRef.current?.click()}
+            className={cx(chipCls, "px-1 disabled:opacity-40")}
+          >
+            <ImagePlus />
+          </button>
+          {runtime?.fastMode?.active ? (
+            <Zap
+              aria-label="Fast mode active"
+              className="size-3.5 shrink-0 text-warn"
+            />
+          ) : null}
           {active ? (
             <Tooltip content="Model changes apply between turns only">
               <button
@@ -382,6 +632,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
               label={modelLabel}
               chipCls={chipCls}
               onPick={(m) => void pickModel(m)}
+              mobile={mobile}
             />
           )}
 
@@ -428,11 +679,35 @@ export function Composer({ sessionId }: { sessionId: string }) {
               </button>
             </MenuTrigger>
             <MenuContent>
+              <MenuCheckboxItem
+                checked={runtime?.fastMode?.enabled ?? false}
+                disabled={
+                  !runtime?.fastMode?.available && !runtime?.fastMode?.enabled
+                }
+                onCheckedChange={(checked) =>
+                  void toggleFastMode(checked === true)
+                }
+              >
+                Fast mode
+              </MenuCheckboxItem>
               <MenuItem onSelect={() => void compactHistory(sessionId)}>
                 Compact history
               </MenuItem>
             </MenuContent>
           </Menu>
+
+          {mobile && usageLabel ? (
+            <span
+              className="min-w-0 truncate px-1 text-2xs tabular-nums text-fg-muted"
+              title={
+                runtime?.subscriptionUsage
+                  ? "ChatGPT Codex weekly quota remaining"
+                  : "Cumulative cost for this session"
+              }
+            >
+              {usageLabel}
+            </span>
+          ) : null}
 
           {!connected ? (
             <span className="px-1 text-2xs text-fg-muted">reconnecting…</span>
@@ -453,23 +728,47 @@ export function Composer({ sessionId }: { sessionId: string }) {
                   { value: "steer", label: "Steer" },
                   { value: "followUp", label: "Queue" },
                 ]}
+                {...(mobile ? { className: "agena-composer-segmented" } : {})}
               />
             ) : null}
 
             {active ? (
-              <Tooltip
-                content={confirming ? "Click again to confirm" : "Stop turn"}
-                shortcut="Esc"
-              >
+              mobile ? (
                 <button
                   type="button"
                   aria-label="Stop turn"
                   onClick={onStop}
-                  className="flex size-7 items-center justify-center rounded-md bg-danger/10 text-danger transition-colors duration-100 hover:bg-danger/16"
+                  className="agena-composer-control flex size-7 items-center justify-center rounded-md bg-danger/10 text-danger transition-colors duration-100 hover:bg-danger/16"
                 >
                   <Square className="size-3 fill-current" />
                 </button>
-              </Tooltip>
+              ) : (
+                <Tooltip
+                  content={confirming ? "Click again to confirm" : "Stop turn"}
+                  shortcut="Esc"
+                >
+                  <button
+                    type="button"
+                    aria-label="Stop turn"
+                    onClick={onStop}
+                    className="agena-composer-control flex size-7 items-center justify-center rounded-md bg-danger/10 text-danger transition-colors duration-100 hover:bg-danger/16"
+                  >
+                    <Square className="size-3 fill-current" />
+                  </button>
+                </Tooltip>
+              )
+            ) : null}
+
+            {mobile ? (
+              <button
+                type="button"
+                aria-label="Send"
+                disabled={!canSend}
+                onClick={() => void doSend()}
+                className="agena-composer-control flex size-7 items-center justify-center rounded-md bg-accent text-accent-fg transition-colors duration-100 hover:bg-accent-hover active:bg-accent-active disabled:pointer-events-none disabled:opacity-40"
+              >
+                <ArrowUp className="size-4" />
+              </button>
             ) : (
               <Tooltip content="Send" shortcut="⏎">
                 <button
@@ -477,7 +776,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
                   aria-label="Send"
                   disabled={!canSend}
                   onClick={() => void doSend()}
-                  className="flex size-7 items-center justify-center rounded-md bg-accent text-accent-fg transition-colors duration-100 hover:bg-accent-hover active:bg-accent-active disabled:pointer-events-none disabled:opacity-40"
+                  className="agena-composer-control flex size-7 items-center justify-center rounded-md bg-accent text-accent-fg transition-colors duration-100 hover:bg-accent-hover active:bg-accent-active disabled:pointer-events-none disabled:opacity-40"
                 >
                   <ArrowUp className="size-4" />
                 </button>

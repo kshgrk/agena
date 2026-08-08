@@ -130,7 +130,7 @@ export function createProjectSessionInput(
   };
 }
 
-/** Newest-first order preserved within groups; control sessions never listed. */
+/** Store order preserved within groups; control sessions never listed. */
 export function splitSessionSections(
   byId: Readonly<Record<string, SessionSummary>>,
   order: readonly string[],

@@ -5,6 +5,7 @@ import { MessageSquare } from "lucide-react";
 import { useSessions } from "../../store/index.ts";
 import { EmptyState } from "../../ui/index.ts";
 import { ChildSessionBanner } from "../agents/task-group.tsx";
+import { SessionLineage } from "./session-actions.tsx";
 import { Transcript } from "./transcript-pane.tsx";
 
 export function TranscriptPane() {
@@ -21,6 +22,7 @@ export function TranscriptPane() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ChildSessionBanner sessionId={sessionId} />
+      <SessionLineage sessionId={sessionId} />
       <div className="min-h-0 flex-1">
         <Transcript sessionId={sessionId} />
       </div>

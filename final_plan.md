@@ -58,6 +58,7 @@ agena files ls src/            # browse/read/get/put files without the TUI
 agena snapshot create "before refactor"
 agena import claude            # one-time backfill
 agena info                     # diagnostics: daemon, versions, .agena/ discovery
+agena plugins list             # browse the Agena catalog and installed integrations
 ```
 
 ## 1.4 Feels-local requirements (FL-1 … FL-9)
@@ -93,13 +94,14 @@ These are product acceptance requirements; milestone acceptance criteria (§14) 
 | `agena snapshot create <name>` / `list` / `restore <id>` | Tarball `/workspace` (mechanically excludes `/var/lib/agena`). Restore replaces files only and appends `snapshot.restored` to the workspace control session; it NEVER rolls back the event store (P1). | HTTP |
 | `agena approvals` | List pending approvals across sessions (`GET /v1/approvals?pending=1`, derived from durable events). | HTTP |
 | `agena approve <approvalId> [--option <id> \| --input <text> \| --input-file <path> \| --deny]` | Respond to an approval headlessly (same command path as the TUI modal; `--input-file` serves `editor`-kind approvals). | HTTP + main WS |
-| `agena import claude` / `agena import codex [--path <dir>]` | CLI reads local `~/.claude` / `~/.codex` data, streams a tar to `POST /v1/imports`; daemon writes the raw archive under `/var/lib/agena/raw-imports/`, normalizes into events (`source.kind: "importer"`), generates resume-ready summaries. Idempotent per `source_ref`. `--dry-run` supported. | HTTP |
+| `agena import claude` / `agena import codex [--path <dir>]` | CLI uses the same local discovery/conversion pipeline as Desktop, creates or resumes the project root, then sends ordered Pi v3 session batches. Idempotent per `(machineId, harness, sourceSessionId)`. `--dry-run` supported. | HTTP |
 | `agena info` | Diagnostics: daemon health/version, protocol version, pinned Pi version, workspace path, DB/event counts, `.agena/` discovery report with per-descriptor errors (P20), auth status. `--json`. | HTTP `GET /v1/diagnostics` |
+| `agena plugins list` / `search <query>` / `install <id>` / `enable <id>` / `disable <id>` / `update [<id>]` / `remove <id>` / `check` | Browse the catalog (including the approximately 1,500 seeded integrations), inspect installed state, and run explicit lifecycle operations. `--kind`, `--status`, `--source`, `--json`, and cursor pagination apply where relevant. | HTTP |
 | `agena rebuild` | Drop and rebuild ALL projections — messages, tool_calls, **and the FTS5 index** — from the event log (`POST /v1/admin/rebuild`). Safe to run anytime (P7). Requires `--yes` in non-TTY. | HTTP |
 | `agena workspace init [--git <url> \| --from-local <path>]` / `open <name>` / `stop <name>` / `rm <name> [--purge]` / `logs <name>` | Provision/manage workspace containers: mints `workspaceId` + auth token, renders the compose project, seeds `/workspace`. `rm` keeps volumes unless `--purge` (typed-name confirmation). §10.4. | local Docker + HTTP |
 | `agena login --url <url> [--token <t>]` | Register a profile pointing at an existing/remote daemon (the bridge to the cloud deployment — profile management under INV-12, not a new auth mechanism). | local config |
 
-Deliberately **absent** from v1 (each is a decision, see §17): `agena share` (parked, P9 — the verb is **not registered**; no stub), `agena cp`/`agena sync` (`files get/put` covers v1), `agena plugins install` (v1 plugins are authored in `.agena/`).
+Deliberately **absent** from v1 (each is a decision, see §17): `agena share` (parked, P9 — the verb is **not registered**; no stub), `agena cp`/`agena sync` (`files get/put` covers v1). Plugin catalog and lifecycle commands are in v1; unrestricted public third-party executable plugin installation remains deferred.
 
 Global flags: `--profile <name>`, `--url <daemonUrl>` (override), `--project <id-or-name>`, `--cwd <path>`, `--global`, `--all-projects`, `--json`, `--no-color`, `--log-level`, `--config <path>`. Stable exit codes: `0` ok · `1` failure · `2` usage · `3` feature deferred · `4` connection failure · `5` auth failure · `6` not found · `7` protocol version mismatch. Non-TTY: the TUI never starts; `agena new "task" --no-tui | tee log` must work.
 
@@ -171,7 +173,7 @@ type EventSource = {
 
 **INV-11 — Branch replay contract.** Branch is a column on events; each branch records `parent_branch_id` and `forked_from_seq`. Replaying a branch walks the parent chain root-ward, taking each ancestor's events up to that ancestor's `forked_from_seq`, then the branch's own events, in `seq` order. v1 ships single-branch sessions on this exact model. (P10)
 
-**INV-12 — Auth is always on.** Every HTTP request and every WS upgrade (main and PTY) requires a bearer token in the `Authorization` header, even on localhost — a container port is not a trust boundary. The token is minted by the CLI at `agena workspace init`, injected as `AGENA_AUTH_TOKEN`, persisted by the daemon to `/var/lib/agena/config/token` (0600, auto-generated only as a fallback when the env is absent), and stored client-side in `~/.config/agena/credentials.json` (0600). This is the same mechanism that later becomes real auth against a cloud workspace.
+**INV-12 — Auth is always on.** Every HTTP request and every WS upgrade (main and PTY) is authenticated, even on localhost — a container port is not a trust boundary. Native clients use `Authorization: Bearer <token>`. Browser/WebView clients that cannot set upgrade headers first mint a short-lived, one-use, exact-path-scoped ticket over an authenticated HTTP request and present only that ticket on the upgrade URL; reusable bearer tokens are never placed in URLs. The token is minted by the CLI at `agena workspace init`, injected as `AGENA_AUTH_TOKEN`, persisted by the daemon to `/var/lib/agena/config/token` (0600, auto-generated only as a fallback when the env is absent), and stored client-side in `~/.config/agena/credentials.json` (0600), or in the native platform's secure credential store for Conductor. This is the same mechanism that later becomes real auth against a cloud workspace.
 
 **INV-13 — Runtime split.** Daemon runs on Node (node-pty safety, Pi SDK stability); the compiled CLI targets Bun, **provisionally** — spike at M1, formal gate at end of M3 (§18-OD1); Node fallback is a distribution change, not a rewrite. Monorepo is pnpm workspaces; Drizzle, Zod-in-protocol, Vitest, Biome, strict TypeScript everywhere. (P18)
 
@@ -274,10 +276,11 @@ The normative on-disk tree (all other sections reference this; the daemon builds
   pi/
     sessions/                 #   Pi JSONL raw archive layer (SessionManager redirected here)
     auth.json                 #   Pi AuthStorage, 0600; Settings-managed API keys + OAuth tokens
+  plugins/
+    catalog/                  #   normalized catalog snapshots, including integrations.sh provenance
+    artifacts/                #   immutable content-addressed plugin bundles
+    staging/                  #   transactional install/update temp roots; swept at boot
   skills/                     #   Agena-managed skill packages; durable across image replacement
-  raw-imports/
-    claude/<machine-id>/<imported-at>/   # untouched import archives
-    codex/<machine-id>/<imported-at>/
   snapshots/
     <snapshotId>.tar.zst      #   completed snapshots (immutable after rename)
     tmp/                      #   in-progress staging; swept at boot
@@ -308,6 +311,7 @@ Consequences, all load-bearing:
 - Pi's home is redirected into daemon state (`PI_DIR=/var/lib/agena/pi`, verified at boot), so Pi's raw JSONL archive layer exists without polluting the workspace or snapshots.
 - **Provider credentials (decided):** Pi's `pi/auth.json` (`AuthStorage`, 0600) is the single persistent credential source for Settings-managed API keys and subscription OAuth tokens. Process env and the optional `config/secrets.env` remain supported deployment inputs and are reported only as configured credential sources; Agena never copies their values into responses. Pi owns file locking, OAuth refresh, and provider-scoped configuration. The file and optional input are excluded from snapshots by construction, redacted in logs/diagnostics, and never appear in SQLite, `/workspace`, event payloads, frames, or captures.
 - **MCP credentials:** MCP definitions and import status are non-secret daemon state. Static API keys are imported only with explicit user consent and encrypted under `config/mcp-secrets.enc`; OAuth tokens are never copied from Claude or Codex. Agena starts a fresh authorization, owns that client registration and refresh-token family under `config/mcp-oauth/`, and persists every rotated refresh token before reuse. MCP secrets never enter SQLite, `/workspace`, renderer state, events, frames, captures, config responses, or logs.
+- **Plugin state:** catalog metadata, installed revisions, enablement, capability grants, health, and error state are daemon control-plane state. Plugin artifacts live under `/var/lib/agena/plugins`, never `/workspace`, and are not included in workspace snapshots. Catalog refresh never executes an entry; activation is the only path that reaches a runtime adapter.
 
 ## 3.4 Failure-mode stances (anticipated new problems)
 
@@ -340,6 +344,10 @@ Consequences, all load-bearing:
 - **Snapshot** — a point-in-time `tar --zstd` capture of `/workspace` only. Restoring replaces workspace files and appends a durable event; it never modifies the event store.
 - **Runtime adapter** — an implementation of core's `RuntimeAdapter`/`RuntimeSession` ports driving a concrete agent runtime. `runtime-pi` is the v1 adapter; `FakeRuntimeAdapter` is its test twin.
 - **Daemon state** — everything under `/var/lib/agena` (§3.3). Survives container replacement; invisible to snapshots.
+- **Plugin catalog** — non-executable metadata describing discoverable integrations, their source provenance, compatibility, capabilities, auth requirements, and installability. Catalog entries are not runtime plugins until explicitly installed and enabled.
+- **Plugin bundle** — one resolved, immutable artifact plus its Agena manifest and bundled resources. A bundle may contain skills, MCP definitions, provider metadata, CLI/browser instructions, or a Pi extension; the bundle kind determines its runtime adapter and isolation tier.
+- **Plugin installation** — the daemon-owned control-plane record connecting a catalog entry to one resolved artifact, enablement state, capability grants, secret bindings, and health. Installed does not imply enabled, authenticated, or healthy.
+- **Capability** — a named boundary operation such as `workspace.read`, `workspace.write`, `process.spawn`, `network.egress`, `mcp.tool.<server>`, or `secrets.use`. Declarations inform admission and UI; the daemon/runtime boundary enforces the effective grant.
 - **Turn** — one prompt→terminal-event cycle (user prompt through `message.assistant.completed|aborted|failed`). Used by concurrency rules and milestone tests.
 
 ---
@@ -380,10 +388,10 @@ agena/
 │   │       ├── main.ts             # arg parse, profile resolution, command dispatch
 │   │       ├── commands/           # default.ts (TUI), new.ts, resume.ts, sessions.ts, search.ts,
 │   │       │                       # shell.ts, files.ts, snapshot.ts, approvals.ts, approve.ts,
-│   │       │                       # import.ts, info.ts, rebuild.ts, workspace.ts, login.ts
+│   │       │                       # import.ts, info.ts, plugins.ts, rebuild.ts, workspace.ts, login.ts
 │   │       ├── shell/              # raw-mode passthrough, resize propagation, exit restore
 │   │       └── config/             # ~/.config/agena profile/credential/cursor IO
-│   └── daemon/                     # Node daemon; runs in the container
+│   ├── daemon/                     # Node daemon; runs in the container
 │       ├── src/
 │       │   ├── main.ts             # entry: env → config → bootstrap() → serve
 │       │   ├── bootstrap.ts        # composition root (§9.2)
@@ -395,6 +403,7 @@ agena/
 │       │   ├── ws/                 # gateway.ts, connection.ts (backpressure), replay.ts, coalesce.ts
 │       │   ├── pty/                # manager.ts (node-pty), attach.ts (binary WS bridge)
 │       │   ├── importers/          # claude.ts / codex.ts / common.ts — raw archive → normalize → summarize
+│       │   ├── plugins/             # catalog seed/refresh, installer, lifecycle, policy, health (§9.6)
 │       │   ├── extensibility/      # .agena/ discovery host + module-alias loader (§12)
 │       │   ├── observability/      # logger.ts (pino + redaction), diagnostics.ts
 │       │   ├── shutdown.ts         # SIGTERM drain sequence (§9.7)
@@ -402,6 +411,11 @@ agena/
 │       └── test/
 │           ├── integration/        # real WS + real SQLite (tmpdir) + FakeRuntime
 │           └── e2e/                # spawned daemon driven via @agena/client (P16)
+│   └── conductor/                  # private iOS/Android phone client (Capacitor)
+│       ├── src/main.tsx            # secure pairing gate, then shared responsive renderer
+│       ├── capacitor.config.ts     # native shell; HTTPS/WSS cloud daemon only
+│       ├── ios/                    # Xcode project, Keychain credential storage
+│       └── android/                # Gradle project, Keystore-backed credential storage
 ├── packages/
 │   ├── protocol/                   # @agena/protocol — THE contract; imports zod only
 │   │   └── src/
@@ -489,6 +503,7 @@ Allowed edges — anything not listed is forbidden:
 | `@agena/client` | protocol | No core import — clients never see domain internals. |
 | `@agena/tui` | client, protocol | **Only** package importing `@earendil-works/pi-tui`. |
 | `@agena/desktop-new` | client, importer, protocol | Electron UI; never imports core, storage, or runtime-pi. |
+| `@agena/conductor` | client | Capacitor host reusing the responsive desktop-new renderer; native secure storage only. |
 | `apps/daemon` | core, protocol, runtime-pi, storage-sqlite | Composition root; Hono, node-pty live here. |
 | `apps/cli` | client, tui, protocol | Never imports core, storage, or runtime-pi. |
 
@@ -524,7 +539,7 @@ Two independent version axes:
 
 **Connect sequence** (main channel `GET /v1/ws`, subprotocol `agena.v1`):
 
-1. Client opens the WS with `Authorization: Bearer <token>` on the upgrade request (the only auth path for both WS types; there is no first-message token variant). Auth is checked **before** the handshake completes — failure is a refused upgrade (raw HTTP `401`, per §9.4; no WS close code is ever observable).
+1. Client opens the WS with `Authorization: Bearer <token>` on the upgrade request. A browser/WebView client instead mints a one-use, short-lived, exact-path-scoped ticket with authenticated `POST /v1/ws-tickets` and sends `?ticket=<opaque>`; reusable tokens are never URL parameters and there is no first-message token variant. Auth is checked **before** the handshake completes — failure is a refused upgrade (raw HTTP `401`, per §9.4; no WS close code is ever observable).
 2. The **client sends `hello` first**. Any other envelope before `welcome` → error `NOT_READY`, then close `4400` on repeat. No `hello` within 10 s → close `4408`.
 3. Daemon replies `welcome` (or `error` + close `4400`).
 
@@ -629,6 +644,7 @@ The complete WS command set — daemon and client implement exactly these names 
 | `abort` | always on native sessions (idempotent; no-op ack when idle) | `{}` | `message.assistant.aborted` + `tool.call.aborted` + `run.aborted` | `SESSION_READ_ONLY` |
 | `setModel` | idle only (v1 keeps mid-generation switches off the table) | `{ model }` | `model.changed` | `SESSION_BUSY`, `MODEL_UNAVAILABLE`, `SESSION_READ_ONLY` |
 | `setThinkingLevel` | idle only | `{ thinkingLevel }` | `thinking.level.changed` | `SESSION_BUSY`, `INVALID_PAYLOAD`, `SESSION_READ_ONLY` |
+| `setFastMode` | always; affects the next provider request | `{ enabled, available, active }` | `fast.mode.changed` | `RUNTIME_UNAVAILABLE`, `SESSION_READ_ONLY` |
 | `respondToApproval` | approval pending; first-write-wins | `{ approvalId }` | `approval.responded` | `APPROVAL_NOT_PENDING`, `APPROVAL_NOT_FOUND` |
 | `compact` | idle only | `{ compactionSeq }` | `compaction.created` | `SESSION_BUSY`, `SESSION_READ_ONLY` |
 
@@ -642,9 +658,9 @@ type UnsubscribeCmd = { sessionId: string };
 type PromptCmd     = { sessionId: string; content: ContentBlock[] };
 type SteerCmd      = { sessionId: string; content: ContentBlock[] };
 type FollowUpCmd   = { sessionId: string; content: ContentBlock[] };
-// v1: prompt/steer/followUp content is restricted to {type:"text"} blocks (schema-enforced;
-// any other block type is rejected INVALID_PAYLOAD). Core concatenates the text blocks into
-// the RuntimeSession port's `text` (§8.2). Widening to other block types is a v2 concern.
+// v1 prompt input accepts text and image blocks (schema-enforced). Other block types are
+// rejected INVALID_PAYLOAD. Core concatenates text and resolves image BlobRefs into the
+// RuntimeSession port's runtime-neutral input (§8.2). Files/documents remain a later slice.
 type AbortCmd      = { sessionId: string; reason?: string };
 type SetModelCmd   = { sessionId: string; model: { provider: string; id: string } };
 type SetThinkingLevelCmd = { sessionId: string; level: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" };
@@ -772,12 +788,13 @@ type ToolCallDenied    = { toolCallId: string; approvalId?: string;
                            reason: "user_denied" | "approval_expired" | "policy" | "hook_denied" };
 ```
 
-### model.* / thinking.*
+### model.* / thinking.* / fast.*
 
 ```ts
 type ModelChanged = { from?: { provider: string; id: string }; to: { provider: string; id: string };
                       reason: "user_selected" | "fallback" | "auto" };
 type ThinkingLevelChanged = { from: string; to: string };   // the ONE name (model.thinking.changed is dead)
+type FastModeChanged = { enabled: boolean };                 // state persists in Pi JSONL and syncs every client
 ```
 
 ### compaction.*
@@ -1036,7 +1053,7 @@ Owner packages: `packages/storage-sqlite` (implementation), `packages/core` (the
 
 ## 7.1 Governing invariants
 
-1. **Events are truth; everything else is disposable.** Every table except `events`, `sessions`/`branches` identity columns, `imports`/`imported_sessions`, `snapshots`, `blobs`, and `meta` is a projection rebuildable from `events`. Projection schema changes are drop → rebuild, never data migrations.
+1. **Events are truth; everything else is disposable.** Every table except `events`, `sessions`/`branches` identity columns, `imports`, `snapshots`, `blobs`, and `meta` is a projection rebuildable from `events`. Projection schema changes are drop → rebuild, never data migrations.
 2. **`appendEvents` is the only durable write path** — session service, importer, PTY lifecycle, approvals, snapshots (control session) all go through it. Seq assignment, event insert, projection updates (including FTS5) in one transaction; `onCommitted` fanout strictly after commit (P6).
 3. **One monotonic `seq` per session**, assigned inside the append tx from `sessions.last_seq`. `fromSeq` replay is exclusive (`seq > fromSeq`; `0` = everything).
 4. **Branch is a column on events**; all branches share the session's seq space; branch replay per INV-11 (P10).
@@ -1066,7 +1083,8 @@ Schema lands with the feature that first needs it. M2 owns only the durable repl
 
 - **M4 project/cwd scope:** `projects`, `sessions.scope`, `sessions.project_id`, `sessions.cwd`, `sessions.host_cwd_hint`, and project-scoped list/search filters.
 - **M5 search/snapshots/session management:** `messages_fts`, `snapshots`, control-session metadata (`meta.control_session_id`, `sessions.is_control`), and session status/archive fields.
-- **M6 importers:** `imports`, `imported_sessions`, importer source fields, imported-session read-only metadata, and `pi_session_path`/raw archive pointers where needed.
+- **M6 importers:** the `imports` ledger, importer source fields, imported-session read-only metadata, and `pi_session_path` where needed.
+- **M6.5 plugin catalog and lifecycle:** `plugin_catalog_sources`, `plugin_catalog_entries`, `plugin_installations`, and `plugin_capability_grants`. These are daemon control-plane state, not session-event projections: the catalog records what is available, installation rows record what is resolved and enabled, and grants record effective policy. Plugin artifact bytes remain under `/var/lib/agena/plugins/artifacts`.
 - **M7 tool execution/blob spill:** `blobs` metadata plus the blob file layout and `GET /v1/blobs/:hash`. The `BlobRef` wire shape exists earlier as protocol vocabulary, but no milestone must implement blob storage until a feature can actually emit oversized tool output.
 
 The complete v1 target schema is shown below for consistency; milestone deliverables in §14 decide when each table/column becomes required.
@@ -1199,25 +1217,20 @@ CREATE TABLE blobs (
   created_at TEXT NOT NULL
 ) STRICT;
 
--- M6: import layer.
+-- M6: import ledger. Local source bytes remain on the user's machine.
 CREATE TABLE imports (
-  id          TEXT PRIMARY KEY,
-  source      TEXT NOT NULL,                              -- 'claude' | 'codex' (open set)
-  machine_id  TEXT,
-  raw_path    TEXT NOT NULL,                              -- /var/lib/agena/raw-imports/...
-  stats       TEXT CHECK (stats IS NULL OR json_valid(stats)),
-  imported_at TEXT NOT NULL
+  id                TEXT PRIMARY KEY,
+  session_id        TEXT,
+  project_id        TEXT NOT NULL,
+  machine_id        TEXT NOT NULL,
+  harness           TEXT NOT NULL CHECK (harness IN ('claude','codex','pi','files')),
+  source_path       TEXT NOT NULL,
+  source_session_id TEXT,
+  source_mtime_ms   REAL,
+  source_size       INTEGER,
+  imported_at       TEXT NOT NULL,
+  UNIQUE (machine_id, harness, source_session_id)
 ) STRICT;
-
-CREATE TABLE imported_sessions (
-  import_id      TEXT NOT NULL REFERENCES imports(id),
-  source_ref     TEXT NOT NULL,                           -- IDENTITY: original session id/path
-  session_id     TEXT NOT NULL REFERENCES sessions(id),
-  content_hash   TEXT,                                    -- CHANGE DETECTION: sha256 of source content
-  resume_summary TEXT CHECK (resume_summary IS NULL OR json_valid(resume_summary)),
-  PRIMARY KEY (import_id, source_ref)
-) STRICT;
-CREATE INDEX idx_imported_sessions_session ON imported_sessions(session_id);
 
 -- M5: workspace snapshots (metadata; artifact on disk).
 CREATE TABLE snapshots (
@@ -1231,6 +1244,76 @@ CREATE TABLE snapshots (
   size_bytes   INTEGER,
   status       TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','deleted')),
   created_at   TEXT NOT NULL
+) STRICT;
+
+-- M6.5: marketplace/catalog control-plane state. These tables are not part of
+-- session replay and are never captured by workspace snapshots.
+CREATE TABLE plugin_catalog_sources (
+  id                  TEXT PRIMARY KEY,
+  name                TEXT NOT NULL,
+  kind                TEXT NOT NULL CHECK (kind IN ('bundled','remote_git','remote_http','organization')),
+  locator             TEXT NOT NULL,
+  revision            TEXT,
+  content_hash        TEXT,
+  status              TEXT NOT NULL DEFAULT 'ready'
+                       CHECK (status IN ('ready','stale','error')),
+  error               TEXT,
+  refreshed_at        TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  UNIQUE (kind, locator)
+) STRICT;
+
+CREATE TABLE plugin_catalog_entries (
+  id                  TEXT PRIMARY KEY,                 -- publisher/plugin stable identity
+  source_id           TEXT NOT NULL REFERENCES plugin_catalog_sources(id),
+  name                TEXT NOT NULL,
+  publisher           TEXT NOT NULL,
+  description         TEXT NOT NULL,
+  kind                TEXT NOT NULL CHECK (kind IN ('integration','mcp','extension','skill','provider','cli','browser')),
+  category            TEXT NOT NULL,
+  version             TEXT,
+  source_spec         TEXT NOT NULL,                     -- opaque adapter input; never executed as shell
+  manifest_path       TEXT,
+  capabilities        TEXT NOT NULL CHECK (json_valid(capabilities)),
+  permissions         TEXT NOT NULL CHECK (json_valid(permissions)),
+  auth                TEXT NOT NULL CHECK (json_valid(auth)),
+  installability      TEXT NOT NULL DEFAULT 'installable'
+                       CHECK (installability IN ('catalog_only','installable','blocked','needs_review')),
+  featured            INTEGER NOT NULL DEFAULT 0,
+  homepage            TEXT,
+  catalog_updated_at  TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_plugin_catalog_search
+  ON plugin_catalog_entries(kind, category, installability, name);
+
+CREATE TABLE plugin_installations (
+  plugin_id              TEXT PRIMARY KEY REFERENCES plugin_catalog_entries(id),
+  scope                  TEXT NOT NULL DEFAULT 'workspace'
+                         CHECK (scope IN ('workspace','user','organization')),
+  requested_version      TEXT,
+  resolved_version       TEXT,
+  resolved_revision      TEXT,
+  artifact_hash          TEXT,
+  manifest_hash          TEXT,
+  enabled                INTEGER NOT NULL DEFAULT 0,
+  configured             INTEGER NOT NULL DEFAULT 0,
+  secret_bindings        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(secret_bindings)),
+  health                 TEXT NOT NULL DEFAULT 'installed'
+                         CHECK (health IN ('installed','disabled','needs_configuration','auth_required','starting','healthy','degraded','incompatible','crashed','blocked_by_policy','update_available')),
+  error                  TEXT,
+  previous_artifact_hash TEXT,
+  installed_at           TEXT NOT NULL,
+  updated_at             TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE plugin_capability_grants (
+  plugin_id   TEXT NOT NULL REFERENCES plugin_installations(plugin_id),
+  capability  TEXT NOT NULL,
+  decision    TEXT NOT NULL CHECK (decision IN ('allow','ask','deny')),
+  granted_by  TEXT NOT NULL CHECK (granted_by IN ('user','organization','system')),
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (plugin_id, capability)
 ) STRICT;
 ```
 
@@ -1295,7 +1378,8 @@ export interface EventStore {
   // THE fanout seam (P6): invoked after commit, in strict seq order (§6.2)
   onCommitted(listener: (batch: AppendEventsResult & { sessionId: string }) => void): () => void;
 
-  readBlob(hash: string): Promise<Uint8Array | null>;
+  putBlob(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  readBlob(hash: string): Promise<{ bytes: Uint8Array; mimeType?: string } | null>;
   search(query: string, opts?: { sessionId?: string; projectId?: string; allProjects?: boolean; limit?: number }): Promise<SearchHit[]>;
 
   rebuildProjections(sessionId?: string): Promise<RebuildReport>;
@@ -1364,7 +1448,7 @@ Projection logic lives in `packages/core` as pure reducers — `(event) => Proje
 | `session.title.changed` | — | — | — | `title` |
 | `session.status.changed` | — | — | — | `status` |
 | `snapshot.created` / `.deleted` | — | — | — | snapshots row insert / status='deleted' |
-| `run.*`, `branch.*`, `model.changed`, `thinking.level.changed`, `compaction.*`, `approval.*`, `terminal.session.*`, `snapshot.restored/.restore.failed`, `workspace.initialized`, `import.summary.created`, `runtime.extension.failed` | — | — | — | `updated_at` only |
+| `run.*`, `branch.*`, `model.changed`, `thinking.level.changed`, `fast.mode.changed`, `compaction.*`, `approval.*`, `terminal.session.*`, `snapshot.restored/.restore.failed`, `workspace.initialized`, `import.summary.created`, `runtime.extension.failed` | — | — | — | `updated_at` only |
 
 FTS writes are **explicit statements emitted by the reducer, executed inside the append tx** — no SQLite triggers:
 
@@ -1381,7 +1465,7 @@ Approvals need no projection: pending = events scan for `approval.requested` wit
 
 ## 7.7 Blob spill (M7, 64 KiB inline cap)
 
-Blob spill is not an M2 storage prerequisite. It lands with M7 tool execution because that is the first feature expected to produce large tool args/results. Until then, oversized durable payloads are rejected before append and no committed event may reference a missing blob.
+Blob spill is not an M2 storage prerequisite. The content-addressed write/read path and authenticated image upload are pulled forward as the first M7 slice for image prompts; general oversized payload spill and tool-result spill remain M7 work. No committed event may reference a missing blob.
 
 - **Trigger:** a payload whose serialized JSON exceeds 64 KiB has its protocol-marked `spillable` string fields (tool result output, oversized content blocks) replaced with the §5.3 `BlobRef`.
 - **Write path (before the tx), race-safe:** compute sha256 → write to `blobs/sha256/<hh>/<hash>.<ulid>.tmp` (**unique tmp name** — two concurrent identical spills never share a tmp file) → fsync → atomic rename; **if the final path already exists, skip the rename** (content-addressed idempotency). The `blobs` metadata row is inserted in the referencing event's tx with `INSERT OR IGNORE` (second event referencing the same hash is a no-op). A committed event therefore never references a missing file.
@@ -1479,6 +1563,12 @@ export interface OpenRuntimeSessionInput extends CreateRuntimeSessionInput {
   runtimeSessionRef: string;         // Pi: absolute path to the session JSONL
 }
 
+export type RuntimeInput = {
+  messageId: string;
+  text: string;
+  images: Array<{ data: Uint8Array; mimeType: string }>;
+};
+
 export interface RuntimeSession {
   readonly sessionId: string;
   readonly runtimeSessionRef: string;             // persisted into sessions.pi_session_path
@@ -1490,9 +1580,9 @@ export interface RuntimeSession {
 
   /** Resolves when the run is ACCEPTED, not when it finishes; completion arrives
       as run-completed / run-aborted / run-failed RuntimeEvents. */
-  prompt(input: { messageId: string; text: string }): Promise<void>;
-  steer(input: { messageId: string; text: string }): Promise<void>;
-  followUp(input: { messageId: string; text: string }): Promise<void>;
+  prompt(input: RuntimeInput): Promise<void>;
+  steer(input: RuntimeInput): Promise<void>;
+  followUp(input: RuntimeInput): Promise<void>;
   abort(reason: 'user' | 'shutdown'): Promise<void>;
 
   setModel(model: ModelRef): Promise<void>;
@@ -1513,7 +1603,7 @@ export interface AgenaToolDescriptor {
 }
 ```
 
-`messageId` is passed IN by core: core appends `message.user.created` (source `{kind:'user', clientId}`) in its own tx **before** calling `prompt/steer/followUp`, then hands the adapter the same ULID for echo suppression. The port's `text` is core's concatenation of the command's `{type:"text"}` content blocks — v1 restricts `prompt/steer/followUp` content to text blocks (§5.4), so the `ContentBlock[]` → `text` reduction is lossless.
+`messageId` is passed IN by core: core appends `message.user.created` (source `{kind:'user', clientId}`) in its own tx **before** calling `prompt/steer/followUp`, then hands the adapter the same ULID for echo suppression. `RuntimeInput` contains core's concatenated text plus resolved image bytes and MIME types; `runtime-pi` alone converts those bytes to Pi's native `ImageContent[]`.
 
 **`RuntimeInFlightSnapshot`** (core-owned; distinct name from the wire type — the earlier same-name collision is dead):
 
@@ -1604,8 +1694,8 @@ const { session, extensionsResult, modelFallbackMessage } = await createAgentSes
   modelRegistry,
   customTools: input.tools.map(bridgeToDefineTool),
   resourceLoader: new DefaultResourceLoader({
-    additionalExtensionPaths: [],                                    // NO filesystem extension discovery
-    extensionFactories: [createAgenaBridgeExtension(bridgeDeps)],    // temporary bridge, P20
+    additionalExtensionPaths: approvedPackagePaths,                    // explicit admitted paths only; NO filesystem auto-discovery
+    extensionFactories: [createAgenaBridgeExtension(bridgeDeps)],      // temporary bridge, P20
   }),
 });
 session.subscribe((piEvent) => this.pump.push(piEvent));
@@ -1614,7 +1704,7 @@ session.subscribe((piEvent) => this.pump.push(piEvent));
 Decisions baked in:
 
 - **Pi state under `/var/lib/agena/pi/`, never `/workspace`** (P1): `PI_DIR=/var/lib/agena/pi`, verified against `getAgentDir()` at boot (hard fail if Pi resolves elsewhere). Session JSONL → `pi/sessions/` (path stored in `sessions.pi_session_path`); auth → `pi/auth.json`. Pi's JSONL persistence is always on — it is the raw archive layer, never mutated by Agena, only read for resume and debugging.
-- **Filesystem extension auto-discovery disabled**: empty `additionalExtensionPaths`, only our `extensionFactories` — `~/.pi/agent/extensions` and `/workspace/.pi/extensions` are never loaded; a repo's `.pi/` directory is ordinary files, flagged by `agena info`. (M1 task M1-R2 verifies `DefaultResourceLoader` gives this control; fallback is a custom `ResourceLoader`.)
+- **Filesystem extension auto-discovery disabled**: `noExtensions: true`/the equivalent contained loader disables `~/.pi/agent/extensions` and `/workspace/.pi/extensions`; only `approvedPackagePaths` and Agena-owned `extensionFactories` are loaded. A repo's `.pi/` directory is ordinary files, flagged by `agena info`. (M1 task M1-R2 verifies `DefaultResourceLoader` gives this control; fallback is a custom `ResourceLoader`.)
 - `extensionsResult` errors → `extension-failed` RuntimeEvents; `modelFallbackMessage` → a `session.notice` frame plus `model-changed {origin:'runtime'}` if the effective model differs.
 
 **Control-surface mapping:** `prompt` → `session.prompt(text)` (not awaited to completion; rejection handler feeds §8.6); `steer`/`followUp` → same-named Pi calls; `abort` → `await session.abort()` then synthesis if Pi stays silent; `setModel` → ModelRegistry + `session.setModel`; `setThinkingLevel`, `compact` → same-named (exact SDK names confirmed in M1); `respondToApproval` → resolves the stored dialog resolver; `getInFlightSnapshot` → `session.agent.state.streamingMessage` + local mirrors.
@@ -1804,6 +1894,9 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | Method | Path | Purpose | Notes |
 |---|---|---|---|
 | GET | `/health` | Liveness | Unauthenticated. `{status:"ok"\|"starting"\|"draining"\|"restore_incomplete", version, protocolVersion, uptimeMs}` |
+| POST | `/v1/pairings` | Create one-use Conductor pairing token | Authenticated desktop request; token expires after 5 min and is displayed only in the pairing QR. |
+| POST | `/v1/pairings/redeem` | Redeem Conductor pairing token | Pairing-token bearer auth replaces normal daemon auth for this route only; atomically consumes the token and returns the daemon URL/token for native secure storage. |
+| POST | `/v1/ws-tickets` | Mint browser/WebView WS ticket | Authenticated; `{path}` must be an exact main, PTY, or tunnel WS path; returned opaque ticket is one-use, path-bound, and expires after 30 s. |
 | POST | `/v1/sessions` | Create session | `{title?, model?, thinkingLevel?, scope:{kind, projectId?, projectRoot?, cwd?, hostCwdHint?}}`; appends `session.created` |
 | GET | `/v1/sessions` | List | `?projectId=&scope=project\|global&allProjects=0|1&status=&source=&limit=&cursor=` (ULID keyset). Control session excluded by default (`?includeControl=1`) |
 | GET | `/v1/sessions/:id` | Read one | Includes `lastSeq`, `status`, `activeBranchId`, `source`, `scope`, `projectId`, `cwd` |
@@ -1818,6 +1911,8 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | DELETE | `/v1/files` | Delete | `?recursive=1` required for non-empty dirs |
 | POST | `/v1/files/mkdir` | `{path}` | |
 | POST | `/v1/files/move` | `{from, to}` | |
+| POST | `/v1/projects` | Create an isolated project root | `{name, reuseExisting?}`; `reuseExisting` is only for explicitly resuming an interrupted import |
+| DELETE | `/v1/projects/:id` | Delete project state and files | Full teardown of sessions, import ledger, Pi session files, snapshots, and workspace root |
 | GET | `/v1/files/archive` | Directory download | `?path=` → tar.zst stream (backs `agena files get -r`) |
 | POST | `/v1/files/upload` | Upload | `?path=&format=tar\|raw` — tar.zst stream in (backs `agena files put -r` and workspace seeding); cap 512 MiB → `413` |
 | GET | `/v1/ports` | List workspace preview ports | Runtime registry: `{port, protocol, label?, state, previewUrl?, visibility}` |
@@ -1831,8 +1926,10 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/ptys` | List live PTYs | |
 | DELETE | `/v1/ptys/:id` | Kill PTY | SIGHUP, SIGKILL after 5 s |
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
-| POST | `/v1/imports` | Import upload | tar stream + `{source, machineId}`; raw archive → normalize → summarize (§9.6) |
-| GET | `/v1/imports/:id` | Import status/stats | |
+| POST | `/v1/images` | Upload a prompt image | authenticated raw body, 3 MB cap; JPEG, PNG, GIF, WebP, or BMP; returns `{ref: BlobRef}` |
+| POST | `/v1/imports/session` | Import one converted session | Idempotent by `(machineId, harness, sourceSessionId)`; retained as the compatibility floor (§9.6) |
+| POST | `/v1/imports/sessions` | Import up to 32 converted sessions | Ordered batch; returns a result or error per source path (§9.6) |
+| GET | `/v1/imports` | Import ledger and capabilities | Optional `machineId`; advertises singular and batch support |
 | GET | `/v1/providers` | List Pi model providers and secret-free auth status | Provider/model availability comes from the pinned Pi registry; no credential values are returned. |
 | PUT | `/v1/providers/:id/api-key` | Save or replace a provider API key | Persists through Pi `AuthStorage`; accepts optional provider-scoped configuration values. |
 | DELETE | `/v1/providers/:id/auth` | Remove stored provider credentials | Ambient deployment credentials may still make the provider available and are never mutated. |
@@ -1843,6 +1940,14 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | POST | `/v1/mcps/import` | Import one normalized MCP | OAuth definitions become `needs_authorization`; static secrets are encrypted before registry commit. |
 | POST | `/v1/mcps/:id/oauth/start` | Start fresh Agena OAuth | Returns an authorization URL; PKCE/state and client registration stay daemon-owned. |
 | POST | `/v1/mcps/:id/oauth/complete` | Complete OAuth callback relay | Electron relays the localhost redirect; daemon validates state and stores rotated credentials. |
+| GET | `/v1/plugins` | Search/list catalog and installation state | `query`, `kind`, `status`, `source`, `cursor`, and `limit`; returns catalog metadata plus installed/health state without artifact bytes. |
+| GET | `/v1/plugins/:id` | Read one catalog entry and installation details | Returns manifest metadata, provenance, capabilities, permissions, auth, health, and rollback/update information. |
+| POST | `/v1/plugins/catalog/refresh` | Refresh one or all catalog sources | Imports the versioned `integrations.sh` seed or configured remote/org catalog; source failures are isolated and reported. |
+| POST | `/v1/plugins/:id/install` | Resolve and stage a plugin artifact | Requires explicit version/source when the catalog has multiple candidates; commits disabled until policy/auth checks pass. |
+| POST | `/v1/plugins/:id/update` | Stage and activate a newer revision | Keeps the previous artifact for rollback; busy runtimes reload after their current turn. |
+| PATCH | `/v1/plugins/:id` | Enable/disable and update grants | Body contains `enabled` and, separately, capability decisions; disabling does not remove the artifact or credentials. |
+| POST | `/v1/plugins/check-updates` | Check installed catalog sources | Status-only operation; never changes the active artifact. |
+| DELETE | `/v1/plugins/:id` | Remove an installation | Removes Agena's installation and unreferenced artifact; credential revocation is explicit and separate. |
 | GET | `/v1/skills` | List Agena-managed skills | Source-neutral metadata; package bytes stay under daemon state. |
 | POST | `/v1/skills/import` | Import one normalized skill package | Validates paths/frontmatter, deduplicates, installs atomically, then reloads idle runtimes. |
 | POST | `/v1/skills/check-updates` | Check managed Git sources | Updates status only; unmanaged/local-only skills remain usable. |
@@ -1862,7 +1967,7 @@ Client HTTP typing: `packages/client/src/http.ts` is a small typed fetch wrapper
 
 The gateway implements §5 exactly (envelope, handshake, command catalog, error codes — no local variants). Daemon-specific behavior:
 
-- Auth checked before completing the upgrade (`401` raw HTTP; never a half-open socket). Browser clients are future (`POST /v1/ws-tickets` is the documented path, not built in v1).
+- Auth checked before completing the upgrade (`401` raw HTTP; never a half-open socket). Native clients send the bearer header. Browser/WebView clients use an authenticated `POST /v1/ws-tickets` request, then present the one-use, 30-second, exact-path-scoped ticket as `?ticket=`. Ticket values are stored only as hashes and consumed atomically before routing; reusable `?token=` URLs are forbidden.
 - Subscribe uses the buffer-then-splice replay of §6.3.
 - requestId dedupe map per INV-7: bounded LRU (per-session cap), TTL 5 min, survives reconnects (it is keyed by requestId, not connection).
 - Per-command legality per the §5.4 matrix; the orchestrator's FIFO makes multi-client behavior deterministic.
@@ -1884,16 +1989,15 @@ Terminal bytes flow **only** here. No terminal frames on the main channel in v1 
 
 ## 9.6 Importers (ownership: apps/daemon/src/importers/ + this section)
 
-The import pipeline (three layers from the direction doc) is owned here; the CLI is a thin local reader/uploader.
+The desktop main process owns local discovery and parsing because Claude, Codex, and Pi session stores exist on the user's machine. It converts each source to Pi v3 JSONL before sending it to the daemon; raw harness archives and credentials never leave the machine.
 
-- **Wire contract:** `POST /v1/imports` accepts a `tar.zst` stream (body) with query/header params `{source: "claude"|"codex", machineId}`. Response `{importId}`; progress/stats at `GET /v1/imports/:id`.
-- **Layer 1 — raw archive:** stream lands untouched at `/var/lib/agena/raw-imports/<source>/<machine-id>/<imported-at>/`; never mutated; never a read path for features.
-- **Layer 2 — normalized events:** per source session, parse (Claude: `~/.claude/projects` JSONL conversations; Codex: its session store) and map to Agena events — `session.created {origin:"import.claude"|"import.codex"}`, `message.user.created`, `message.assistant.completed`, `tool.call.started/completed` where reconstructable — appended through the standard `appendEvents` path with `source {kind:"importer"}` (P3). Malformed lines are skipped and counted in `imports.stats`. Perfect replay is explicitly not attempted.
-- **Layer 3 — resume summary:** deterministic extraction at import time (title, key files, commands, models — no model call); the LLM continuation summary is generated lazily on first `agena resume` of an imported session and stored as `import.summary.created` (once) — §18-OD4.
-- **Idempotency rule (one rule):** `source_ref` is identity (re-import of a known ref is a no-op), `content_hash` is change detection (a changed source re-imports as an update pass).
+- **Wire contract:** `POST /v1/imports/session` imports one converted session. `POST /v1/imports/sessions` accepts an ordered batch of at most 32 and returns one result or error per source path. Clients fall back to the singular route when an older daemon returns `404` for the batch route. `GET /v1/imports?machineId=` returns the ledger plus supported import capabilities.
+- **Project files:** when selected, the desktop creates the project then uploads its tar archive through `POST /v1/files/upload`. An interrupted run may explicitly set `reuseExisting:true` on `POST /v1/projects`; ordinary project creation keeps collision protection. The archive is uploaded again before sessions so a partial earlier extraction is repaired.
+- **Normalization:** per source session, the desktop parser maps reconstructable source entries to Pi v3 JSONL. The daemon synthesizes the standard imported events through `appendEvents` with `source {kind:"importer"}` (P3). Malformed sources are reported per file and do not block unrelated sessions.
+- **Idempotency rule (one rule):** `(machineId, harness, sourceSessionId)` is identity. Re-import returns the existing session; file metadata supports differential local scanning but does not create duplicate sessions.
 - **Read-only enforcement:** sessions with `source != 'native'` reject `prompt/steer/followUp/abort/setModel/setThinkingLevel/compact` with `SESSION_READ_ONLY`; `agena resume <imported>` starts a **new native session** seeded with the continuation prompt.
-- Importer event ids: pre-supplied `NewEvent.id` ULIDs derived from `(source_ref, position)` make event-level re-import dedupe cheap (unique `idx_events_id`).
-- The importer writes nothing to `/workspace` (P1).
+- The import ledger claims the source identity before event seeding, so retries return the existing session instead of appending duplicate events.
+- Imported project files are confined to the project root under `/workspace` (P1).
 
 ### MCP import
 
@@ -1933,6 +2037,97 @@ different content.
   harness directories cannot become instructions merely by existing.
 - Skill import/update uses the same idle-now, busy-after-turn runtime reload seam
   as MCP import.
+
+### Plugin catalog and lifecycle (M6.5)
+
+Issue #1 promotes the bootstrap `integrations.sh` data into a first-class Agena
+catalog. The seed currently represents approximately 1,500 integrations. The
+script is an import source only: Agena never executes marketplace shell code,
+and the running daemon never reads `integrations.sh` as its registry. A
+versioned importer normalizes the seed into catalog records with source
+provenance, then writes a catalog snapshot under `/var/lib/agena/plugins/catalog`
+and searchable rows in the control-plane tables from §7.3.
+
+The catalog is intentionally larger than the set of immediately installable
+runtime plugins. Every entry is classified as one of:
+
+- `installable` — a supported adapter can resolve and stage it;
+- `catalog_only` — discoverable metadata exists, but Agena has no safe installer
+  yet;
+- `needs_review` — the source or capability declaration needs curation;
+- `blocked` — incompatible, withdrawn, or rejected by policy.
+
+The initial normalized kinds are `mcp`, `provider`, `cli`, `browser`, `skill`,
+and `pi_extension`. `integration` is a presentation grouping, not a runtime
+kind. One generic adapter handles each kind; adding a catalog entry must not
+require adding a bespoke implementation. An entry may point to a remote MCP
+endpoint, a local MCP package, a provider-auth descriptor, a system/CLI package,
+a browser capability, an Agena skill bundle, or an explicitly trusted Pi
+package.
+
+#### Catalog record
+
+Catalog records are non-executable metadata. Their stable identity is
+`publisher/plugin`, never a display name or URL. The record includes:
+
+`id`, `name`, `publisher`, `description`, `kind`, `category`, `version`,
+`source`, `manifestPath`, `compatibility`, `capabilities`, `permissions`,
+`auth`, `installability`, `featured`, `homepage`, and catalog source/revision.
+
+`source` is an adapter input, not a shell command. Installable artifacts must
+resolve to an immutable npm version, Git commit/ref plus content hash, or
+content-addressed bundle. Floating `latest`, branch heads, and unreviewed
+`curl | sh` sources are never persisted as an active installation.
+
+#### Installation transaction
+
+`install` is explicit and idempotent:
+
+1. Resolve the requested catalog entry and version.
+2. Fetch into `/var/lib/agena/plugins/staging/<operation>` with lifecycle scripts disabled where the package manager supports it.
+3. Validate the Agena manifest, source containment, compatibility, file limits, and declared capabilities.
+4. Calculate the artifact and manifest hashes and show provenance, capabilities, permissions, and authentication requirements to the client.
+5. Atomically move the verified bundle into `/var/lib/agena/plugins/artifacts/<sha256>`.
+6. Commit the `plugin_installations` row with `enabled = 0`; bind secrets only through the Agena secret services.
+7. Enable only after the user/org policy and required authentication are satisfied.
+
+An update stages the replacement beside the active artifact, performs the same
+validation, and keeps `previous_artifact_hash` until the new runtime is healthy.
+Failure leaves the previous artifact active. Remove deletes the installation
+record and artifact only when no other installation references it; it does not
+implicitly revoke provider/MCP credentials.
+
+#### Runtime tiers and enforcement
+
+- Skills, prompts, and metadata are data-only resources after validation.
+- Remote MCP uses Agena's MCP registry, secret store, health state, and tool approval path.
+- Local MCP runs through a supervised child process with a sanitized environment, workspace/cwd restrictions, timeouts, and resource limits.
+- CLI and browser integrations use dedicated Agena adapters and explicit host capability grants.
+- Pi extensions are the highest-risk tier. Only curated or explicitly trusted packages may be loaded into the Pi process through the contained resource loader. Pi filesystem auto-discovery remains disabled; installed packages are passed as explicit paths only. Untrusted executable bundles are catalog-visible but cannot be enabled in-process.
+
+Capability declarations are admission and review inputs, not enforcement. The
+effective grant is the intersection of the plugin declaration, user choice,
+workspace policy, organization policy, and runtime availability. The daemon
+enforces it at the filesystem, process, network, MCP, secret, and host-UI
+boundaries. A plugin can therefore be installed, disabled, unauthenticated,
+or unhealthy independently of its artifact existing on disk.
+
+#### Refresh, search, and failure isolation
+
+Catalog refresh is source-scoped and idempotent. A malformed or unavailable
+source marks that source stale/error and preserves the last valid snapshot; it
+does not prevent Agena from starting or hide unrelated entries. Search and
+filtering operate over catalog rows with cursor pagination, so the full
+approximately 1,500-entry catalog is never sent to the renderer or Pi in one
+response. Only enabled, compatible, healthy-enough capabilities are exposed to
+new sessions. Busy sessions apply plugin changes after their current turn;
+idle sessions reload immediately through the existing runtime reload seam.
+
+The Settings UI has separate `Discover` and `Installed` views. A detail view
+shows publisher, source, resolved revision, trust/installability, capabilities,
+permissions, auth state, health, version, and update/rollback status. A catalog
+entry with no supported installer is still useful as a discoverable integration
+but presents `catalog only`, not a misleading Install button.
 
 ## 9.7 Graceful shutdown (SIGTERM/SIGINT) — P2 shutdown case
 
@@ -2032,7 +2227,7 @@ Multi-stage; multi-arch (`linux/amd64`, `linux/arm64`).
 ```dockerfile
 # docker/Dockerfile
 # ---- build stage ----
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 make g++ git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@9 --activate
@@ -2049,7 +2244,7 @@ RUN pnpm --filter @agena/daemon... build
 RUN pnpm deploy --filter @agena/daemon --prod /out   # carries compiled node-pty .node binaries
 
 # ---- runtime stage ----
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git openssh-client ca-certificates curl tini zstd bash ripgrep procps less \
     && rm -rf /var/lib/apt/lists/*
@@ -2356,6 +2551,13 @@ Any red release-matrix item unfixable in ≤2 days of spike work triggers the fa
 
 `/workspace/.agena/` is the **user-authored** surface (P20), independent of Pi:
 
+This surface is not the marketplace installation directory. It is the local,
+project-owned authoring surface for small Agena tools, hooks, and skills. A
+marketplace bundle is installed into daemon state under `/var/lib/agena/plugins`
+and is admitted through §9.6. Marketplace resources may be projected into a
+session, but they never become executable merely because a package or `.agena/`
+directory exists.
+
 ```text
 /workspace/.agena/
 ├── config.json          # workspace-scoped user settings: default model, tool allowlist
@@ -2469,7 +2671,7 @@ Zero model calls anywhere in CI; real-Pi recording is manual/nightly.
 | 10 | Daemon restart | daemon e2e | SIGTERM mid-`hang` ⇒ `message.assistant.aborted` with partial content; SIGKILL ⇒ boot sweep appends `message.assistant.failed {daemon_restart}` + `tool.call.aborted {daemon_restart}` + `run.failed` + `terminal.session.ended`; post-restart replay shows nothing pending; store intact | P2 |
 | 11 | FakeRuntime E2E | daemon e2e | full loop via spawned daemon + client: prompt→stream→complete; abort; approval; dispatch-failure durable record; TUI reducers replay the same streams to stable snapshots | P16 |
 | 12 | Backpressure | daemon integration | slow reader: frames coalesce above **1 MiB** `bufferedAmount`, drop above **4 MiB**; durable events never dropped; backlog >16 MiB ⇒ close `4429` and client replays; fast producer cannot OOM the gateway | P12, backpressure |
-| 13 | Importer | daemon test (M6) | fixture Claude/Codex archives: raw bytes untouched; malformed lines skipped+counted; re-import idempotent by `source_ref`; imported events carry `source.kind:"importer"`; imported sessions reject prompts with `SESSION_READ_ONLY`; FTS finds imported text | P3 |
+| 13 | Importer | daemon/client test (M6) | converted Pi v3 fixture: singular and ordered batch import; batch-to-singular compatibility fallback; interrupted project reuse; malformed sources isolated; re-import idempotent by `(machineId, harness, sourceSessionId)`; imported events carry `source.kind:"importer"`; FTS finds imported text | P3 |
 | 14 | Path-safety fuzz | core | hostile-path corpus (`../`, `..%2f`, unicode lookalikes, NUL, symlink chains/ancestors) all throw `PathViolation` | P1 |
 
 ## 13.6 Fixture pipeline (P15)
@@ -2585,16 +2787,43 @@ Closes: remote browser preview UX for cloud workspaces.
 
 ### M6 — Importers
 
-Deliverables: `imports` and `imported_sessions` schema; `agena import claude|codex` per §9.6 (raw archive → normalized events with `source.kind:"importer"` → deterministic summary + lazy LLM continuation summary as `import.summary.created`); imported-session source/read-only metadata on sessions; read-only enforcement (`SESSION_READ_ONLY`); `agena resume <imported>` seeds a new native session.
+Deliverables: the `imports` ledger; local Claude/Codex/Pi discovery and conversion per §9.6; singular and ordered batch session routes; imported-session source/read-only metadata on sessions; read-only enforcement (`SESSION_READ_ONLY`); `agena resume <imported>` seeds a new native session.
 
 Acceptance:
-1. Import a real Claude archive: stats report sessions/messages/skipped counts; raw bytes untouched; re-import is a no-op (idempotent by `source_ref`). *(FL-9)*
+1. Import real Claude/Codex sessions: per-file results report imported/skipped/error counts; source bytes stay local; re-import is a no-op by `(machineId, harness, sourceSessionId)`. *(FL-9)*
 2. `agena search` finds imported content; imported sessions render with an "imported, read-only" banner. *(FL-7)*
 3. Resuming an imported session produces a native session whose first context includes the summary.
 4. Suite 13 green.
-5. All durable states introduced through M6 (import records, imported-session mappings, import summaries, read-only enforcement metadata) are idempotent, rebuildable, and recoverable after restart.
+5. All durable states introduced through M6 (ledger records and imported-session metadata) are idempotent, rebuildable, and recoverable after restart.
 
 Closes: P3 (importer provenance), backfill contract.
+
+### M6.5 — Plugin Catalog, Installation, and Runtime Admission
+
+Deliverables: versioned `integrations.sh` seed importer and catalog snapshot;
+catalog source refresh with approximately 1,500 normalized entries;
+`plugin_catalog_sources`, `plugin_catalog_entries`, `plugin_installations`, and
+`plugin_capability_grants`; `agena plugins` CLI commands; paginated catalog and
+installation routes; generic adapters for MCP, provider, CLI, browser, skill,
+and explicitly trusted Pi-package kinds; staged immutable artifacts;
+exact-version/commit and content-hash resolution; no-lifecycle-script package
+installation where supported; explicit enablement; auth/secret bindings;
+health/update/rollback state; runtime reload at idle or after the active turn;
+and Settings `Discover`/`Installed` views with catalog-only and blocked states.
+
+Acceptance:
+1. Importing the `integrations.sh` seed is idempotent and produces roughly 1,500 searchable catalog records without executing the script or preventing daemon startup when an entry is malformed.
+2. Catalog listing is cursor-paginated and never sends the complete catalog to the renderer or Pi in one response.
+3. Every install resolves an immutable artifact, validates its Agena manifest and compatibility, records provenance/hashes, and leaves the installation disabled until policy/auth requirements are satisfied.
+4. A failed install/update leaves no active partial artifact; a failed update keeps the previous healthy artifact active and reports `update_available` or `crashed` state as appropriate.
+5. MCP/skill/provider integrations use Agena-owned registry, secrets, auth, and health paths; Pi extensions load only from explicit approved paths with filesystem auto-discovery disabled.
+6. Disabling a plugin removes its capabilities from new sessions without deleting its artifact or credentials; busy sessions adopt changes only after their current turn.
+7. A catalog-only, blocked, unavailable, or broken entry is visible with an actionable reason and does not prevent unrelated plugins or the daemon from working.
+
+Closes: issue #1's catalog, lifecycle, persistence, capability, auth, health,
+and integration-seed requirements. Public third-party executable publishing,
+automatic executable updates, and arbitrary in-process Pi extensions remain
+post-M6.5 until the trust/sandbox decision is revisited.
 
 ### M7 — Extensibility Execution
 
@@ -2638,7 +2867,7 @@ Closes: P20 (execution).
 | P17 | pi-tui first, fallback recorded | ADR-0001; renderer-confined imports; Ink → OpenTUI fallback order | §11.2 |
 | P18 | Bun provisional; Node daemon | Merged checklist; spike M1, gate M3-end; npm fallback = distribution change | §11.6, INV-13 |
 | P19 | Explicit acceptance criteria; walking skeleton first | M1–M7 with demo + suite criteria mapped to FL-1…FL-9 | §14 |
-| P20 | `.agena/` surface independent of Pi; bridge temporary | Path-derived names, defineX factories, descriptor-first discovery, `agena info`; bridge `@internal @temporary` (ADR-0003) | §12 |
+| P20 | `.agena/` surface independent of Pi; bridge temporary; marketplace must not collapse into authored extensions | Path-derived names, defineX factories, descriptor-first discovery, `agena info`; catalog/installer/runtime split in §9.6; bridge `@internal @temporary` (ADR-0003) | §9.6, §12 |
 
 ## 15.2 Adversarial review findings (high/medium, consolidated)
 
@@ -2659,9 +2888,9 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 | F11 | P2 payload fields/reasons had five spellings (`partial`/`partialBlocks`/`partialContent`, null vs `[]`, `daemon.restart`/`daemon-crash`/…) — recovery events would fail validation exactly when needed (high, ×3) | **Fixed.** Canonical matrix §5.6 with exact payloads and the four reason spellings; every writer quotes it; conformance test 6 feeds each cell through the schemas. |
 | F12 | Snapshot events: name/payload/kind/target-session all diverged; `pre_restore` violated the CHECK (high, ×2) | **Fixed.** Control-session design adopted everywhere; `snapshot.restored` is the name; `pre_restore` added to enum + DDL CHECK; payloads from filesystem draft in §5.5; snapshots table gains `sha256`/`status`. |
 | F13 | Two disjoint file-API route sets; init seeding called a nonexistent route (high, ×2) | **Fixed.** filesystem's richer `/v1/files` family is canonical (§9.3); `/v1/workspace/*` dead; seeding uses `POST /v1/files/upload?format=tar`. |
-| F14 | HTTP route table had no owner; blobs/rebuild/imports/approvals rows missing; search/rebuild/PTY paths inconsistent (high/med, ×3) | **Fixed.** One authoritative table in §9.3 (schemas in `protocol/src/http.ts`, matching the ownership claim): adds `GET /v1/blobs/:hash`, `POST /v1/imports`, `GET /v1/imports/:id`, `GET /v1/approvals`, `POST /v1/admin/rebuild`; `GET /v1/search`; PTY WS `/v1/ptys/:id/ws`. |
+| F14 | HTTP route table had no owner; blobs/rebuild/imports/approvals rows missing; search/rebuild/PTY paths inconsistent (high/med, ×3) | **Fixed.** One authoritative table in §9.3 (schemas in `protocol/src/http.ts`, matching the ownership claim), including singular/batch import and ledger routes. |
 | F15 | Daemon port defined three ways (24362/7777/4460) (med) | **Fixed.** 7777 in-container, host ≥7700 loopback-only (§3.2). |
-| F16 | Five different `/var/lib/agena` layouts (db path, captures dir, pi home, token file, imports dir) (med, ×3) | **Fixed.** §3.3 is the normative tree (`db/agena.db`, `captures/`, `pi/sessions`, `config/token`, `raw-imports/`); all sections reference it. |
+| F16 | Five different `/var/lib/agena` layouts (db path, captures dir, pi home, token file, imports dir) (med, ×3) | **Fixed.** §3.3 is the normative tree (`db/agena.db`, `captures/`, `pi/sessions`, `config/token`); local import sources are never copied into daemon state. |
 | F17 | Secrets-at-rest stance contradictory (never-on-volume vs secrets.env vs pi/auth.json) (med, ×2) | **Fixed.** Decided rule in §3.3: env-first with two permitted 0600 materializations under the state volume (snapshot-excluded by construction); absolute "never on any volume" language superseded. |
 | F18 | Token env/file/minting owner disagreed; `AGENA_WORKSPACE_ROOT` vs `_DIR` (med, ×3) | **Fixed.** `AGENA_AUTH_TOKEN`, CLI-minted at `workspace init`, daemon persists to `config/token` (fallback-generate); `AGENA_WORKSPACE_DIR`; provisioning appendix is §10.4 + §9.2. |
 | F19 | WS close codes (4401 vs 4001, 4429 vs 4008) and heartbeat direction conflicted (med, ×3) | **Fixed.** Single registry in protocol `errors.ts`: 4401 auth, 4429 slow consumer, 4409 PTY (§5.9); daemon-pings-15s only. |
@@ -2684,7 +2913,7 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 | F36 | Concurrency/legality matrix conflicts per command (followUp idle, setModel mid-turn vs runtime M4.5) (med) | **Fixed.** §5.4 matrix is the one statement; runtime M4.5 criterion reworded to "between turns" (§14-M4.5). |
 | F37 | `compact` unreachable from any client (med) | **Fixed.** In the command union, daemon dispatch, and TUI palette (§5.4, §11.3). |
 | F38 | Workspace-scoped events had no home (control session unknown to protocol/store) (med, ×2) | **Fixed.** Control session adopted in protocol (§5.5), DDL (`is_control`, `meta.control_session_id`), routes (`includeControl`), glossary. |
-| F39 | Importer had no owning section (wire contract, mapping, read-only, idempotency unspecified) (med) | **Fixed.** Ownership assigned: §9.6 specifies the `POST /v1/imports` contract, per-source parsing, `SESSION_READ_ONLY` enforcement, and the one idempotency rule (`source_ref` identity, `content_hash` change detection). |
+| F39 | Importer had no owning section (wire contract, mapping, read-only, idempotency unspecified) (med) | **Fixed.** Ownership assigned: §9.6 specifies local parsing, singular/batch wire contracts, `SESSION_READ_ONLY` enforcement, and identity by `(machineId, harness, sourceSessionId)`. |
 | F40 | PTY boot-recovery gap + framing/idle-timeout drift + reattach-resize garbling (med/low, ×2) | **Fixed.** Sweep closes dangling terminals; control frames in `protocol/src/pty.ts` (`{"type":"resize"…}`/`{"type":"exit"…}`); 15-min reap; double-resize nudge documented (§9.5). |
 | F41 | Pi throwing at prompt dispatch left a dangling user message + stale echo expectation (med) | **Fixed.** Durable `run.failed {phase:"dispatch", triggerMessageId}` + echo-expectation cleanup; FakeRuntime asserts it (§8.6). |
 | F42 | Approval respond path appended before the adapter could reject (low/med) | **Fixed.** Core validates against its own pending set BEFORE append; adapter failure after a valid append is a runtime-error path (§8.5). |
@@ -2720,7 +2949,7 @@ Duplicate findings across the four reviewers are merged into one row each; each 
 | R3 | **Terminal scope explodes** (VT100/full-screen emulation) | M | H | M3 allows a lightweight embedded shell split for normal I/O; full terminal emulation and observation frames stay future/optional | Any PR adding VT parsing or terminal-emulator dependencies without pulling that scope forward |
 | R4 | **Bun CLI risk** (raw mode, WS, packaging) | M | M | Provisional (ADR-0002); CI compiles every push; gate M3-end; Node/npm fallback is build-script-only | Flaky compile step; raw-mode bugs in M3 |
 | R5 | **Schema hardens too early** | M | M | Events-are-truth; projections disposable; rebuild from M2; `v`+upcasts; storage behind the port | A "data migration" PR touching `events` |
-| R6 | **Plugin-layer confusion** (Agena vs Pi extensions) | M | M | `.agena/` Pi-independent; bridge marked temporary (ADR-0003); Pi auto-discovery disabled; `agena info` names the bridge | Docs/examples importing Pi types in `.agena/` |
+| R6 | **Plugin-layer confusion** (catalog vs installer vs Agena extensibility vs Pi extensions) | M | H | Catalog and installation state are daemon-owned (§9.6); `.agena/` remains Pi-independent; bridge marked temporary (ADR-0003); Pi auto-discovery disabled; explicit trusted package paths only; `agena info` names the active adapter/tier | A catalog entry is executed during refresh; docs/examples import Pi types in `.agena/`; an install silently grants new capabilities |
 | R7 | **Event log bloat** | M | M | Two-tier model; 64 KiB cap + spill; suite 3 row-budget assertion; `agena info` counts | Events-per-session trending up |
 | R8 | **Reconnect feels broken** | M | H | seq from day one; replay built in M2 before features; snapshots; kill/reopen suites 6+10 in CI | Any reconnect bug — P0 by policy |
 | R9 | **Daemon crash mid-generation** | M | H | §5.6 matrix + boot sweep + WAL; suite 10 | Sweep counter finding dangling rows |
@@ -2741,8 +2970,8 @@ Each is a decision, not an omission.
 3. **Desktop and phone apps / browser IDE** — the protocol is designed for them (INV-1, INV-6); the clients are not built.
 4. **Embedded terminal pane in the TUI** — needs a VT100 emulator; raw passthrough is the v1 terminal. Terminal-observation frames on the main channel: future/optional.
 5. **Multi-user, teams, RBAC/SSO, billing, multi-tenant SaaS** — single-user, single-tenant; INV-12's token is the whole v1 auth story.
-6. **Plugin marketplace / remote plugin install** — v1 extensibility is authoring files in `.agena/`.
-7. **Live Claude/Codex/OpenCode adapters** — Claude/Codex are one-time import sources; perfect replay of imports is explicitly not attempted (raw archive + normalized events + summary is the contract).
+6. **Public third-party executable marketplace / unrestricted remote plugin install** — v1 includes the curated catalog, integrations.sh seed import, MCP/skill/provider lifecycle, and explicitly trusted package admission in §9.6/M6.5. Public publishing, arbitrary in-process Pi extensions, monetization, and unattended executable updates remain deferred.
+7. **Live Claude/Codex/OpenCode adapters** — Claude/Codex are one-time local import sources; perfect replay is explicitly not attempted.
 8. **Postgres, object storage, cloud control plane** — SQLite in-container; the `EventStore` port keeps the path open (§7.11).
 9. **CRDT/offline editing, server-side device cursors** — clients keep cursor + draft locally; server-ordered events are the sync mechanism.
 10. **Branch management UX** — the data model and replay contract ship in the schema; fork UX is an M5 stretch, not required for v1 success.

@@ -4,8 +4,10 @@ import { errCode, errText, performSend, type SendApi } from "./send.ts";
 
 function api(overrides: Partial<SendApi> = {}): SendApi & { calls: string[] } {
   const calls: string[] = [];
-  const ok = (mode: string) => (text: string) => {
-    calls.push(`${mode}:${text}`);
+  const ok = (mode: string) => (content: Parameters<SendApi["prompt"]>[0]) => {
+    calls.push(
+      `${mode}:${typeof content === "string" ? content : JSON.stringify(content)}`,
+    );
     return Promise.resolve({});
   };
   return {
@@ -21,14 +23,22 @@ const reject = (code: string) => () =>
 
 test("idle sends a prompt", async () => {
   const a = api();
-  const out = await performSend(a, { active: false, queueMode: "steer", text: "hi" });
+  const out = await performSend(a, {
+    active: false,
+    queueMode: "steer",
+    text: "hi",
+  });
   assert.deepEqual(out, { sentAs: "prompt" });
   assert.deepEqual(a.calls, ["prompt:hi"]);
 });
 
 test("idle + SESSION_BUSY auto-converts to steer with a notice", async () => {
   const a = api({ prompt: reject("SESSION_BUSY") });
-  const out = await performSend(a, { active: false, queueMode: "followUp", text: "hi" });
+  const out = await performSend(a, {
+    active: false,
+    queueMode: "followUp",
+    text: "hi",
+  });
   assert.equal(out.sentAs, "steer");
   assert.ok(out.notice);
   assert.deepEqual(a.calls, ["steer:hi"]);
@@ -49,9 +59,30 @@ test("active sends per queue mode", async () => {
 
 test("active + TURN_NOT_ACTIVE silently resends as prompt", async () => {
   const a = api({ steer: reject("TURN_NOT_ACTIVE") });
-  const out = await performSend(a, { active: true, queueMode: "steer", text: "x" });
+  const out = await performSend(a, {
+    active: true,
+    queueMode: "steer",
+    text: "x",
+  });
   assert.deepEqual(out, { sentAs: "prompt" });
   assert.deepEqual(a.calls, ["prompt:x"]);
+});
+
+test("image content survives send-mode fallback", async () => {
+  const a = api({ prompt: reject("SESSION_BUSY") });
+  const content = [
+    {
+      type: "image" as const,
+      ref: { blob: `sha256:${"0".repeat(64)}`, sizeBytes: 3 },
+    },
+  ];
+  await performSend(a, {
+    active: false,
+    queueMode: "steer",
+    text: "",
+    content,
+  });
+  assert.deepEqual(a.calls, [`steer:${JSON.stringify(content)}`]);
 });
 
 test("other errors rethrow in both branches", async () => {

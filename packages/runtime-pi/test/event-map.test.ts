@@ -321,6 +321,10 @@ it("maps Pi error stops to failed events, not empty completions", () => {
         message: "Cannot read properties of undefined",
       },
     },
+  ] satisfies RuntimeEvent[]);
+  expect(
+    mapPiEvent(state, { type: "agent_end", messages: [], willRetry: false }),
+  ).toEqual([
     {
       type: "run-failed",
       runId: "run-1",
@@ -330,20 +334,74 @@ it("maps Pi error stops to failed events, not empty completions", () => {
       },
     },
   ] satisfies RuntimeEvent[]);
-  expect(
-    mapPiEvent(state, { type: "agent_end", messages: [], willRetry: false }),
-  ).toEqual([]);
 });
 
 it("keeps the run open across agent_end with willRetry", () => {
   const state = createMapperState(() => "r1");
+  state.triggerMessageId = "m1";
   expect(mapPiEvent(state, { type: "agent_start" })).toHaveLength(1);
   expect(
     mapPiEvent(state, { type: "agent_end", messages: [], willRetry: true }),
   ).toEqual([]);
+  expect(mapPiEvent(state, { type: "agent_start" })).toEqual([]);
   expect(
     mapPiEvent(state, { type: "agent_end", messages: [], willRetry: false }),
   ).toEqual([{ type: "run-completed", runId: "r1" }]);
+});
+
+it("surfaces automatic retry and compaction lifecycle events", () => {
+  const state = createMapperState(() => "id");
+  state.runId = "run-1";
+
+  const out = [
+    {
+      type: "auto_retry_start",
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 4_000,
+      errorMessage: "provider unavailable",
+    },
+    { type: "auto_retry_end", success: false, attempt: 4 },
+    { type: "compaction_start", reason: "overflow" },
+    {
+      type: "compaction_end",
+      reason: "overflow",
+      result: {
+        summary: "Earlier work was preserved.",
+        firstKeptEntryId: "entry-1",
+        tokensBefore: 200_000,
+        estimatedTokensAfter: 40_000,
+        details: {},
+      },
+      aborted: false,
+      willRetry: true,
+    },
+  ].flatMap((ev) => mapPiEvent(state, ev as AgentSessionEvent));
+
+  expect(out).toEqual([
+    {
+      type: "retry-started",
+      runId: "run-1",
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 4_000,
+      errorSummary: "provider unavailable",
+    },
+    { type: "retry-ended", runId: "run-1", outcome: "exhausted" },
+    { type: "compaction-started", trigger: "auto" },
+    {
+      type: "compaction-completed",
+      summary: "Earlier work was preserved.",
+      tokensBefore: 200_000,
+      tokensAfter: 40_000,
+      trigger: "auto",
+    },
+  ] satisfies RuntimeEvent[]);
+});
+
+it("drops an uncorrelated agent_start instead of emitting an invalid run", () => {
+  const state = createMapperState(() => "r1");
+  expect(mapPiEvent(state, { type: "agent_start" })).toEqual([]);
 });
 
 it("maps Pi session name changes into runtime title events", () => {

@@ -5,13 +5,13 @@ import { useSessions } from "../../store/index.ts";
 import { ActiveAgents } from "../agents/task-group.tsx";
 import { Composer } from "./composer.tsx";
 
-export function ComposerPane() {
+export function ComposerPane({ mobile = false }: { mobile?: boolean }) {
   const sessionId = useSessions((s) => s.activeSessionId);
   if (!sessionId) return null;
   return (
     <>
       <ActiveAgents parentSessionId={sessionId} />
-      <Composer sessionId={sessionId} />
+      <Composer sessionId={sessionId} mobile={mobile} />
     </>
   );
 }

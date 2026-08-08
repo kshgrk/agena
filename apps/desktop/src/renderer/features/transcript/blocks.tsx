@@ -284,11 +284,8 @@ function ToolOutput({ text, streaming }: { text: string; streaming: boolean }) {
 }
 
 function ToolRow({ block }: { block: ToolBlock }) {
-  // null = follow status (auto-expand while running, collapse on finish);
-  // boolean = user pinned.
-  const [pinned, setPinned] = useState<boolean | null>(null);
+  const [open, setOpen] = useState(false);
   const [showArgs, setShowArgs] = useState(false);
-  const open = pinned ?? block.status === "running";
   const Icon = toolIcon(block.name);
 
   let argsJson = "";
@@ -309,7 +306,7 @@ function ToolRow({ block }: { block: ToolBlock }) {
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          setPinned(!open);
+          setOpen(!open);
         }}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-raised focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
       >

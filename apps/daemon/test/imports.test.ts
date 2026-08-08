@@ -153,6 +153,38 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
     (await daemon.store.readEvents(created.sessionId, 0)).events.length,
   ).toBe(3);
 
+  const batch = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/imports/sessions`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        sessions: [
+          {
+            ...body,
+            sourceFingerprint: {
+              ...body.sourceFingerprint,
+              sourcePath: "/home/u/.claude/projects/p/batch.jsonl",
+              sourceSessionId: "batch-1",
+            },
+            piSession: piSession.replace("pi-src-1", "pi-batch-1"),
+          },
+          body,
+        ],
+      }),
+    },
+  );
+  expect(batch.status).toBe(200);
+  expect(await batch.json()).toMatchObject({
+    sessions: [
+      { result: { alreadyImported: false } },
+      { result: { sessionId: created.sessionId, alreadyImported: true } },
+    ],
+  });
+
   const childPiSession = piSession.replace("pi-src-1", "pi-child-1");
   const childBody = {
     ...body,
@@ -204,7 +236,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
       })
     ).json()) as { imports: Array<Record<string, unknown>> };
   const mine = await list("?machineId=machine-1");
-  expect(mine.imports).toHaveLength(2);
+  expect(mine.imports).toHaveLength(3);
   expect(mine.imports[0]).toMatchObject({
     sessionId: created.sessionId,
     projectId: "prj_proj",
@@ -213,7 +245,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
     sourceSessionId: "src-1",
   });
   expect((await list("?machineId=other")).imports).toHaveLength(0);
-  expect((await list("")).imports).toHaveLength(2);
+  expect((await list("")).imports).toHaveLength(3);
 
   // Full project teardown: rows, ledger, pi file, workspace dir — and the
   // fingerprint is importable again afterwards.
@@ -224,7 +256,7 @@ test("imports a pi session, seeds events, and dedupes re-imports", async () => {
   expect(del.status).toBe(200);
   expect(await del.json()).toEqual({
     projectId: "prj_proj",
-    deletedSessions: 2,
+    deletedSessions: 3,
   });
   expect(await daemon.store.getSession(created.sessionId)).toBeNull();
   expect((await list("")).imports).toHaveLength(0);

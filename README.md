@@ -79,7 +79,7 @@ design lives in [`final_plan.md`](./final_plan.md) (daemon) and
 
 ### Prerequisites
 
-- **Node ≥ 22.6** and **pnpm 10** (`corepack enable`)
+- **Node ≥ 22.19** and **pnpm 10** (`corepack enable`)
 - **Docker** (for the local workspace) — or a [Modal](https://modal.com) account (for cloud)
 - An **Anthropic API key** for the agent runtime
 

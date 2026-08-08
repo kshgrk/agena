@@ -292,14 +292,14 @@ export type ToolVisualState =
 | aborted | `Ban` `text-tool-aborted` | `text-fg-muted` | reason ("stopped") `text-fg-muted` |
 | denied | `ShieldX` `text-tool-denied` | `text-fg-muted` | reason ("denied") `text-warn` |
 
-**Collapsed row (default for success/aborted/denied; everything starts collapsed except error):**
+**Collapsed row (default for every state):**
 single 32px row, full column width — `rounded-lg border border-border-subtle bg-surface px-3`,
 containing: status glyph · tool name in `font-mono text-sm` · one-line summary of the primary
 argument (`text-fg-muted font-mono text-sm`, middle-truncated — e.g. the command for bash, the
 path for edits, the pattern for grep) · right-aligned meta · chevron (`text-fg-faint`, rotates
 180° in 140ms when expanded). Hover: `bg-raised/60`. The whole row is the toggle button.
 
-- Error cards auto-expand and get `border-danger/35`.
+- Error cards stay collapsed by default and get `border-danger/35`.
 - Running cards get `border-accent/35`. No other state colors the border.
 
 **Expanded body:** separated by `border-t border-border-subtle`, `p-3`, `space-y-3` on

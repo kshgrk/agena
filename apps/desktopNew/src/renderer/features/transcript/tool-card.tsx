@@ -1,7 +1,7 @@
 // The tool call card — the signature component (design.md §7, followed to the
 // letter): 32px collapsed row with status glyph / mono name / one-line arg
-// summary / right meta / chevron; expanded Input + Output/Error wells; error
-// auto-expands; running border-accent/35; ANSI-colored live output streaming
+// summary / right meta / chevron; expanded Input + Output/Error wells; every
+// card starts collapsed; running border-accent/35; ANSI-colored live output
 // from frames with pin-to-bottom follow. Structure adapted from ai-elements
 // tool.tsx (https://github.com/vercel/ai-elements, Apache-2.0, © Vercel, Inc.
 // — see docs/oss/LICENSES.md): 'ai' ToolUIPart states → @agena/protocol-driven
@@ -373,9 +373,7 @@ export const ToolCard = memo(function ToolCard({
   });
   const state = toolVisualState(block.status, hasPendingApproval);
 
-  // null = follow the default (only errors auto-expand); boolean = user pinned.
-  const [pinned, setPinned] = useState<boolean | null>(null);
-  const open = pinned ?? state === "error";
+  const [open, setOpen] = useState(false);
   const elapsed = useElapsed(block.at, state === "running");
   const Icon = toolIcon(block.name);
 
@@ -397,7 +395,7 @@ export const ToolCard = memo(function ToolCard({
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setPinned(!open)}
+        onClick={() => setOpen(!open)}
         className="flex h-8 w-full items-center gap-2 rounded-[inherit] px-3 text-left transition-colors duration-100 hover:bg-raised/60"
       >
         <StatusGlyph state={state} />

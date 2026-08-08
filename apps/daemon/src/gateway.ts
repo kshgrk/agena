@@ -17,6 +17,7 @@ import type {
   PromptCmd,
   RespondToApprovalCmd,
   RuntimeInfoCmd,
+  SetFastModeCmd,
   SetModelCmd,
   SetThinkingLevelCmd,
   SteerCmd,
@@ -499,6 +500,13 @@ export class Gateway {
             c.sessionId,
             c.thinkingLevel,
           ),
+        );
+        return;
+      }
+      case "setFastMode": {
+        const c = cmd as SetFastModeCmd;
+        await this.#runCommand(conn, requestId, c.sessionId, () =>
+          this.#orchestrator.handleSetFastMode(c.sessionId, c.enabled),
         );
         return;
       }

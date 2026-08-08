@@ -224,11 +224,26 @@ describe("command payloads", () => {
         content: [{ type: "text", text: "hi" }],
       }).success,
     ).toBe(true);
-    // v1: prompt content is text blocks only (§5.4)
+    // v1 prompt input accepts images but not general file blocks (§5.4).
     expect(
       commandSchemas.prompt.payload.safeParse({
         sessionId: "s",
-        content: [{ type: "image", ref: {} }],
+        content: [
+          {
+            type: "image",
+            ref: {
+              blob: `sha256:${"0".repeat(64)}`,
+              sizeBytes: 3,
+              mimeType: "image/png",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      commandSchemas.prompt.payload.safeParse({
+        sessionId: "s",
+        content: [{ type: "file", ref: {} }],
       }).success,
     ).toBe(false);
     expect(
@@ -285,6 +300,13 @@ describe("command payloads", () => {
       }),
     ).toEqual({ sessionId: "s", thinkingLevel: "high" });
     expect(
+      commandSchemas.setFastMode.ack.parse({
+        enabled: true,
+        available: true,
+        active: true,
+      }),
+    ).toEqual({ enabled: true, available: true, active: true });
+    expect(
       commandSchemas.respondToApproval.payload.parse({
         sessionId: "s",
         approvalId: "a",
@@ -318,6 +340,9 @@ describe("M4.5 durable event payloads", () => {
         to: "high",
       }),
     ).toEqual({ from: "medium", to: "high" });
+    expect(
+      durableEventSchemas["fast.mode.changed"].parse({ enabled: true }),
+    ).toEqual({ enabled: true });
     expect(
       durableEventSchemas["compaction.created"].parse({
         compactionId: "c",

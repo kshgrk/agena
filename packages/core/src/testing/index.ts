@@ -12,10 +12,12 @@ import type {
 } from "@agena/protocol";
 import { ulid } from "ulid";
 import type {
+  CreateForkRuntimeSessionInput,
   CreateRuntimeSessionInput,
   RuntimeAdapter,
   RuntimeEvent,
   RuntimeInFlightSnapshot,
+  RuntimeInput,
   RuntimeSession,
 } from "../runtime/types.ts";
 
@@ -25,6 +27,8 @@ export interface FakeRuntimeOptions {
   /** Pause before each emitted event (default 0 — deterministic and fast). */
   delayMs?: number;
   model?: ModelRef;
+  /** Emit one invalid run event to exercise orchestrator pump recovery. */
+  failFirstPump?: boolean;
 }
 
 const DEFAULT_MODEL: ModelRef = { provider: "fake", id: "fake-1" };
@@ -34,6 +38,7 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
   readonly id = "fake" as const;
   readonly version = "0.0.0";
   readonly createInputs: CreateRuntimeSessionInput[] = [];
+  readonly forkInputs: CreateForkRuntimeSessionInput[] = [];
   #options: FakeRuntimeOptions;
 
   constructor(options: FakeRuntimeOptions = {}) {
@@ -44,6 +49,17 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
     input: CreateRuntimeSessionInput,
   ): Promise<RuntimeSession> {
     this.createInputs.push(input);
+    return new FakeRuntimeSession(input.sessionId, {
+      ...this.#options,
+      failFirstPump:
+        this.#options.failFirstPump === true && this.createInputs.length === 1,
+    });
+  }
+
+  async createForkSession(
+    input: CreateForkRuntimeSessionInput,
+  ): Promise<RuntimeSession> {
+    this.forkInputs.push(input);
     return new FakeRuntimeSession(input.sessionId, this.#options);
   }
 
@@ -62,6 +78,7 @@ class FakeRuntimeSession implements RuntimeSession {
   #snapshot: RuntimeInFlightSnapshot | null = null;
   #model: ModelRef;
   #thinkingLevel: ThinkingLevel = "off";
+  #fastMode = false;
   #pendingApproval: {
     approvalId: string;
     resolve: (response: ApprovalResponse) => void;
@@ -84,17 +101,17 @@ class FakeRuntimeSession implements RuntimeSession {
     return this.#iterate();
   }
 
-  async prompt(input: { messageId: string; text: string }): Promise<void> {
+  async prompt(input: RuntimeInput): Promise<void> {
     await this.#accept("prompt", input);
   }
 
-  async steer(_input: { messageId: string; text: string }): Promise<void> {
+  async steer(_input: RuntimeInput): Promise<void> {
     if (this.state !== "running") {
       throw new Error(`fake runtime: steer while ${this.state}`);
     }
   }
 
-  async followUp(_input: { messageId: string; text: string }): Promise<void> {
+  async followUp(_input: RuntimeInput): Promise<void> {
     if (this.state !== "running") {
       throw new Error(`fake runtime: followUp while ${this.state}`);
     }
@@ -112,6 +129,19 @@ class FakeRuntimeSession implements RuntimeSession {
       thinkingLevel: this.#thinkingLevel,
       availableModels: [this.#model],
       availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
+      fastMode: {
+        enabled: this.#fastMode,
+        available: true,
+        active: this.#fastMode,
+      },
+      sessionUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+      },
       slashCommands: [],
     };
   }
@@ -124,10 +154,21 @@ class FakeRuntimeSession implements RuntimeSession {
     this.#thinkingLevel = thinkingLevel;
   }
 
+  async setFastMode(enabled: boolean) {
+    this.#fastMode = enabled;
+    return { enabled, available: true, active: enabled };
+  }
+
   async compact(): Promise<{ summary: string }> {
     return {
       summary: `Fake runtime compacted context at thinking=${this.#thinkingLevel}.`,
     };
+  }
+
+  async navigateTree(
+    _runtimeEntryId: string,
+  ): Promise<{ editorText?: string }> {
+    return {};
   }
 
   async respondToApproval(
@@ -140,7 +181,7 @@ class FakeRuntimeSession implements RuntimeSession {
 
   async #accept(
     trigger: "prompt" | "steer" | "followUp",
-    input: { messageId: string; text: string },
+    input: RuntimeInput,
   ): Promise<void> {
     if (this.state !== "idle") {
       throw new Error(`fake runtime: ${trigger} while ${this.state}`);
@@ -205,6 +246,15 @@ class FakeRuntimeSession implements RuntimeSession {
       run: { runId, startedAt: new Date().toISOString(), trigger },
       assistantMessage: null,
     };
+    if (this.#options.failFirstPump) {
+      await emit({
+        type: "run-started",
+        runId,
+        trigger,
+        triggerMessageId: "",
+      });
+      return;
+    }
     await emit({
       type: "run-started",
       runId,

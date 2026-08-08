@@ -8,10 +8,12 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
+  CreateForkRuntimeSessionInput,
   CreateRuntimeSessionInput,
   RuntimeAdapter,
   RuntimeEvent,
   RuntimeInFlightSnapshot,
+  RuntimeInput,
   RuntimeSession,
 } from "@agena/core";
 import type {
@@ -23,22 +25,31 @@ import type {
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
   type AgentSession,
-  type AuthStorage,
+  type AgentSessionEvent,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionFactory,
+  estimateTokens,
+  findCutPoint,
   getAgentDir,
   type ModelRegistry,
+  type ModelRuntime,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
   VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { captureEnabled, createCaptureTee } from "./capture.ts";
+import { CodexUsageReader } from "./codex-usage.ts";
 import {
   createMapperState,
   type MapperState,
   mapPiEvent,
 } from "./event-map.ts";
+import {
+  createFastModeController,
+  type FastModeController,
+} from "./fast-mode.ts";
 import { PiPackageService } from "./package-service.ts";
 import { PiProviderService } from "./provider-service.ts";
 import { sessionNameExtension } from "./session-name-extension.ts";
@@ -52,6 +63,8 @@ export const PI_SDK_VERSION: string = VERSION;
 export const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 
 const CORE_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const OVERFLOW_COMPACTION_SUMMARY =
+  "Emergency context recovery: older detailed history was omitted because it exceeded the model context window. The retained recent messages are authoritative; re-read relevant project files and verify earlier state before acting.";
 
 export interface PiRuntimeOptions {
   /** Pi state root (§3.3). Default: $AGENA_STATE_DIR/pi, else /var/lib/agena/pi. */
@@ -74,6 +87,7 @@ export function containedResourceLoader(
   agentDir: string,
   visibleBrowser?: CreateRuntimeSessionInput["visibleBrowser"],
   packageSources: string[] = [],
+  fastModeExtension?: ExtensionFactory,
 ): DefaultResourceLoader {
   const browser = browserExtensionSource();
   const mcp = mcpExtensionSource();
@@ -92,6 +106,7 @@ export function containedResourceLoader(
     ],
     extensionFactories: [
       sessionNameExtension,
+      ...(fastModeExtension ? [fastModeExtension] : []),
       ...(visibleBrowser ? [mcpSystemOAuthExtension(visibleBrowser)] : []),
     ],
     noExtensions: true,
@@ -102,20 +117,76 @@ export function containedResourceLoader(
     noPromptTemplates: true,
     noThemes: true,
     extensionsOverride: (result) => {
-      const extensions = result.extensions.filter((extension) => {
-        const conflict = CORE_TOOL_NAMES.find((name) =>
-          extension.tools.has(name),
-        );
-        if (!conflict) return true;
-        result.errors.push({
-          path: extension.path,
-          error: `extension cannot override Agena core tool "${conflict}"`,
+      const extensions = result.extensions
+        .filter((extension) => {
+          const conflict = CORE_TOOL_NAMES.find((name) =>
+            extension.tools.has(name),
+          );
+          if (!conflict) return true;
+          result.errors.push({
+            path: extension.path,
+            error: `extension cannot override Agena core tool "${conflict}"`,
+          });
+          return false;
+        })
+        .map((extension) => {
+          const browserTool = extension.tools.get("agent_browser");
+          if (!browserTool) return extension;
+          const tools = new Map(extension.tools);
+          tools.set("agent_browser", {
+            ...browserTool,
+            definition: withAgentBrowserRestoreRetry(browserTool.definition),
+          });
+          return { ...extension, tools };
         });
-        return false;
-      });
       return { ...result, extensions };
     },
   });
+}
+
+/** Retry only the wrapper's safe pre-spawn restore-policy rejection. */
+export function withAgentBrowserRestoreRetry(
+  tool: ToolDefinition,
+): ToolDefinition {
+  const execute = tool.execute.bind(tool);
+  return {
+    ...tool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const result = await execute(toolCallId, params, signal, onUpdate, ctx);
+      if (
+        !isAutoBrowserSession(params) ||
+        !hasManagedRestorePolicyError(result.content)
+      ) {
+        return result;
+      }
+      return execute(
+        toolCallId,
+        { ...params, sessionMode: "fresh" },
+        signal,
+        onUpdate,
+        ctx,
+      );
+    },
+  };
+}
+
+function isAutoBrowserSession(
+  params: unknown,
+): params is Record<string, unknown> {
+  if (!params || typeof params !== "object" || Array.isArray(params))
+    return false;
+  const mode = (params as Record<string, unknown>).sessionMode;
+  return mode === undefined || mode === "auto";
+}
+
+function hasManagedRestorePolicyError(
+  content: ReadonlyArray<{ type: string; text?: string }>,
+): boolean {
+  return content.some(
+    (item) =>
+      item.type === "text" &&
+      /managed session restore policy/i.test(item.text ?? ""),
+  );
 }
 
 function mcpSystemOAuthExtension(
@@ -203,37 +274,97 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly packages: PiPackageService;
   #capturesDir: string;
   #defaultModel: string | undefined;
+  #codexUsage = new CodexUsageReader();
   #sessions = new Map<string, PiRuntimeSession>();
 
-  constructor(options: PiRuntimeOptions = {}) {
-    this.piDir = resolve(
-      options.piDir ??
-        join(process.env.AGENA_STATE_DIR ?? "/var/lib/agena", "pi"),
-    );
+  private constructor(
+    piDir: string,
+    providers: PiProviderService,
+    options: PiRuntimeOptions,
+  ) {
+    this.piDir = piDir;
     this.#capturesDir = join(dirname(this.piDir), "captures"); // §3.3 sibling of pi/
     this.#defaultModel = options.defaultModel;
-    // §3.3/§8.3: Pi state lives under piDir, never ~/.pi or /workspace. Set the
-    // redirect, then hard-fail if Pi resolves its config root anywhere else.
-    process.env[PI_AGENT_DIR_ENV] = this.piDir;
-    const resolved = resolve(getAgentDir());
-    if (resolved !== this.piDir) {
-      throw new Error(
-        `PI_DIR verification failed: Pi getAgentDir() resolved to "${resolved}", expected "${this.piDir}"`,
-      );
-    }
-    this.providers = new PiProviderService({
-      piDir: this.piDir,
-      onCredentialsChanged: () => this.reloadExtensions(),
-    });
+    this.providers = providers;
     this.packages = new PiPackageService({
       piDir: this.piDir,
     });
   }
 
+  static async create(
+    options: PiRuntimeOptions = {},
+  ): Promise<PiRuntimeAdapter> {
+    const piDir = resolve(
+      options.piDir ??
+        join(process.env.AGENA_STATE_DIR ?? "/var/lib/agena", "pi"),
+    );
+    // §3.3/§8.3: Pi state lives under piDir, never ~/.pi or /workspace. Set the
+    // redirect, then hard-fail if Pi resolves its config root anywhere else.
+    process.env[PI_AGENT_DIR_ENV] = piDir;
+    const resolved = resolve(getAgentDir());
+    if (resolved !== piDir) {
+      throw new Error(
+        `PI_DIR verification failed: Pi getAgentDir() resolved to "${resolved}", expected "${piDir}"`,
+      );
+    }
+    let reload = async () => {};
+    const providers = await PiProviderService.create({
+      piDir,
+      onCredentialsChanged: () => reload(),
+    });
+    const adapter = new PiRuntimeAdapter(piDir, providers, options);
+    reload = () => adapter.reloadExtensions();
+    return adapter;
+  }
+
   async createSession(
     input: CreateRuntimeSessionInput,
   ): Promise<RuntimeSession> {
-    const authStorage = this.providers.authStorage;
+    const sessionManager = input.runtimeSessionRef
+      ? SessionManager.open(input.runtimeSessionRef, undefined, input.cwd)
+      : SessionManager.create(input.cwd);
+    return this.#createSession(input, sessionManager);
+  }
+
+  async createForkSession(
+    input: CreateForkRuntimeSessionInput,
+  ): Promise<RuntimeSession> {
+    const source = SessionManager.open(
+      input.sourceRuntimeSessionRef,
+      undefined,
+      input.cwd,
+    );
+    const entryId = input.runtimeEntryId ?? source.getLeafId();
+    if (!entryId) {
+      throw new Error("cannot fork an empty Pi session");
+    }
+    const entry = source.getEntry(entryId);
+    if (!entry) {
+      throw new Error(`Pi runtime entry "${entryId}" was not found`);
+    }
+
+    const forkFrom = input.position === "before" ? entry.parentId : entry.id;
+    const sessionManager = forkFrom
+      ? SessionManager.open(
+          requireForkedSession(source, forkFrom),
+          undefined,
+          input.cwd,
+        )
+      : SessionManager.create(input.cwd, source.getSessionDir(), {
+          parentSession: input.sourceRuntimeSessionRef,
+        });
+    const runtimeSessionRef = sessionManager.getSessionFile();
+    if (!runtimeSessionRef) {
+      throw new Error("Pi did not create a persistent fork session");
+    }
+    return this.#createSession({ ...input, runtimeSessionRef }, sessionManager);
+  }
+
+  async #createSession(
+    input: CreateRuntimeSessionInput,
+    sessionManager: SessionManager,
+  ): Promise<RuntimeSession> {
+    const modelRuntime = this.providers.modelRuntime;
     const modelRegistry = this.providers.modelRegistry;
     const want =
       input.model ??
@@ -245,11 +376,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       throw new Error(`unknown model "${want.provider}/${want.id}"`);
     }
 
+    const fastMode = createFastModeController();
     const resourceLoader = containedResourceLoader(
       input.cwd,
       this.piDir,
       input.visibleBrowser,
       this.packages.extensionSources,
+      fastMode.extension,
     );
     await resourceLoader.reload();
     const extensionTools = resourceLoader
@@ -268,13 +401,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       await createAgentSession({
         cwd: input.cwd,
         agentDir: this.piDir,
-        authStorage,
-        modelRegistry,
+        modelRuntime,
         resourceLoader,
         // Persistent JSONL raw layer under piDir/sessions (env redirect above).
-        sessionManager: input.runtimeSessionRef
-          ? SessionManager.open(input.runtimeSessionRef, undefined, input.cwd)
-          : SessionManager.create(input.cwd),
+        sessionManager,
         ...(!input.runtimeSessionRef ? { thinkingLevel: "off" as const } : {}),
         // Explicit allowlist: extension-registered tools are filtered unless
         // named here. agent_browser joins only when its extension actually
@@ -321,7 +451,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       input.sessionId,
       session,
       modelRegistry,
-      authStorage,
+      modelRuntime,
+      fastMode,
+      this.#codexUsage,
       capture,
     );
     this.#sessions.set(input.sessionId, runtime);
@@ -347,7 +479,9 @@ class PiRuntimeSession implements RuntimeSession {
 
   #session: AgentSession;
   #modelRegistry: ModelRegistry;
-  #authStorage: AuthStorage;
+  #modelRuntime: ModelRuntime;
+  #fastMode: FastModeController;
+  #codexUsage: CodexUsageReader;
 
   #map: MapperState = createMapperState(randomUUID);
   #queue: RuntimeEvent[] = [];
@@ -357,6 +491,7 @@ class PiRuntimeSession implements RuntimeSession {
   #reloadPromise: Promise<void> = Promise.resolve();
   #consuming = false;
   #unsubscribe: () => void;
+  #pendingUserMessageIds: string[] = [];
   // Mirror in-flight buffer (§8.6-lite): built from our own mapped events.
   #run: RuntimeInFlightSnapshot["run"] = null;
   #message: RuntimeInFlightSnapshot["assistantMessage"] = null;
@@ -365,13 +500,17 @@ class PiRuntimeSession implements RuntimeSession {
     sessionId: string,
     session: AgentSession,
     modelRegistry: ModelRegistry,
-    authStorage: AuthStorage,
+    modelRuntime: ModelRuntime,
+    fastMode: FastModeController,
+    codexUsage: CodexUsageReader,
     capture: ((event: unknown) => void) | null,
   ) {
     this.sessionId = sessionId;
     this.#session = session;
     this.#modelRegistry = modelRegistry;
-    this.#authStorage = authStorage;
+    this.#modelRuntime = modelRuntime;
+    this.#fastMode = fastMode;
+    this.#codexUsage = codexUsage;
     const ref = session.sessionFile;
     if (!ref) {
       throw new Error(
@@ -380,7 +519,9 @@ class PiRuntimeSession implements RuntimeSession {
     }
     this.runtimeSessionRef = ref;
     this.#unsubscribe = session.subscribe((ev) => {
+      if (ev.type === "agent_end") this.#codexUsage.invalidate();
       capture?.(ev); // raw tee first — sees every event pre-mapping (§8.7)
+      this.#captureMessageRuntimeRef(ev);
       let mapped: RuntimeEvent[];
       try {
         mapped = mapPiEvent(this.#map, ev);
@@ -407,17 +548,19 @@ class PiRuntimeSession implements RuntimeSession {
   }
 
   /** Resolves on Pi preflight ACCEPT, not run completion (§8.2). */
-  async prompt(input: { messageId: string; text: string }): Promise<void> {
+  async prompt(input: RuntimeInput): Promise<void> {
     await this.#reloadPromise.catch(() => {});
     if (this.state !== "idle") {
       throw new Error(`prompt while runtime session is ${this.state}`);
     }
     this.#map.triggerMessageId = input.messageId; // §8.5 correlation
+    this.#pendingUserMessageIds.push(input.messageId);
     this.state = "running";
     try {
       await new Promise<void>((accept, rejectAccept) => {
         this.#session
           .prompt(input.text, {
+            images: piImages(input),
             preflightResult: (ok) =>
               ok
                 ? accept()
@@ -442,19 +585,32 @@ class PiRuntimeSession implements RuntimeSession {
           });
       });
     } catch (err) {
+      this.#forgetPendingUserMessage(input.messageId);
       if (this.state === "running") this.state = "idle"; // preflight rejection: still usable
       throw err;
     }
   }
 
-  async steer(input: { messageId: string; text: string }): Promise<void> {
+  async steer(input: RuntimeInput): Promise<void> {
     this.#map.triggerMessageId = input.messageId;
-    await callPi(this.#session, "steer", input.text);
+    this.#pendingUserMessageIds.push(input.messageId);
+    try {
+      await callPi(this.#session, "steer", input.text, piImages(input));
+    } catch (error) {
+      this.#forgetPendingUserMessage(input.messageId);
+      throw error;
+    }
   }
 
-  async followUp(input: { messageId: string; text: string }): Promise<void> {
+  async followUp(input: RuntimeInput): Promise<void> {
     this.#map.triggerMessageId = input.messageId;
-    await callPi(this.#session, "followUp", input.text);
+    this.#pendingUserMessageIds.push(input.messageId);
+    try {
+      await callPi(this.#session, "followUp", input.text, piImages(input));
+    } catch (error) {
+      this.#forgetPendingUserMessage(input.messageId);
+      throw error;
+    }
   }
 
   async abort(): Promise<void> {
@@ -491,15 +647,29 @@ class PiRuntimeSession implements RuntimeSession {
   }
 
   async info(): Promise<RuntimeInfoAck> {
-    // AuthStorage caches auth.json in memory at create; a session-lifetime
-    // registry otherwise serves the credential state frozen at session start
-    // (phantom bedrock catalogs after creds change). Reload before listing.
-    this.#authStorage.reload();
+    await this.#modelRuntime.refresh({ allowNetwork: false });
+    const model = this.#session.model;
+    const stats = this.#session.getSessionStats();
+    const subscriptionUsage = this.#modelRuntime.isUsingSubscription(
+      model?.provider ?? "",
+    )
+      ? await this.#codexUsage.read(this.#modelRegistry, model)
+      : undefined;
     return {
-      ...(this.#session.model ? { model: modelRef(this.#session.model) } : {}),
+      ...(model ? { model: modelRef(model) } : {}),
       thinkingLevel: this.#session.thinkingLevel,
       availableModels: this.#modelRegistry.getAvailable().map(modelRef),
       availableThinkingLevels: this.#session.getAvailableThinkingLevels(),
+      fastMode: this.#fastMode.state(model),
+      sessionUsage: {
+        inputTokens: stats.tokens.input,
+        outputTokens: stats.tokens.output,
+        cacheReadTokens: stats.tokens.cacheRead,
+        cacheWriteTokens: stats.tokens.cacheWrite,
+        totalTokens: stats.tokens.total,
+        costUsd: stats.cost,
+      },
+      ...(subscriptionUsage ? { subscriptionUsage } : {}),
       slashCommands: this.#session.promptTemplates.map((p) => ({
         name: p.name,
         ...(p.description ? { description: p.description } : {}),
@@ -519,14 +689,21 @@ class PiRuntimeSession implements RuntimeSession {
     await callPi(this.#session, "setThinkingLevel", thinkingLevel);
   }
 
+  async setFastMode(enabled: boolean) {
+    this.#fastMode.setEnabled(enabled);
+    return this.#fastMode.state(this.#session.model);
+  }
+
   async compact(): Promise<{ summary: string }> {
-    const result = await callPi(this.#session, "compact");
-    return {
-      summary:
-        typeof result === "string"
-          ? result
-          : "Context compacted by the runtime.",
-    };
+    return compactWithOverflowFallback(this.#session);
+  }
+
+  async navigateTree(runtimeEntryId: string): Promise<{ editorText?: string }> {
+    const result = await this.#session.navigateTree(runtimeEntryId);
+    if (result.cancelled) throw new Error("Pi cancelled tree navigation");
+    return result.editorText === undefined
+      ? {}
+      : { editorText: result.editorText };
   }
 
   async respondToApproval(
@@ -580,6 +757,42 @@ class PiRuntimeSession implements RuntimeSession {
     this.#wakeUp();
   }
 
+  #captureMessageRuntimeRef(ev: AgentSessionEvent): void {
+    if (ev.type !== "message_end") return;
+    const messageId =
+      ev.message.role === "user"
+        ? this.#pendingUserMessageIds.shift()
+        : ev.message.role === "assistant"
+          ? (this.#map.messageId ?? undefined)
+          : undefined;
+    if (!messageId) return;
+
+    // Pi persists ordinary message entries synchronously after notifying
+    // listeners. The microtask sees that exact in-memory message object, so
+    // this remains identity-based rather than guessing from matching text.
+    queueMicrotask(() => {
+      if (this.state === "disposed") return;
+      const entry = this.#session.sessionManager
+        .getEntries()
+        .findLast(
+          (candidate) =>
+            candidate.type === "message" && candidate.message === ev.message,
+        );
+      if (!entry) return;
+      this.#queue.push({
+        type: "message-runtime-ref",
+        messageId,
+        runtimeEntryId: entry.id,
+      });
+      this.#wakeUp();
+    });
+  }
+
+  #forgetPendingUserMessage(messageId: string): void {
+    const index = this.#pendingUserMessageIds.indexOf(messageId);
+    if (index >= 0) this.#pendingUserMessageIds.splice(index, 1);
+  }
+
   #mirror(ev: RuntimeEvent): void {
     switch (ev.type) {
       case "run-started":
@@ -625,8 +838,60 @@ class PiRuntimeSession implements RuntimeSession {
   }
 }
 
+export async function compactWithOverflowFallback(
+  session: AgentSession,
+): Promise<{ summary: string }> {
+  try {
+    return { summary: (await session.compact()).summary };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      !/(?:exceeds?|exceeded).*context window|context window.*(?:exceeds?|exceeded)|maximum context length|too many tokens/i.test(
+        message,
+      )
+    ) {
+      throw error;
+    }
+    const entries = session.sessionManager.buildContextEntries();
+    const cutPoint = findCutPoint(
+      entries,
+      0,
+      entries.length,
+      session.settingsManager.getCompactionSettings().keepRecentTokens,
+    );
+    const firstKeptEntry = entries[cutPoint.firstKeptEntryIndex];
+    if (!firstKeptEntry || cutPoint.firstKeptEntryIndex === 0) throw error;
+    const tokensBefore = session.sessionManager
+      .buildSessionContext()
+      .messages.reduce((total, item) => total + estimateTokens(item), 0);
+    session.sessionManager.appendCompaction(
+      OVERFLOW_COMPACTION_SUMMARY,
+      firstKeptEntry.id,
+      tokensBefore,
+      undefined,
+      true,
+    );
+    await session.reload();
+    return { summary: OVERFLOW_COMPACTION_SUMMARY };
+  }
+}
+
 function modelRef(model: Model<Api>): ModelRef {
   return { provider: model.provider, id: model.id };
+}
+
+function piImages(input: RuntimeInput) {
+  return input.images.map((image) => ({
+    type: "image" as const,
+    data: Buffer.from(image.data).toString("base64"),
+    mimeType: image.mimeType,
+  }));
+}
+
+function requireForkedSession(source: SessionManager, entryId: string): string {
+  const sessionFile = source.createBranchedSession(entryId);
+  if (!sessionFile) throw new Error("Pi did not persist the forked session");
+  return sessionFile;
 }
 
 async function callPi(

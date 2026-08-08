@@ -67,11 +67,13 @@ export function createVisibleBrowserTool(
     name: "visible_browser",
     label: "Visible Browser",
     description:
-      "Control and inspect Agena Desktop's visible tabbed browser. open creates a new tab and returns tabId; list reports open tabs; pass tabId to later actions.",
+      "Control Agena Desktop's user-visible browser for rendered UI verification and authentication handoff. Do not use it for ordinary web search or background research; use agent_browser_web_search or agent_browser instead. open creates a new tab and returns tabId; list reports open tabs; pass tabId to later actions.",
     promptSnippet:
-      "Use Agena Desktop's visible browser: open URLs in new tabs, list tabs, then read, navigate, screenshot, click, type, evaluate, or close by tabId.",
+      "Use Agena Desktop's visible browser only for rendered UI verification, user-visible browsing, or authentication handoff.",
     promptGuidelines: [
       "Use visible_browser after making UI changes to verify the rendered result in the visible desktop browser.",
+      "Do not use visible_browser for ordinary web search or background research; prefer agent_browser_web_search, then agent_browser.",
+      "Use visible_browser when the user needs to watch the interaction or complete an authentication handoff.",
       "Prefer read or screenshot after open/click/type so you verify the actual rendered state.",
       "Retain the tabId returned by open and pass it to every later operation on that page.",
       "Use list when you need to recover or inspect the currently open tab identifiers.",

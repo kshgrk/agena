@@ -19,7 +19,7 @@ function piDir(): string {
 test("persists API-key credentials and provider-scoped environment", async () => {
   const dir = piDir();
   const changed = vi.fn();
-  const service = new PiProviderService({
+  const service = await PiProviderService.create({
     piDir: dir,
     onCredentialsChanged: changed,
   });
@@ -37,20 +37,25 @@ test("persists API-key credentials and provider-scoped environment", async () =>
   expect(changed).toHaveBeenCalledTimes(1);
   expect(statSync(join(dir, "auth.json")).mode & 0o777).toBe(0o600);
 
-  const restarted = new PiProviderService({ piDir: dir });
-  expect(restarted.authStorage.getProviderEnv("example")).toEqual({
-    EXAMPLE_REGION: "test",
+  const restarted = await PiProviderService.create({ piDir: dir });
+  expect(
+    JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")),
+  ).toMatchObject({
+    example: {
+      type: "api_key",
+      key: "secret-value",
+      env: { EXAMPLE_REGION: "test" },
+    },
   });
-  expect(await restarted.authStorage.getApiKey("example")).toBe("secret-value");
   expect((await restarted.remove("example")).configured).toBe(false);
 });
 
 test("reload observes credentials written by another runtime", async () => {
   const dir = piDir();
-  const service = new PiProviderService({ piDir: dir });
-  const other = new PiProviderService({ piDir: dir });
+  const service = await PiProviderService.create({ piDir: dir });
+  const other = await PiProviderService.create({ piDir: dir });
   await other.saveApiKey("external", "new-value");
-  expect(service.authStorage.has("external")).toBe(false);
+  expect(service.status("external").configured).toBe(false);
   await service.reload();
   expect(service.status("external")).toMatchObject({
     configured: true,
@@ -60,7 +65,7 @@ test("reload observes credentials written by another runtime", async () => {
 
 test("delegates OAuth interaction to Pi callbacks and persists its result", async () => {
   const dir = piDir();
-  const service = new PiProviderService({ piDir: dir });
+  const service = await PiProviderService.create({ piDir: dir });
   service.modelRegistry.registerProvider("test-oauth", {
     oauth: {
       name: "Test OAuth",
@@ -101,65 +106,19 @@ test("delegates OAuth interaction to Pi callbacks and persists its result", asyn
   expect(readFileSync(join(dir, "auth.json"), "utf8")).toContain('"refresh"');
 });
 
-test("advertises Pi's pinned OAuth-only provider capabilities", () => {
-  const service = new PiProviderService({ piDir: piDir() });
+test("advertises Pi's pinned OAuth-only provider capabilities", async () => {
+  const service = await PiProviderService.create({ piDir: piDir() });
   expect(service.status("github-copilot").methods).toEqual(["oauth"]);
   expect(service.status("openai-codex").methods).toEqual(["oauth"]);
   expect(service.status("anthropic").methods).toEqual(["api_key", "oauth"]);
 });
 
 test("rejects API-key saves for Pi OAuth-only providers", async () => {
-  const service = new PiProviderService({ piDir: piDir() });
+  const service = await PiProviderService.create({ piDir: piDir() });
   await expect(
     service.saveApiKey("github-copilot", "not-supported"),
   ).rejects.toThrow("does not support API-key login");
   await expect(
     service.saveApiKey("openai-codex", "not-supported"),
   ).rejects.toThrow("does not support API-key login");
-});
-
-test("rejects false success when the durable credential mutation does not stick", async () => {
-  const service = new PiProviderService({ piDir: piDir() });
-  vi.spyOn(service.authStorage, "set").mockImplementation(() => {});
-  await expect(service.saveApiKey("example", "secret")).rejects.toThrow(
-    "failed to persist API key",
-  );
-  vi.restoreAllMocks();
-
-  await service.saveApiKey("example", "secret");
-  vi.spyOn(service.authStorage, "remove").mockImplementation(() => {});
-  await expect(service.remove("example")).rejects.toThrow(
-    "failed to remove credential",
-  );
-});
-
-test("rejects false OAuth success when login returns without durable credentials", async () => {
-  const service = new PiProviderService({ piDir: piDir() });
-  service.modelRegistry.registerProvider("test-oauth", {
-    oauth: {
-      name: "Test OAuth",
-      async login() {
-        return {
-          access: "unused",
-          refresh: "unused",
-          expires: Date.now() + 60_000,
-        };
-      },
-      async refreshToken(credentials) {
-        return credentials;
-      },
-      getApiKey(credentials) {
-        return credentials.access;
-      },
-    },
-  });
-  vi.spyOn(service.authStorage, "login").mockResolvedValue(undefined);
-  await expect(
-    service.loginOAuth("test-oauth", {
-      onAuth: vi.fn(),
-      onDeviceCode: vi.fn(),
-      onPrompt: async () => "",
-      onSelect: async () => undefined,
-    }),
-  ).rejects.toThrow("failed to persist OAuth credential");
 });

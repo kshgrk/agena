@@ -10,6 +10,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, MessageSquare } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  activeBranchBlocks,
   needsRecentHistory,
   useSessions,
   useTranscripts,
@@ -89,9 +90,9 @@ export function Transcript({
   const [flashSeq, setFlashSeq] = useState<number | null>(null);
 
   const isOutputOnly = isCodexImportedSubagent(session);
-  const blocks = visibleCodexSubagentBlocks(
-    session,
-    transcript?.blocks ?? NO_BLOCKS,
+  const blocks = activeBranchBlocks(
+    transcript?.rawEvents ?? [],
+    visibleCodexSubagentBlocks(session, transcript?.blocks ?? NO_BLOCKS),
   );
   const hasTail = !isOutputOnly && transcript?.inFlight != null;
   const count = blocks.length + (hasTail ? 1 : 0);
@@ -293,11 +294,9 @@ export function Transcript({
       return block?.kind === "user" ? [block.seq] : [];
     }),
   );
-  const userVersion = transcript.rawEvents.reduce(
-    (latest, event) =>
-      event.type === "message.user.created"
-        ? Math.max(latest, event.seq)
-        : latest,
+  const userVersion = blocks.reduce(
+    (latest, block) =>
+      block.kind === "user" ? Math.max(latest, block.seq) : latest,
     0,
   );
 

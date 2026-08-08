@@ -2,11 +2,18 @@
 // preference, and the daemon diagnostics report (versions, protocol,
 // workspace, .agena discovery with per-descriptor errors).
 import type { DiagnosticsResponse, DiscoveryEntry } from "@agena/protocol";
-import { useCallback } from "react";
+import QRCode from "qrcode";
+import { useCallback, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
 import { formatDuration } from "../../lib/format.ts";
 import { useConnection, useUi } from "../../store/index.ts";
-import { Badge, type BadgeTone, Segmented, StatusDot } from "../../ui/index.ts";
+import {
+  Badge,
+  type BadgeTone,
+  Button,
+  Segmented,
+  StatusDot,
+} from "../../ui/index.ts";
 import {
   Field,
   GroupLabel,
@@ -32,7 +39,15 @@ const STATE_DOT = {
   closed: "bg-danger",
 } as const;
 
-function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function InfoRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-3 px-3 py-2">
       <span className="shrink-0 text-xs text-fg-muted">{label}</span>
@@ -90,6 +105,81 @@ function DiscoveryReport({ entries }: { entries: readonly DiscoveryEntry[] }) {
   );
 }
 
+function ConductorPairing({ daemonUrl }: { daemonUrl: string }) {
+  const [qr, setQr] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const create = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const pairing = await getBridge().createPairing(daemonUrl);
+      setQr(
+        await QRCode.toDataURL(pairing.pairingUri, {
+          width: 256,
+          margin: 2,
+          errorCorrectionLevel: "M",
+        }),
+      );
+      setExpiresAt(pairing.expiresAt);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      <GroupLabel>Conductor phone app</GroupLabel>
+      <ListCard>
+        <div className="p-3">
+          <p className="text-sm text-fg-secondary">
+            Create a one-use QR, then scan it with your phone camera. It expires
+            after five minutes.
+          </p>
+          {qr ? (
+            <div className="mt-3 flex items-center gap-4">
+              <img
+                src={qr}
+                alt="Agena Conductor pairing QR"
+                className="size-40 rounded-lg bg-white p-1"
+              />
+              <div className="text-xs text-fg-muted">
+                <p>Open this QR on iOS or Android.</p>
+                {expiresAt ? (
+                  <p className="mt-1">
+                    Expires {new Date(expiresAt).toLocaleTimeString()}
+                  </p>
+                ) : null}
+                <Button
+                  className="mt-3"
+                  size="sm"
+                  onClick={() => void create()}
+                >
+                  Replace QR
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              className="mt-3"
+              size="sm"
+              disabled={loading}
+              onClick={() => void create()}
+            >
+              {loading ? "Creating…" : "Pair a phone"}
+            </Button>
+          )}
+          {error ? <p className="mt-2 text-xs text-danger">{error}</p> : null}
+        </div>
+      </ListCard>
+    </div>
+  );
+}
+
 export function ConnectionSection() {
   const state = useConnection((s) => s.state);
   const detail = useConnection((s) => s.detail);
@@ -98,7 +188,8 @@ export function ConnectionSection() {
   const setTheme = useUi((s) => s.setTheme);
 
   const loadDiagnostics = useCallback(
-    (_refresh: boolean): Promise<DiagnosticsResponse> => getBridge().diagnostics(),
+    (_refresh: boolean): Promise<DiagnosticsResponse> =>
+      getBridge().diagnostics(),
     [],
   );
   const diag = useLoad(loadDiagnostics);
@@ -109,7 +200,10 @@ export function ConnectionSection() {
         title="Connection"
         description="Where this app is connected and what the daemon reports."
         actions={
-          <RefreshButton disabled={diag.loading} onClick={() => void diag.reload()}>
+          <RefreshButton
+            disabled={diag.loading}
+            onClick={() => void diag.reload()}
+          >
             Refresh
           </RefreshButton>
         }
@@ -119,7 +213,10 @@ export function ConnectionSection() {
           <GroupLabel>Active profile</GroupLabel>
           <ListCard>
             <div className="flex items-center gap-2 px-3 py-2">
-              <StatusDot className={STATE_DOT[state]} label={STATE_LABEL[state]} />
+              <StatusDot
+                className={STATE_DOT[state]}
+                label={STATE_LABEL[state]}
+              />
               <span className="text-sm font-medium text-fg">
                 {STATE_LABEL[state]}
               </span>
@@ -159,10 +256,15 @@ export function ConnectionSection() {
           />
         </Field>
 
+        {info ? <ConductorPairing daemonUrl={info.url} /> : null}
+
         <div>
           <GroupLabel>Daemon diagnostics</GroupLabel>
           {diag.error ? (
-            <InlineError error={diag.error} onRetry={() => void diag.reload()} />
+            <InlineError
+              error={diag.error}
+              onRetry={() => void diag.reload()}
+            />
           ) : diag.data === null ? (
             <ListCard>
               <LoadingRow />
@@ -170,7 +272,11 @@ export function ConnectionSection() {
           ) : (
             <div className="space-y-3">
               <ListCard>
-                <InfoRow label="Daemon version" value={diag.data.daemon.version} mono />
+                <InfoRow
+                  label="Daemon version"
+                  value={diag.data.daemon.version}
+                  mono
+                />
                 <InfoRow
                   label="Uptime"
                   value={formatDuration(diag.data.daemon.uptimeMs)}
@@ -179,7 +285,11 @@ export function ConnectionSection() {
                   label="Protocol version"
                   value={`v${diag.data.protocol.version}`}
                 />
-                <InfoRow label="Workspace" value={diag.data.workspace.path} mono />
+                <InfoRow
+                  label="Workspace"
+                  value={diag.data.workspace.path}
+                  mono
+                />
               </ListCard>
               <div>
                 <GroupLabel>.agena discovery</GroupLabel>

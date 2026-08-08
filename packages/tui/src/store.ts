@@ -130,6 +130,7 @@ export function applyFrame(s: TranscriptState, f: AgenaFrame): TranscriptState {
       parsed.data.payload.reset === true,
     );
   }
+  if (parsed.data.type !== "message.assistant.text.delta") return s;
   if (!s.inFlight) return s;
   const p = parsed.data.payload;
   if (s.inFlight.messageId !== p.messageId) return s;

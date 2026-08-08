@@ -5,6 +5,7 @@
 // IMPROVE-ON fixes (refresh button, virtualized tree).
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  ChevronLeft,
   ChevronRight,
   Copy,
   File,
@@ -64,6 +65,7 @@ function TreeRows({
   selectedPath,
   onToggleDir,
   onOpenFile,
+  mobile = false,
 }: {
   root: string;
   dirs: Readonly<Record<string, DirState>>;
@@ -71,6 +73,7 @@ function TreeRows({
   selectedPath: string | null;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
+  mobile?: boolean;
 }) {
   const rows = useMemo(
     () => flattenTree(root, dirs, expanded),
@@ -80,7 +83,7 @@ function TreeRows({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 28,
+    estimateSize: () => (mobile ? 44 : 28),
     overscan: 12,
     getItemKey: (index) => {
       const row = rows[index]!;
@@ -111,9 +114,7 @@ function TreeRows({
                 style={{ ...rowPos, ...indent }}
                 className={cx(
                   "flex items-center gap-2 text-xs",
-                  row.note === "error"
-                    ? "text-danger"
-                    : "italic text-fg-muted",
+                  row.note === "error" ? "text-danger" : "italic text-fg-muted",
                 )}
               >
                 {row.note === "loading" ? (
@@ -139,7 +140,10 @@ function TreeRows({
                 aria-expanded={row.expanded}
                 onClick={() => onToggleDir(row.path)}
                 style={{ ...rowPos, ...indent }}
-                className="flex items-center gap-1 rounded-md pr-2 text-left transition-colors hover:bg-raised/60"
+                className={cx(
+                  "flex items-center gap-1 rounded-md pr-2 text-left transition-colors hover:bg-raised/60",
+                  mobile && "active:bg-raised",
+                )}
               >
                 <ChevronRight
                   className={cx(
@@ -169,6 +173,7 @@ function TreeRows({
               style={{ ...rowPos, ...indent }}
               className={cx(
                 "flex items-center gap-1 rounded-md pr-2 text-left transition-colors",
+                mobile && "active:bg-raised",
                 selected ? "bg-raised" : "hover:bg-raised/60",
               )}
             >
@@ -198,12 +203,17 @@ function TreeRows({
 
 function Breadcrumb({ path }: { path: string }) {
   const segments = breadcrumbs(path);
+  let prefix = "";
+  const keyedSegments = segments.map((segment) => {
+    prefix = prefix ? `${prefix}/${segment}` : segment;
+    return { key: prefix, segment };
+  });
   return (
     <span className="flex min-w-0 items-center font-mono text-sm" title={path}>
-      {segments.map((segment, i) => {
-        const last = i === segments.length - 1;
+      {keyedSegments.map(({ key, segment }, i) => {
+        const last = i === keyedSegments.length - 1;
         return (
-          <span key={`${i}-${segment}`} className="flex min-w-0 items-center">
+          <span key={key} className="flex min-w-0 items-center">
             {i > 0 ? <span className="px-1 text-fg-faint">/</span> : null}
             <span
               className={cx("truncate", last ? "text-fg" : "text-fg-muted")}
@@ -271,7 +281,7 @@ function Viewer({ viewer }: { viewer: ViewerState }) {
 
 // ---- the pane ------------------------------------------------------------------------
 
-export function FilesPane() {
+export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   const activeSession = useSessions((s) =>
     s.activeSessionId ? s.byId[s.activeSessionId] : undefined,
   );
@@ -375,42 +385,71 @@ export function FilesPane() {
 
   const openPath = viewer.kind === "idle" ? null : viewer.path;
 
+  const headerTitle = openPath ? (
+    <Breadcrumb path={openPath} />
+  ) : root === "." ? (
+    "Files"
+  ) : (
+    root
+  );
+
+  const headerActions = (
+    <>
+      {viewer.kind === "text" ? (
+        <>
+          <span className="text-2xs tabular-nums text-fg-muted">
+            {formatBytes(viewer.size)}
+          </span>
+          <IconButton
+            label="Copy file contents"
+            size="sm"
+            className={mobile ? "size-11" : undefined}
+            onClick={copyContents}
+          >
+            <Copy />
+          </IconButton>
+        </>
+      ) : null}
+      <IconButton
+        label="Refresh tree"
+        size="sm"
+        className={mobile ? "size-11" : undefined}
+        onClick={refresh}
+      >
+        <RefreshCw />
+      </IconButton>
+    </>
+  );
+
   return (
     <Panel>
-      <PanelHeader
-        title={
-          openPath ? (
-            <Breadcrumb path={openPath} />
-          ) : root === "." ? (
-            "Files"
-          ) : (
-            root
-          )
-        }
-        actions={
-          <>
-            {viewer.kind === "text" ? (
-              <>
-                <span className="text-2xs tabular-nums text-fg-muted">
-                  {formatBytes(viewer.size)}
-                </span>
-                <IconButton
-                  label="Copy file contents"
-                  size="sm"
-                  onClick={copyContents}
-                >
-                  <Copy />
-                </IconButton>
-              </>
-            ) : null}
-            <IconButton label="Refresh tree" size="sm" onClick={refresh}>
-              <RefreshCw />
-            </IconButton>
-          </>
-        }
-      />
+      {mobile ? (
+        <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle px-1">
+          {openPath ? (
+            <button
+              type="button"
+              aria-label="Back to files"
+              onClick={() => setViewer({ kind: "idle" })}
+              className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-secondary active:bg-raised"
+            >
+              <ChevronLeft className="size-5" />
+            </button>
+          ) : null}
+          <div className="min-w-0 flex-1 truncate px-2 text-sm font-medium text-fg-secondary">
+            {headerTitle}
+          </div>
+          <div className="flex shrink-0 items-center">{headerActions}</div>
+        </div>
+      ) : (
+        <PanelHeader title={headerTitle} actions={headerActions} />
+      )}
       <PanelBody scroll={false} className="flex">
-        <div className="w-60 shrink-0 border-r border-border-subtle">
+        <div
+          className={cx(
+            "border-r border-border-subtle",
+            mobile ? (openPath ? "hidden" : "w-full") : "w-60 shrink-0",
+          )}
+        >
           <TreeRows
             root={root}
             dirs={dirs}
@@ -418,9 +457,15 @@ export function FilesPane() {
             selectedPath={openPath}
             onToggleDir={toggleDir}
             onOpenFile={openFile}
+            mobile={mobile}
           />
         </div>
-        <div className="min-w-0 flex-1 overflow-auto bg-inset">
+        <div
+          className={cx(
+            "min-w-0 flex-1 overflow-auto bg-inset",
+            mobile && !openPath && "hidden",
+          )}
+        >
           <Viewer viewer={viewer} />
         </div>
       </PanelBody>

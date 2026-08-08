@@ -13,6 +13,7 @@ import type {
   ContentBlock,
   ErrorCode,
   EventSource,
+  FastModeState,
   InFlightSnapshot,
   ModelRef,
   ThinkingLevel,
@@ -20,6 +21,7 @@ import type {
 import { ulid } from "ulid";
 import type {
   ApprovalQueryStore,
+  CreateDerivedSessionInput,
   CreateSessionInput,
   EventStore,
   NewEvent,
@@ -58,9 +60,17 @@ interface SessionState {
   lastSeq: number; // highest committed seq — stamped on frames as afterSeq
   busy: boolean; // single in-flight turn per session (§5.4)
   run: { runId: string; triggerMessageId: string } | null;
+  compaction: { id: string; replacesUpToSeq: number } | null;
+  retry: {
+    attempt: number;
+    maxAttempts: number;
+    nextAttemptAt: string;
+  } | null;
+  status: { state: string; detail?: string };
   runtime: RuntimeSession | null;
   model: ModelRef | null;
   thinkingLevel: ThinkingLevel;
+  pendingEditFromMessageId: string | null;
   commandQueue: Promise<void>;
 }
 
@@ -97,6 +107,92 @@ export class SessionOrchestrator {
     return this.#store.createSession(input); // store appends session.created (§7.4)
   }
 
+  async forkSession(input: CreateDerivedSessionInput): Promise<SessionRecord> {
+    const parent = await this.#state(input.parentSessionId);
+    return this.#serialize(parent, async () => {
+      if (parent.busy) {
+        throw new OrchestratorError(
+          "SESSION_BUSY",
+          "cannot fork a running session",
+        );
+      }
+      if (!this.#adapter.createForkSession) {
+        throw new OrchestratorError(
+          "INVALID_PAYLOAD",
+          "runtime does not support session forks",
+        );
+      }
+      if (input.mode === "fork" && !input.sourceMessageId) {
+        throw new OrchestratorError(
+          "INVALID_PAYLOAD",
+          "sourceMessageId is required for fork",
+        );
+      }
+      const runtimeEntryId = input.sourceMessageId
+        ? await this.#store.getRuntimeMessageRef(
+            input.parentSessionId,
+            input.sourceMessageId,
+          )
+        : undefined;
+      if (input.mode === "fork" && !runtimeEntryId) {
+        throw new OrchestratorError(
+          "INVALID_PAYLOAD",
+          "the selected message is not available in the runtime session",
+        );
+      }
+      const parentRuntime = await this.#runtime(parent);
+      const child = await this.#store.createDerivedSession(input);
+      const runtime = await this.#adapter.createForkSession({
+        sessionId: child.sessionId,
+        workspaceDir: this.#workspaceDir,
+        cwd: resolve(this.#workspaceDir, child.cwd),
+        sourceRuntimeSessionRef: parentRuntime.runtimeSessionRef,
+        ...(runtimeEntryId ? { runtimeEntryId } : {}),
+        position: input.mode === "fork" ? "before" : "at",
+        ...(this.#visibleBrowser
+          ? { visibleBrowser: this.#visibleBrowser }
+          : {}),
+      });
+      const runtimeRefs = runtimeSessionRefs(this.#store);
+      return runtimeRefs
+        ? runtimeRefs.updateRuntimeSessionRef(
+            child.sessionId,
+            runtime.runtimeSessionRef,
+          )
+        : child;
+    });
+  }
+
+  async navigateToMessage(
+    sessionId: string,
+    sourceMessageId: string,
+  ): Promise<{ editorText: string }> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      if (s.busy) {
+        throw new OrchestratorError(
+          "SESSION_BUSY",
+          "cannot edit a message while the session is running",
+        );
+      }
+      const runtimeEntryId = await this.#store.getRuntimeMessageRef(
+        sessionId,
+        sourceMessageId,
+      );
+      if (!runtimeEntryId) {
+        throw new OrchestratorError(
+          "INVALID_PAYLOAD",
+          "the selected message is not available in the runtime session",
+        );
+      }
+      const { editorText } = await (await this.#runtime(s)).navigateTree(
+        runtimeEntryId,
+      );
+      s.pendingEditFromMessageId = sourceMessageId;
+      return { editorText: editorText ?? "" };
+    });
+  }
+
   async inFlightSnapshot(
     sessionId: string,
     branchId: string,
@@ -122,9 +218,9 @@ export class SessionOrchestrator {
       assistant,
       toolCalls: [],
       pendingApprovals: pendingApprovals.map((a) => a.payload),
-      retry: null,
+      retry: s.retry,
       queue: { steerCount: 0, followUpCount: 0 },
-      status: { state: s.busy ? "generating" : "idle" },
+      status: s.status,
     };
   }
 
@@ -260,6 +356,30 @@ export class SessionOrchestrator {
     });
   }
 
+  async handleSetFastMode(
+    sessionId: string,
+    enabled: boolean,
+  ): Promise<FastModeState> {
+    const s = await this.#state(sessionId);
+    return this.#serialize(s, async () => {
+      let state: FastModeState;
+      try {
+        state = await (await this.#runtime(s)).setFastMode(enabled);
+      } catch (err) {
+        throw new OrchestratorError("RUNTIME_UNAVAILABLE", message(err));
+      }
+      await this.#append(s, [
+        {
+          type: "fast.mode.changed",
+          v: 1,
+          source: { kind: "user" },
+          payload: { enabled: state.enabled },
+        },
+      ]);
+      return state;
+    });
+  }
+
   async handleCompact(sessionId: string): Promise<{ compactionSeq: number }> {
     const s = await this.#state(sessionId);
     return this.#serialize(s, async () => {
@@ -268,6 +388,9 @@ export class SessionOrchestrator {
       }
       const replacesUpToSeq = s.lastSeq;
       const compactionId = ulid();
+      s.busy = true;
+      this.#frame(s, "compaction.started", { trigger: "user" });
+      this.#status(s, "compacting");
       let result: {
         summary: string;
         tokensBefore?: number;
@@ -276,6 +399,8 @@ export class SessionOrchestrator {
       try {
         result = await (await this.#runtime(s)).compact();
       } catch (err) {
+        s.busy = false;
+        this.#status(s, "idle");
         throw new OrchestratorError("RUNTIME_UNAVAILABLE", message(err));
       }
       const { lastSeq } = await this.#append(s, [
@@ -297,6 +422,8 @@ export class SessionOrchestrator {
           },
         },
       ]);
+      s.busy = false;
+      this.#status(s, "idle");
       return { compactionSeq: lastSeq };
     });
   }
@@ -353,9 +480,13 @@ export class SessionOrchestrator {
       lastSeq: record.lastSeq,
       busy: false,
       run: null,
+      compaction: null,
+      retry: null,
+      status: { state: "idle" },
       runtime: null,
       model: null,
       thinkingLevel: "off",
+      pendingEditFromMessageId: null,
       commandQueue: Promise.resolve(),
     };
     this.#sessions.set(sessionId, state);
@@ -372,10 +503,10 @@ export class SessionOrchestrator {
         ? { runtimeSessionRef: s.record.runtimeSessionRef }
         : {}),
       ...(this.#visibleBrowser ? { visibleBrowser: this.#visibleBrowser } : {}),
-      ...(!s.record.parentSessionId && this.#subagents
+      ...(s.record.sessionKind !== "subagent" && this.#subagents
         ? { subagents: this.#subagents }
         : {}),
-      ...(s.record.parentSessionId
+      ...(s.record.sessionKind === "subagent"
         ? { toolNames: ["read", "grep", "find", "ls"] }
         : {}),
     });
@@ -405,6 +536,13 @@ export class SessionOrchestrator {
           inner,
         );
       });
+      if (s.runtime === runtime) s.runtime = null;
+      await runtime.dispose().catch((inner) => {
+        console.error(
+          `[agena-core] failed to dispose broken runtime for session ${s.record.sessionId}:`,
+          inner,
+        );
+      });
       console.error(
         `[agena-core] runtime pump failed for session ${s.record.sessionId}:`,
         err,
@@ -414,8 +552,15 @@ export class SessionOrchestrator {
 
   async #apply(s: SessionState, ev: RuntimeEvent): Promise<void> {
     switch (ev.type) {
+      case "message-runtime-ref":
+        await this.#appendRuntime(s, "message.runtime.ref", {
+          messageId: ev.messageId,
+          runtimeEntryId: ev.runtimeEntryId,
+        });
+        return;
       case "run-started":
         s.run = { runId: ev.runId, triggerMessageId: ev.triggerMessageId };
+        s.status = { state: "generating" };
         await this.#appendRuntime(s, "run.started", {
           runId: ev.runId,
           trigger: ev.trigger,
@@ -435,17 +580,10 @@ export class SessionOrchestrator {
         return;
       }
       case "assistant-text-delta":
-        this.#publishFrame({
-          type: "message.assistant.text.delta",
-          sessionId: s.record.sessionId,
-          branchId: s.record.rootBranchId,
-          afterSeq: s.lastSeq,
-          payload: {
-            messageId: ev.messageId,
-            blockIndex: ev.blockIndex,
-            delta: ev.delta,
-          },
-          emittedAt: new Date().toISOString(),
+        this.#frame(s, "message.assistant.text.delta", {
+          messageId: ev.messageId,
+          blockIndex: ev.blockIndex,
+          delta: ev.delta,
         });
         return;
       case "assistant-message-completed":
@@ -485,17 +623,10 @@ export class SessionOrchestrator {
         });
         return;
       case "tool-output-delta":
-        this.#publishFrame({
-          type: "tool.call.output.delta",
-          sessionId: s.record.sessionId,
-          branchId: s.record.rootBranchId,
-          afterSeq: s.lastSeq,
-          payload: {
-            toolCallId: ev.toolCallId,
-            delta: ev.delta,
-            ...(ev.reset ? { reset: ev.reset } : {}),
-          },
-          emittedAt: new Date().toISOString(),
+        this.#frame(s, "tool.call.output.delta", {
+          toolCallId: ev.toolCallId,
+          delta: ev.delta,
+          ...(ev.reset ? { reset: ev.reset } : {}),
         });
         return;
       case "tool-call-completed":
@@ -520,6 +651,8 @@ export class SessionOrchestrator {
         });
         s.run = null;
         s.busy = false;
+        s.retry = null;
+        s.status = { state: "idle" };
         return;
       case "run-aborted":
         await this.#appendRuntime(s, "run.aborted", {
@@ -528,6 +661,8 @@ export class SessionOrchestrator {
         });
         s.run = null;
         s.busy = false;
+        s.retry = null;
+        s.status = { state: "idle" };
         return;
       case "run-failed":
         await this.#appendRuntime(s, "run.failed", {
@@ -536,8 +671,78 @@ export class SessionOrchestrator {
           error: ev.error,
         });
         s.run = null;
-        s.busy = false;
+        s.busy = s.compaction !== null;
+        s.retry = null;
+        s.status = { state: s.busy ? "compacting" : "idle" };
         return;
+      case "retry-started":
+        s.busy = true;
+        s.retry = {
+          attempt: ev.attempt,
+          maxAttempts: ev.maxAttempts,
+          nextAttemptAt: new Date(Date.now() + ev.delayMs).toISOString(),
+        };
+        this.#frame(s, "run.retry.started", {
+          runId: ev.runId,
+          attempt: ev.attempt,
+          maxAttempts: ev.maxAttempts,
+          delayMs: ev.delayMs,
+          errorSummary: ev.errorSummary,
+        });
+        this.#status(
+          s,
+          "retrying",
+          `attempt ${ev.attempt}/${ev.maxAttempts} in ${Math.ceil(ev.delayMs / 1000)}s`,
+        );
+        return;
+      case "retry-ended":
+        s.retry = null;
+        this.#frame(s, "run.retry.ended", {
+          runId: ev.runId,
+          outcome: ev.outcome,
+        });
+        this.#status(
+          s,
+          ev.outcome === "recovered" ? "generating" : "retrying",
+          ev.outcome === "exhausted" ? "retries exhausted" : undefined,
+        );
+        return;
+      case "compaction-started":
+        s.busy = true;
+        s.retry = null;
+        s.compaction = { id: ulid(), replacesUpToSeq: s.lastSeq };
+        this.#frame(s, "compaction.started", { trigger: ev.trigger });
+        this.#status(s, "compacting", "reducing task context");
+        return;
+      case "compaction-completed": {
+        const compaction = s.compaction ?? {
+          id: ulid(),
+          replacesUpToSeq: s.lastSeq,
+        };
+        await this.#appendRuntime(s, "compaction.created", {
+          compactionId: compaction.id,
+          summary: [{ type: "text", text: ev.summary }],
+          replacesUpToSeq: compaction.replacesUpToSeq,
+          tokensBefore: ev.tokensBefore,
+          tokensAfter: ev.tokensAfter,
+          trigger: ev.trigger,
+        });
+        s.compaction = null;
+        s.busy = s.run !== null;
+        this.#status(s, s.busy ? "generating" : "idle");
+        return;
+      }
+      case "compaction-failed": {
+        const compactionId = s.compaction?.id ?? ulid();
+        await this.#appendRuntime(s, "compaction.failed", {
+          compactionId,
+          error: ev.error,
+        });
+        s.compaction = null;
+        s.busy = s.run !== null;
+        this.#status(s, s.busy ? "generating" : "idle");
+        return;
+      }
       case "model-changed":
         await this.#appendRuntime(s, "model.changed", {
           ...(ev.from ? { from: ev.from } : {}),
@@ -564,6 +769,26 @@ export class SessionOrchestrator {
     }
   }
 
+  #frame(s: SessionState, type: string, payload: unknown): void {
+    this.#publishFrame({
+      type,
+      sessionId: s.record.sessionId,
+      branchId: s.record.rootBranchId,
+      afterSeq: s.lastSeq,
+      payload,
+      emittedAt: new Date().toISOString(),
+    });
+  }
+
+  #status(s: SessionState, state: string, detail?: string): void {
+    const status = {
+      state,
+      ...(detail ? { detail } : {}),
+    };
+    s.status = status;
+    this.#frame(s, "session.status.updated", status);
+  }
+
   async #submitText(
     s: SessionState,
     trigger: "prompt" | "steer" | "followUp",
@@ -576,9 +801,31 @@ export class SessionOrchestrator {
     if (trigger !== "prompt" && !s.busy) {
       throw new OrchestratorError("TURN_NOT_ACTIVE", "no turn is active");
     }
+    const images = await Promise.all(
+      content
+        .filter((block) => block.type === "image")
+        .map(async (block) => {
+          const stored = await this.#store.readBlob(block.ref.blob);
+          if (!stored) {
+            throw new OrchestratorError(
+              "INVALID_PAYLOAD",
+              `image blob is unavailable: ${block.ref.blob}`,
+            );
+          }
+          return {
+            data: stored.bytes,
+            mimeType:
+              stored.mimeType ??
+              block.ref.mimeType ??
+              "application/octet-stream",
+          };
+        }),
+    );
     if (trigger === "prompt") s.busy = true;
     try {
       const messageId = ulid();
+      const editedFromMessageId =
+        trigger === "prompt" ? s.pendingEditFromMessageId : null;
       const source: EventSource = clientId
         ? { kind: "user", clientId }
         : { kind: "user" };
@@ -591,6 +838,7 @@ export class SessionOrchestrator {
             messageId,
             content,
             ...(trigger === "prompt" ? {} : { queued: trigger }),
+            ...(editedFromMessageId ? { editedFromMessageId } : {}),
           },
         },
       ];
@@ -603,6 +851,7 @@ export class SessionOrchestrator {
         });
       }
       const appended = await this.#append(s, events);
+      if (trigger === "prompt") s.pendingEditFromMessageId = null;
       const messageSeq =
         appended.events.find(
           (event) =>
@@ -611,7 +860,7 @@ export class SessionOrchestrator {
         )?.seq ?? appended.lastSeq;
       try {
         const runtime = await this.#runtime(s);
-        const input = { messageId, text: textContent(content) };
+        const input = { messageId, text: textContent(content), images };
         if (trigger === "prompt") await runtime.prompt(input);
         else if (trigger === "steer") await runtime.steer(input);
         else await runtime.followUp(input);

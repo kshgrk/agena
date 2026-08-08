@@ -7,8 +7,11 @@ import type {
   ApprovalResponse,
   ContentBlock,
   EventSource,
+  FastModeState,
   ModelRef,
   SessionSummary,
+  SessionUsage,
+  SubscriptionUsage,
   ThinkingLevel,
   UsageTotals,
 } from "@agena/protocol";
@@ -31,6 +34,7 @@ export type UserBlock = BlockBase & {
   messageId: string;
   content: ContentBlock[];
   queued?: "steer" | "followUp";
+  editedFromMessageId?: string;
 };
 
 export type AssistantBlock = BlockBase & {
@@ -198,6 +202,9 @@ export type ConnectionSlice = {
         thinkingLevel: ThinkingLevel;
         availableModels: ModelRef[];
         availableThinkingLevels: ThinkingLevel[];
+        fastMode?: FastModeState;
+        sessionUsage?: SessionUsage;
+        subscriptionUsage?: SubscriptionUsage;
       }
     >
   >;

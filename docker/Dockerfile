@@ -1,6 +1,7 @@
 # docker/Dockerfile — Agena M1 daemon. No build step: runs TypeScript directly
-# under Node 22 type stripping. Lockfile-first layers keep deps cached (§10.2).
-FROM node:22-bookworm-slim
+# under Node's native type stripping. agent-browser 0.33.2 requires Node 24.
+# Lockfile-first layers keep deps cached (§10.2).
+FROM node:24-bookworm-slim
 
 ENV NODE_ENV=production \
     AGENA_STATE_DIR=/var/lib/agena \
@@ -47,7 +48,8 @@ RUN pnpm install --frozen-lockfile --prod --filter @agena/daemon...
 RUN apt-get update \
     && apt-get install -y --no-install-recommends chromium \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g agent-browser pi-agent-browser-native \
+    && npm install -g --allow-scripts=agent-browser agent-browser@0.33.2 pi-agent-browser-native@0.3.0 \
+    && agent-browser --version \
     && npm cache clean --force
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 

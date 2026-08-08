@@ -44,6 +44,13 @@ export const sessionCreatedSchema = z
     cwd: z.string().min(1),
     hostCwdHint: z.string().min(1).optional(),
     rootBranchId: z.string().min(1),
+    derivedFrom: z
+      .object({
+        parentSessionId: z.string().min(1),
+        sourceMessageId: z.string().min(1).optional(),
+        mode: z.enum(["fork", "clone"]),
+      })
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.scope !== "project") return;
@@ -68,8 +75,15 @@ export const messageUserCreatedSchema = z.object({
   messageId: z.string().min(1),
   content: z.array(contentBlockSchema),
   queued: z.enum(["steer", "followUp"]).optional(), // absent for a plain prompt
+  editedFromMessageId: z.string().min(1).optional(),
 });
 export type MessageUserCreated = z.infer<typeof messageUserCreatedSchema>;
+
+export const messageRuntimeRefSchema = z.object({
+  messageId: z.string().min(1),
+  runtimeEntryId: z.string().min(1),
+});
+export type MessageRuntimeRef = z.infer<typeof messageRuntimeRefSchema>;
 
 export const messageAssistantStartedSchema = z.object({
   messageId: z.string().min(1),
@@ -301,6 +315,11 @@ export const thinkingLevelChangedSchema = z.object({
 });
 export type ThinkingLevelChanged = z.infer<typeof thinkingLevelChangedSchema>;
 
+export const fastModeChangedSchema = z.object({
+  enabled: z.boolean(),
+});
+export type FastModeChanged = z.infer<typeof fastModeChangedSchema>;
+
 export const compactionCreatedSchema = z.object({
   compactionId: z.string().min(1),
   summary: z.array(contentBlockSchema),
@@ -411,6 +430,7 @@ export const durableEventSchemas = {
   "session.created": sessionCreatedSchema,
   "session.title.changed": sessionTitleChangedSchema,
   "message.user.created": messageUserCreatedSchema,
+  "message.runtime.ref": messageRuntimeRefSchema,
   "message.runtime.created": messageRuntimeCreatedSchema,
   "message.assistant.started": messageAssistantStartedSchema,
   "message.assistant.completed": messageAssistantCompletedSchema,
@@ -435,6 +455,7 @@ export const durableEventSchemas = {
   "terminal.session.ended": terminalSessionEndedSchema,
   "model.changed": modelChangedSchema,
   "thinking.level.changed": thinkingLevelChangedSchema,
+  "fast.mode.changed": fastModeChangedSchema,
   "compaction.created": compactionCreatedSchema,
   "compaction.failed": compactionFailedSchema,
   "approval.requested": approvalRequestedSchema,
@@ -486,6 +507,12 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("message.user.created"),
     payload: messageUserCreatedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("message.runtime.ref"),
+    payload: messageRuntimeRefSchema,
   }),
   z.object({
     ...eventBase,
@@ -630,6 +657,12 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("thinking.level.changed"),
     payload: thinkingLevelChangedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("fast.mode.changed"),
+    payload: fastModeChangedSchema,
   }),
   z.object({
     ...eventBase,

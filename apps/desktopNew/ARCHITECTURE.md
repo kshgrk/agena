@@ -28,7 +28,7 @@ Three host modes, selected in `src/renderer/lib/bridge.ts`:
   output). See `docs/contracts/bridge.md`.
 - All colors/typography/spacing reference tokens from `src/renderer/styles/theme.css`. No raw hex
   values in components.
-- No new npm dependencies. The dependency set in `package.json` is final (if
+- No new npm dependencies except `qrcode`, added for the approved Conductor pairing QR. The dependency set in `package.json` is otherwise final (if
   `@git-diff-view/react@0.0.37` fails to resolve, the integration agent pins the nearest available
   version — nobody else touches package.json).
 - Perf rules: transcript is virtualized (`@tanstack/react-virtual`); zustand reads use selectors

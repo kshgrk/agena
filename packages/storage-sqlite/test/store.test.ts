@@ -30,6 +30,26 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+test("stores image blobs by content hash and reads them after reopen", async () => {
+  const path = dbPath();
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const first = new SqliteEventStore(path);
+  const ref = await first.putBlob(bytes, "image/png");
+  expect(ref).toMatchObject({
+    blob: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+    sizeBytes: bytes.byteLength,
+    mimeType: "image/png",
+  });
+  first.close();
+
+  const reopened = new SqliteEventStore(path);
+  await expect(reopened.readBlob(ref.blob)).resolves.toEqual({
+    bytes,
+    mimeType: "image/png",
+  });
+  reopened.close();
+});
+
 function dbPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "agena-sqlite-"));
   dirs.push(dir);
@@ -244,6 +264,64 @@ test("preserves imported harness origin on child sessions", async () => {
   const reopened = new SqliteEventStore(path);
   expect(await reopened.getSession(created.session.sessionId)).toMatchObject({
     origin: "import.codex",
+  });
+  reopened.close();
+});
+
+test("creates a primary derived session with durable fork provenance", async () => {
+  const path = dbPath();
+  const store = new SqliteEventStore(path);
+  const parent = await store.createSession({ workspaceId: "ws-1" });
+  const messageId = ulid();
+  await store.appendEvents({
+    sessionId: parent.sessionId,
+    branchId: parent.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: {
+          messageId,
+          content: [{ type: "text", text: "branch here" }],
+        },
+      },
+      {
+        type: "message.runtime.ref",
+        v: 1,
+        source: pi,
+        payload: { messageId, runtimeEntryId: "pi-entry-1" },
+      },
+    ],
+  });
+  const child = await store.createDerivedSession({
+    parentSessionId: parent.sessionId,
+    sourceMessageId: messageId,
+    mode: "fork",
+  });
+
+  expect(child).toMatchObject({
+    sessionKind: "primary",
+    parentSessionId: parent.sessionId,
+    derivedFrom: {
+      parentSessionId: parent.sessionId,
+      sourceMessageId: messageId,
+      mode: "fork",
+    },
+  });
+  expect(await store.getRuntimeMessageRef(parent.sessionId, messageId)).toBe(
+    "pi-entry-1",
+  );
+  expect(
+    (await store.readEvents(child.sessionId, 0)).events[0]?.payload,
+  ).toMatchObject({
+    derivedFrom: child.derivedFrom,
+  });
+  store.close();
+
+  const reopened = new SqliteEventStore(path);
+  expect(await reopened.getSession(child.sessionId)).toMatchObject({
+    derivedFrom: child.derivedFrom,
   });
   reopened.close();
 });

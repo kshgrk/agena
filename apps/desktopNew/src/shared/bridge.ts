@@ -7,14 +7,16 @@ import type {
   AgenaEvent,
   AgenaFrame,
   ApprovalResponse,
+  BlobRef,
   CompactAck,
+  ContentBlock,
   CreatePtyRequest,
   CreateSessionRequest,
   DiagnosticsResponse,
   EmptyAck,
   FileEntry,
   Harness,
-  ImportLedgerEntry,
+  ImportsResponse,
   InFlightSnapshot,
   ListSessionsQuery,
   ModelRef,
@@ -30,6 +32,7 @@ import type {
   SearchHit,
   SessionStatus,
   SessionSummary,
+  SetFastModeAck,
   SetModelAck,
   SetThinkingLevelAck,
   SnapshotSummary,
@@ -152,7 +155,7 @@ export type ImportPlan = {
   projects: Array<{
     cwd: string;
     name: string;
-    /** Only honored for new projects whose cwd still exists (plan §8 step 2). */
+    /** Re-uploaded when resuming an interrupted import to repair partial extraction. */
     copyFiles: boolean;
     /** Empty = project files only. */
     harnesses: Harness[];
@@ -237,6 +240,13 @@ export type ReadEventsPage = {
   nextFromSeq: number | null;
 };
 
+/** Immutable history operation: creates a derived session, never mutates it. */
+export type SessionForkMode = "fork" | "clone";
+
+export type ForkSessionResult = {
+  sessionId: string;
+};
+
 /**
  * The single API preload exposes as `window.agena`. Method names and semantics
  * mirror @agena/client so renderer code reads like SDK code; all methods reject
@@ -250,9 +260,18 @@ export type AgenaBridge = {
 
   // WS commands (requestId correlation + retry live below the bridge, in the SDK)
   subscribe(sessionId: string, fromSeq: number): Promise<SubscribeAck>;
-  prompt(sessionId: string, text: string): Promise<PromptAck>;
-  steer(sessionId: string, text: string): Promise<PromptAck>;
-  followUp(sessionId: string, text: string): Promise<PromptAck>;
+  prompt(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck>;
+  steer(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck>;
+  followUp(
+    sessionId: string,
+    content: string | ContentBlock[],
+  ): Promise<PromptAck>;
   abort(sessionId: string, reason?: string): Promise<EmptyAck>;
   respondToApproval(
     sessionId: string,
@@ -261,6 +280,7 @@ export type AgenaBridge = {
   ): Promise<RespondToApprovalAck>;
   runtimeInfo(sessionId: string): Promise<RuntimeInfoAck>;
   setModel(sessionId: string, model: ModelRef): Promise<SetModelAck>;
+  setFastMode(sessionId: string, enabled: boolean): Promise<SetFastModeAck>;
   setThinkingLevel(
     sessionId: string,
     thinkingLevel: ThinkingLevel,
@@ -269,6 +289,12 @@ export type AgenaBridge = {
 
   // HTTP
   createSession(input?: Partial<CreateSessionRequest>): Promise<string>;
+  forkSession(
+    sourceSessionId: string,
+    sourceMessageId: string | undefined,
+    mode: SessionForkMode,
+  ): Promise<ForkSessionResult>;
+  navigateSession(sessionId: string, sourceMessageId: string): Promise<string>;
   createProject(name: string): Promise<OpenedProject>;
   /** Full teardown: db rows, workspace files, pi sessions, snapshots. */
   deleteProject(
@@ -288,6 +314,8 @@ export type AgenaBridge = {
   listApprovals(): Promise<PendingApprovalSummary[]>;
   listFiles(opts?: { path?: string }): Promise<FileEntry[]>;
   readFile(path: string): Promise<Uint8Array>;
+  uploadImage(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  readBlob(hash: string): Promise<Uint8Array>;
   /** Open a daemon-validated workspace file through the host OS. */
   openWorkspaceFile(path: string): Promise<void>;
   listSnapshots(): Promise<SnapshotSummary[]>;
@@ -301,6 +329,10 @@ export type AgenaBridge = {
   ): Promise<{ snapshotId: string; safetySnapshotId: string }>;
   deleteSnapshot(snapshotId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticsResponse>;
+  createPairing(daemonUrl: string): Promise<{
+    pairingUri: string;
+    expiresAt: string;
+  }>;
   listPtys(): Promise<PtySummary[]>;
 
   // curated plugins (artifacts/auth remain owned by their existing services)
@@ -332,7 +364,7 @@ export type AgenaBridge = {
   /** Per-session failures land in the result, never reject the batch. */
   importRun(plan: ImportPlan): Promise<ImportRunResult>;
   /** The daemon import ledger for this machine (GET /v1/imports). */
-  importStatus(): Promise<{ imports: ImportLedgerEntry[] }>;
+  importStatus(): Promise<ImportsResponse>;
 
   // local MCP import (host discovery stays in Electron main; no secrets cross IPC)
   mcpImportScan(opts?: {

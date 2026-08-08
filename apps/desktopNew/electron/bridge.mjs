@@ -540,12 +540,20 @@ export function createBridgeHost({
         return need().runtimeInfo(args[0]);
       case "setModel":
         return need().setModel(args[0], args[1]);
+      case "setFastMode":
+        return need().setFastMode(args[0], args[1]);
       case "setThinkingLevel":
         return need().setThinkingLevel(args[0], args[1]);
       case "compact":
         return need().compact(args[0]);
       case "createSession":
         return need().createSession(args[0]);
+      case "forkSession":
+        return {
+          sessionId: await need().forkSession(args[0], args[1], args[2]),
+        };
+      case "navigateSession":
+        return need().navigateSession(args[0], args[1]);
       case "createProject":
         return createProject(args[0]);
       case "deleteProject":
@@ -566,6 +574,10 @@ export function createBridgeHost({
         return need().listFiles(args[0] ?? {});
       case "readFile":
         return need().readFile(args[0]);
+      case "uploadImage":
+        return need().uploadImage(args[0], args[1]);
+      case "readBlob":
+        return need().readBlob(args[0]);
       case "openWorkspaceFile": {
         const path = args[0];
         if (
@@ -604,6 +616,8 @@ export function createBridgeHost({
         return need().deleteSnapshot(args[0]);
       case "diagnostics":
         return need().diagnostics();
+      case "createPairing":
+        return need().createPairing(args[0]);
       case "listPtys":
         return need().listPtys();
       case "openProjectFolder":

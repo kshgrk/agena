@@ -118,6 +118,9 @@ function reduceEvent(d: Draft, event: AgenaEvent): void {
         messageId: p.messageId,
         content: p.content,
         ...(p.queued ? { queued: p.queued } : {}),
+        ...(p.editedFromMessageId
+          ? { editedFromMessageId: p.editedFromMessageId }
+          : {}),
       });
       break;
     }
@@ -345,12 +348,103 @@ function reduceEvent(d: Draft, event: AgenaEvent): void {
       break;
     case "session.created":
     case "session.title.changed":
+    case "fast.mode.changed":
     case "snapshot.created":
     case "snapshot.restored":
     case "snapshot.restore_failed":
     case "snapshot.deleted":
       break;
   }
+}
+
+/** Pi keeps edited alternatives in one tree; the main view follows its active path. */
+export function activeBranchBlocks(
+  events: readonly RawEventRow[],
+  blocks: readonly Block[],
+): readonly Block[] {
+  const users = events
+    .filter((event) => event.type === "message.user.created")
+    .map((event) => {
+      const payload = event.payload as {
+        messageId?: unknown;
+        editedFromMessageId?: unknown;
+      };
+      return {
+        seq: event.seq,
+        messageId:
+          typeof payload.messageId === "string" ? payload.messageId : "",
+        editedFromMessageId:
+          typeof payload.editedFromMessageId === "string"
+            ? payload.editedFromMessageId
+            : undefined,
+      };
+    })
+    .filter((user) => user.messageId.length > 0);
+  if (users.length < 2 || !users.some((user) => user.editedFromMessageId)) {
+    return blocks;
+  }
+
+  const byId = new Map(users.map((user) => [user.messageId, user]));
+  const previous = new Map<string, string | undefined>();
+  for (let index = 0; index < users.length; index += 1) {
+    previous.set(users[index]?.messageId ?? "", users[index - 1]?.messageId);
+  }
+  const activeIds = new Set<string>();
+  let current = users.at(-1);
+  while (current && !activeIds.has(current.messageId)) {
+    activeIds.add(current.messageId);
+    const parentId = current.editedFromMessageId
+      ? previous.get(current.editedFromMessageId)
+      : previous.get(current.messageId);
+    current = parentId ? byId.get(parentId) : undefined;
+  }
+  const assistantUsers = new Map<string, string>();
+  const toolUsers = new Map<string, string>();
+  const approvalUsers = new Map<string, string>();
+  for (const event of events) {
+    const payload = event.payload as Record<string, unknown>;
+    if (event.type === "message.assistant.started") {
+      if (
+        typeof payload.messageId === "string" &&
+        typeof payload.inResponseTo === "string"
+      ) {
+        assistantUsers.set(payload.messageId, payload.inResponseTo);
+      }
+    } else if (event.type === "tool.call.started") {
+      if (
+        typeof payload.toolCallId === "string" &&
+        typeof payload.messageId === "string"
+      ) {
+        const userId = assistantUsers.get(payload.messageId);
+        if (userId) toolUsers.set(payload.toolCallId, userId);
+      }
+    } else if (event.type === "approval.requested") {
+      if (
+        typeof payload.approvalId === "string" &&
+        typeof payload.toolCallId === "string"
+      ) {
+        const userId = toolUsers.get(payload.toolCallId);
+        if (userId) approvalUsers.set(payload.approvalId, userId);
+      }
+    }
+  }
+
+  const isActive = (messageId: string | undefined) =>
+    messageId !== undefined && activeIds.has(messageId);
+  return blocks.filter((block) => {
+    switch (block.kind) {
+      case "user":
+        return activeIds.has(block.messageId);
+      case "assistant":
+        return isActive(assistantUsers.get(block.messageId));
+      case "tool":
+        return isActive(toolUsers.get(block.toolCallId));
+      case "approval":
+        return isActive(approvalUsers.get(block.approvalId));
+      default:
+        return true;
+    }
+  });
 }
 
 // ---- pure reducers -------------------------------------------------------------
@@ -390,28 +484,48 @@ export function applyFrame(
   const parsed = knownAgenaFrameSchema.safeParse(frame);
   if (!parsed.success || !state.live) return state;
   const f = parsed.data;
-  if (f.type === "message.assistant.text.delta") {
-    const p = f.payload;
-    if (!state.inFlight || state.inFlight.messageId !== p.messageId) {
-      return state; // mistargeted/stale delta: drop
+  switch (f.type) {
+    case "message.assistant.text.delta": {
+      const p = f.payload;
+      if (!state.inFlight || state.inFlight.messageId !== p.messageId) {
+        return state; // mistargeted/stale delta: drop
+      }
+      const blocks = [...state.inFlight.blocks];
+      while (blocks.length <= p.blockIndex)
+        blocks.push({ type: "text", text: "" });
+      const target = blocks[p.blockIndex];
+      if (!target) return state;
+      blocks[p.blockIndex] = { ...target, text: target.text + p.delta };
+      return { ...state, inFlight: { ...state.inFlight, blocks } };
     }
-    const blocks = [...state.inFlight.blocks];
-    while (blocks.length <= p.blockIndex)
-      blocks.push({ type: "text", text: "" });
-    const target = blocks[p.blockIndex];
-    if (!target) return state;
-    blocks[p.blockIndex] = { ...target, text: target.text + p.delta };
-    return { ...state, inFlight: { ...state.inFlight, blocks } };
+    case "tool.call.output.delta": {
+      const p = f.payload;
+      const i = state.toolIndex[p.toolCallId];
+      if (i === undefined) return state;
+      const b = state.blocks[i];
+      if (b?.kind !== "tool") return state;
+      const blocks = [...state.blocks];
+      blocks[i] = {
+        ...b,
+        liveOutput: p.reset ? p.delta : b.liveOutput + p.delta,
+      };
+      return { ...state, blocks };
+    }
+    case "session.status.updated":
+      return {
+        ...state,
+        runtimeStatus: {
+          state: f.payload.state,
+          ...(f.payload.detail !== undefined
+            ? { detail: f.payload.detail }
+            : {}),
+        },
+      };
+    case "compaction.started":
+    case "run.retry.started":
+    case "run.retry.ended":
+      return state;
   }
-  // tool.call.output.delta
-  const p = f.payload;
-  const i = state.toolIndex[p.toolCallId];
-  if (i === undefined) return state;
-  const b = state.blocks[i];
-  if (b?.kind !== "tool") return state;
-  const blocks = [...state.blocks];
-  blocks[i] = { ...b, liveOutput: p.reset ? p.delta : b.liveOutput + p.delta };
-  return { ...state, blocks };
 }
 
 /** Seeds the streaming tail + running tool output from the wire snapshot. */
@@ -521,6 +635,8 @@ export type TranscriptsStore = {
     sessionId: string,
     fn: (t: TranscriptState) => TranscriptState,
   ) => void;
+  /** Load the newest page before the first subscription to avoid full replay. */
+  primeRecent: (sessionId: string, headSeq: number) => Promise<number>;
   /** Backward-page older events for a session via the bridge. */
   prependOlder: (sessionId: string) => Promise<void>;
   /** Load contiguous older history until targetSeq is available. */
@@ -541,6 +657,23 @@ export const useTranscripts = create<TranscriptsStore>((set, get) => ({
       if (next === cur && s.bySession[sessionId]) return s;
       return { bySession: { ...s.bySession, [sessionId]: next } };
     }),
+  primeRecent: async (sessionId, headSeq) => {
+    const existing = get().bySession[sessionId]?.lastSeq ?? 0;
+    const bridge = getBridge();
+    if (existing > 0 || headSeq <= 0 || !bridge) return existing;
+    const page = await bridge.readEvents(sessionId, {
+      fromSeq: Math.max(0, headSeq - PAGE),
+      limit: PAGE,
+    });
+    if (page.events.length === 0) return 0;
+    get().update(sessionId, (current) =>
+      page.events.reduce(
+        (next, event) => applyEvent(next, event, true),
+        current,
+      ),
+    );
+    return get().bySession[sessionId]?.lastSeq ?? 0;
+  },
   prependOlder: async (sessionId) => {
     const bridge = getBridge();
     const t = get().bySession[sessionId];

@@ -402,7 +402,7 @@ export function applyFrame(
     blocks[p.blockIndex] = { ...target, text: target.text + p.delta };
     return { ...state, inFlight: { ...state.inFlight, blocks } };
   }
-  // tool.call.output.delta
+  if (f.type !== "tool.call.output.delta") return state;
   const p = f.payload;
   const i = state.toolIndex[p.toolCallId];
   if (i === undefined) return state;
@@ -509,6 +509,8 @@ export type TranscriptsStore = {
     sessionId: string,
     fn: (t: TranscriptState) => TranscriptState,
   ) => void;
+  /** Load the newest page before the first subscription to avoid full replay. */
+  primeRecent: (sessionId: string, headSeq: number) => Promise<number>;
   /** Backward-page older events for a session via the bridge. */
   prependOlder: (sessionId: string) => Promise<void>;
 };
@@ -527,6 +529,23 @@ export const useTranscripts = create<TranscriptsStore>((set, get) => ({
       if (next === cur && s.bySession[sessionId]) return s;
       return { bySession: { ...s.bySession, [sessionId]: next } };
     }),
+  primeRecent: async (sessionId, headSeq) => {
+    const existing = get().bySession[sessionId]?.lastSeq ?? 0;
+    const bridge = getBridge();
+    if (existing > 0 || headSeq <= 0 || !bridge) return existing;
+    const page = await bridge.readEvents(sessionId, {
+      fromSeq: Math.max(0, headSeq - PAGE),
+      limit: PAGE,
+    });
+    if (page.events.length === 0) return 0;
+    get().update(sessionId, (current) =>
+      page.events.reduce(
+        (next, event) => applyEvent(next, event, true),
+        current,
+      ),
+    );
+    return get().bySession[sessionId]?.lastSeq ?? 0;
+  },
   prependOlder: async (sessionId) => {
     const bridge = getBridge();
     const t = get().bySession[sessionId];

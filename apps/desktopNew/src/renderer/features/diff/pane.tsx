@@ -4,7 +4,7 @@
 import "@git-diff-view/react/styles/diff-view.css";
 import "./diff.css";
 import { DiffModeEnum, DiffView } from "@git-diff-view/react";
-import { FileDiff, FilePen, X } from "lucide-react";
+import { ChevronLeft, FileDiff, FilePen, X } from "lucide-react";
 import { useMemo } from "react";
 import { useSessions } from "../../store/sessions.ts";
 import { useTranscripts } from "../../store/transcript.ts";
@@ -40,7 +40,25 @@ const MODE_OPTIONS = [
   { value: "split", label: "Split" },
 ] as const;
 
-function PathTitle({ path }: { path: string }) {
+function compactPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || path;
+}
+
+function PathTitle({
+  path,
+  compact = false,
+}: {
+  path: string;
+  compact?: boolean;
+}) {
+  if (compact) {
+    return (
+      <span className="truncate font-mono text-sm text-fg" title={path}>
+        {compactPath(path)}
+      </span>
+    );
+  }
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
@@ -103,7 +121,7 @@ function DiffBody({ entry, mode }: { entry: DiffEntry; mode: DiffMode }) {
 }
 
 /** File edits parsed from the active transcript — the "view diff" offer. */
-function EditsList() {
+function EditsList({ mobile = false }: { mobile?: boolean }) {
   const activeSessionId = useSessions((s) => s.activeSessionId);
   // Subscribe to rawEvents, not blocks: rawEvents identity changes only on
   // durable events, so streaming tool-output frames (which replace the blocks
@@ -137,29 +155,56 @@ function EditsList() {
           key={block.toolCallId}
           type="button"
           onClick={() => openEditDiff(edit)}
-          className="flex h-7 items-center gap-2 rounded-md px-2 text-left transition-colors hover:bg-raised/60"
+          className={
+            mobile
+              ? "flex min-h-13 w-full min-w-0 items-center gap-3 rounded-xl px-3 py-2 text-left active:bg-raised"
+              : "flex h-7 items-center gap-2 rounded-md px-2 text-left transition-colors hover:bg-raised/60"
+          }
         >
-          <FilePen className="size-3.5 shrink-0 text-fg-muted" />
-          <span
-            className="min-w-0 flex-1 truncate font-mono text-sm text-fg-secondary"
-            title={edit.path}
-          >
-            {edit.path}
-          </span>
-          <span className="shrink-0 font-mono text-2xs text-fg-faint">
-            {block.name}
-          </span>
-          <RelativeTime
-            iso={block.at}
-            className="shrink-0 text-2xs text-fg-muted"
+          <FilePen
+            className={
+              mobile
+                ? "size-5 shrink-0 text-fg-muted"
+                : "size-3.5 shrink-0 text-fg-muted"
+            }
           />
+          {mobile ? (
+            <span className="min-w-0 flex-1" title={edit.path}>
+              <span className="block truncate font-mono text-sm font-medium text-fg-secondary">
+                {compactPath(edit.path)}
+              </span>
+              <span className="flex items-center gap-1.5 text-xs text-fg-muted">
+                <span className="truncate">{block.name}</span>
+                <span aria-hidden="true" className="text-fg-faint">
+                  ·
+                </span>
+                <RelativeTime iso={block.at} className="shrink-0" />
+              </span>
+            </span>
+          ) : (
+            <>
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-sm text-fg-secondary"
+                title={edit.path}
+              >
+                {edit.path}
+              </span>
+              <span className="shrink-0 font-mono text-2xs text-fg-faint">
+                {block.name}
+              </span>
+              <RelativeTime
+                iso={block.at}
+                className="shrink-0 text-2xs text-fg-muted"
+              />
+            </>
+          )}
         </button>
       ))}
     </div>
   );
 }
 
-export function DiffPane() {
+export function DiffPane({ mobile = false }: { mobile?: boolean }) {
   const entry = useDiff((s) => s.entry);
   const mode = useDiff((s) => s.mode);
   const setMode = useDiff((s) => s.setMode);
@@ -167,35 +212,56 @@ export function DiffPane() {
   return (
     <div ref={bindDiffPaneHost} className="h-full min-h-0">
       <Panel>
-        <PanelHeader
-          title={
-            entry ? (
-              <span className="flex min-w-0 items-center gap-2">
-                <PathTitle path={entry.path} />
-                <DiffStats adds={entry.adds} dels={entry.dels} />
-              </span>
-            ) : (
-              "Diff"
-            )
-          }
-          actions={
-            entry ? (
-              <>
-                <Segmented
-                  ariaLabel="Diff layout"
-                  value={mode}
-                  onValueChange={setMode}
-                  options={MODE_OPTIONS}
-                />
-                <IconButton label="Close diff" size="sm" onClick={clear}>
-                  <X />
-                </IconButton>
-              </>
-            ) : undefined
-          }
-        />
+        {!mobile || entry ? (
+          <PanelHeader
+            {...(mobile ? { className: "h-11 pl-1 pr-1" } : {})}
+            title={
+              entry ? (
+                <span className="flex min-w-0 items-center gap-2">
+                  {mobile ? (
+                    <button
+                      type="button"
+                      aria-label="Back to edits"
+                      onClick={clear}
+                      className="-ml-1 flex size-11 shrink-0 items-center justify-center rounded-md text-fg-secondary active:bg-raised"
+                    >
+                      <ChevronLeft className="size-5" />
+                    </button>
+                  ) : null}
+                  <PathTitle path={entry.path} compact={mobile} />
+                  <DiffStats adds={entry.adds} dels={entry.dels} />
+                </span>
+              ) : (
+                "Diff"
+              )
+            }
+            actions={
+              entry ? (
+                <>
+                  {!mobile ? (
+                    <Segmented
+                      ariaLabel="Diff layout"
+                      value={mode}
+                      onValueChange={setMode}
+                      options={MODE_OPTIONS}
+                    />
+                  ) : null}
+                  {!mobile ? (
+                    <IconButton label="Close diff" size="sm" onClick={clear}>
+                      <X />
+                    </IconButton>
+                  ) : null}
+                </>
+              ) : undefined
+            }
+          />
+        ) : null}
         <PanelBody className={entry ? "bg-inset" : ""}>
-          {entry ? <DiffBody entry={entry} mode={mode} /> : <EditsList />}
+          {entry ? (
+            <DiffBody entry={entry} mode={mobile ? "unified" : mode} />
+          ) : (
+            <EditsList mobile={mobile} />
+          )}
         </PanelBody>
       </Panel>
     </div>

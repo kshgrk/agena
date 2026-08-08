@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const adapter: RuntimeAdapter =
     config.runtime === "fake"
       ? new FakeRuntimeAdapter()
-      : new (await import("@agena/runtime-pi")).PiRuntimeAdapter(
+      : await (await import("@agena/runtime-pi")).PiRuntimeAdapter.create(
           defaultModel ? { defaultModel } : {},
         );
   const daemon = await startDaemon(config, adapter);

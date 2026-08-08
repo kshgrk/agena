@@ -27,7 +27,7 @@ import {
   ProcessTerminal,
   Spacer,
   Text,
-  TUI,
+  TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import {
   FixedHeightPane,
@@ -140,7 +140,7 @@ export function runTui(
   const pendingApprovals = new Map<string, ApprovalRequested>();
   let controlModal: ControlModal | null = null;
 
-  const tui = new TUI(new ProcessTerminal());
+  const tui = new TuiMainScreen(new ProcessTerminal());
   const transcript = new Container();
   const statusBar = new Text("", 1, 0);
   const shellPane = new ShellPane((data) => {
@@ -873,7 +873,7 @@ export function runTui(
       redraw();
       try {
         if (shellWsPath) {
-          bindShell(client.connectPty(shellWsPath));
+          bindShell(await client.connectPty(shellWsPath));
           return;
         }
         const attachment = await client.openPty({
@@ -993,10 +993,10 @@ export function runTui(
       shellPane.setState("reconnecting");
       redraw();
       shellReconnectTimer = setTimeout(
-        () => {
+        async () => {
           shellReconnectTimer = null;
           if (!shellWsPath) return;
-          bindShell(client.connectPty(shellWsPath));
+          bindShell(await client.connectPty(shellWsPath));
         },
         Math.min(1_000, 100 * shellReconnectAttempts),
       );
@@ -1047,7 +1047,7 @@ export function runTui(
       resolve();
     }
 
-    tui.addInputListener((data) => {
+    tui.addInputListener((data: string) => {
       if (handleApprovalInput(data)) return { consume: true };
       if (scrollTranscript(data)) return { consume: true };
       const action = routeKey(data, {
