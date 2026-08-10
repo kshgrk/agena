@@ -11,6 +11,7 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 export interface MapperState {
   mintId: () => string;
+  now: () => number;
   /** Set by prompt() before Pi emits agent_start (§8.5 echo/correlation). */
   triggerMessageId: string | null;
   runId: string | null;
@@ -19,6 +20,7 @@ export interface MapperState {
   lastAssistantMessageId: string | null;
   failure: { code: string; message: string } | null;
   toolOutputs: Map<string, string>;
+  toolStartedAt: Map<string, number>;
   warned: Set<string>;
 }
 
@@ -26,9 +28,11 @@ export interface MapperState {
 // only need uniqueness; revisit with M2 storage if sortable ids matter here.
 export function createMapperState(
   mintId: () => string = randomUUID,
+  now: () => number = Date.now,
 ): MapperState {
   return {
     mintId,
+    now,
     triggerMessageId: null,
     runId: null,
     turnId: null,
@@ -36,6 +40,7 @@ export function createMapperState(
     lastAssistantMessageId: null,
     failure: null,
     toolOutputs: new Map(),
+    toolStartedAt: new Map(),
     warned: new Set(),
   };
 }
@@ -189,6 +194,7 @@ export function mapPiEvent(
       ];
     }
     case "tool_execution_start":
+      state.toolStartedAt.set(ev.toolCallId, state.now());
       return [
         {
           type: "tool-call-started",
@@ -203,8 +209,14 @@ export function mapPiEvent(
       ];
     case "tool_execution_update":
       return toolOutputDelta(state, ev.toolCallId, ev.partialResult);
-    case "tool_execution_end":
+    case "tool_execution_end": {
       state.toolOutputs.delete(ev.toolCallId);
+      const startedAt = state.toolStartedAt.get(ev.toolCallId);
+      state.toolStartedAt.delete(ev.toolCallId);
+      const durationMs =
+        startedAt === undefined
+          ? 0
+          : Math.max(0, Math.round(state.now() - startedAt));
       if (ev.isError) {
         return [
           {
@@ -215,7 +227,7 @@ export function mapPiEvent(
               message: stringifyToolResult(ev.result),
             },
             partialOutput: toolResultBlocks(ev.result),
-            durationMs: 0,
+            durationMs,
           },
         ];
       }
@@ -224,9 +236,10 @@ export function mapPiEvent(
           type: "tool-call-completed",
           toolCallId: ev.toolCallId,
           result: toolResultBlocks(ev.result),
-          durationMs: 0,
+          durationMs,
         },
       ];
+    }
     case "session_info_changed": {
       const title = normalizeTitle(ev.name);
       return title ? [{ type: "session-title-changed", title }] : [];

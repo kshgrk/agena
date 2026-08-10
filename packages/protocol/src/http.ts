@@ -1,12 +1,19 @@
 import { z } from "zod";
-import { blobRefSchema, modelRefSchema } from "./content.ts";
+import {
+  blobRefSchema,
+  contentBlockSchema,
+  modelRefSchema,
+  usageTotalsSchema,
+} from "./content.ts";
 
 export const uploadImageResponseSchema = z.object({ ref: blobRefSchema });
 export type UploadImageResponse = z.infer<typeof uploadImageResponseSchema>;
 
+import { approvalResponseSchema } from "./commands.ts";
 import {
   agentTaskSummarySchema,
   approvalRequestedSchema,
+  eventSourceSchema,
   sessionOriginSchema,
 } from "./events.ts";
 
@@ -456,6 +463,140 @@ export const userMessageAnchorsResponseSchema = z.object({
 });
 export type UserMessageAnchorsResponse = z.infer<
   typeof userMessageAnchorsResponseSchema
+>;
+
+const compactTranscriptBaseSchema = z.object({
+  seq: z.number().int().positive(),
+  at: z.string(),
+  source: eventSourceSchema,
+});
+
+export const compactTranscriptUserSchema = compactTranscriptBaseSchema.extend({
+  kind: z.literal("user"),
+  messageId: z.string().min(1),
+  content: z.array(contentBlockSchema),
+  queued: z.enum(["steer", "followUp"]).optional(),
+  editedFromMessageId: z.string().min(1).optional(),
+});
+export type CompactTranscriptUser = z.infer<typeof compactTranscriptUserSchema>;
+
+export const compactTranscriptEntrySchema = z.discriminatedUnion("kind", [
+  compactTranscriptBaseSchema.extend({
+    kind: z.literal("assistant"),
+    messageId: z.string().min(1),
+    content: z.array(contentBlockSchema),
+    model: modelRefSchema.optional(),
+    status: z.enum(["completed", "aborted", "failed"]),
+    stopReason: z.enum(["end_turn", "tool_use", "max_tokens"]).optional(),
+    usage: usageTotalsSchema.optional(),
+    abortReason: z.enum(["user_abort", "daemon_shutdown"]).optional(),
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+  }),
+  compactTranscriptBaseSchema.extend({
+    kind: z.literal("runtime"),
+    messageId: z.string().min(1),
+    runtimeType: z.enum(["custom", "bash", "branch-summary"]),
+    content: z.array(contentBlockSchema),
+    meta: z
+      .object({
+        command: z.string().optional(),
+        exitCode: z.number().int().nullable().optional(),
+        customType: z.string().optional(),
+      })
+      .optional(),
+  }),
+  compactTranscriptBaseSchema.extend({
+    kind: z.literal("tool"),
+    toolCallId: z.string().min(1),
+    messageId: z.string().min(1),
+    name: z.string().min(1),
+    argsPreview: z.string(),
+    status: z.enum(["running", "completed", "failed", "aborted", "denied"]),
+    durationMs: z.number().nonnegative().optional(),
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+    abortReason: z.string().optional(),
+    deniedReason: z.string().optional(),
+    approvalId: z.string().min(1).optional(),
+    hasDetails: z.boolean(),
+  }),
+  compactTranscriptBaseSchema.extend({
+    kind: z.literal("approval"),
+    approvalId: z.string().min(1),
+    request: approvalRequestedSchema,
+    state: z.enum(["pending", "responded", "expired", "cancelled"]),
+    response: approvalResponseSchema.optional(),
+    respondedBy: z.string().optional(),
+    cancelReason: z.string().optional(),
+  }),
+  compactTranscriptBaseSchema.extend({
+    kind: z.literal("marker"),
+    markerKind: z.enum([
+      "model",
+      "thinking",
+      "compaction",
+      "compaction-failed",
+      "terminal-start",
+      "terminal-end",
+      "run-failed",
+    ]),
+    text: z.string(),
+  }),
+]);
+export type CompactTranscriptEntry = z.infer<
+  typeof compactTranscriptEntrySchema
+>;
+
+export const compactTranscriptTurnSchema = z.object({
+  user: compactTranscriptUserSchema,
+  entries: z.array(compactTranscriptEntrySchema),
+});
+export type CompactTranscriptTurn = z.infer<typeof compactTranscriptTurnSchema>;
+
+export const compactTranscriptQuerySchema = z
+  .object({
+    limitTurns: z.coerce.number().int().positive().max(50).default(10),
+    beforeMessageId: z.string().min(1).optional(),
+    aroundMessageId: z.string().min(1).optional(),
+  })
+  .refine((query) => !(query.beforeMessageId && query.aroundMessageId), {
+    message: "beforeMessageId and aroundMessageId are mutually exclusive",
+  });
+export type CompactTranscriptQuery = z.infer<
+  typeof compactTranscriptQuerySchema
+>;
+
+export const compactTranscriptResponseSchema = z.object({
+  sessionId: z.string().min(1),
+  branchId: z.string().min(1),
+  upToSeq: z.number().int().nonnegative(),
+  turns: z.array(compactTranscriptTurnSchema),
+  hasOlder: z.boolean(),
+  hasNewer: z.boolean(),
+});
+export type CompactTranscriptResponse = z.infer<
+  typeof compactTranscriptResponseSchema
+>;
+
+export const toolCallDetailSchema = z.object({
+  toolCallId: z.string().min(1),
+  sessionId: z.string().min(1),
+  branchId: z.string().min(1),
+  messageId: z.string().min(1).optional(),
+  name: z.string().min(1),
+  args: z.unknown(),
+  result: z.unknown().optional(),
+  status: z.enum(["running", "ok", "error", "aborted", "denied"]),
+  startedSeq: z.number().int().positive(),
+  endedSeq: z.number().int().positive().optional(),
+  createdAt: z.string(),
+});
+export type ToolCallDetail = z.infer<typeof toolCallDetailSchema>;
+
+export const toolCallDetailResponseSchema = z.object({
+  toolCall: toolCallDetailSchema,
+});
+export type ToolCallDetailResponse = z.infer<
+  typeof toolCallDetailResponseSchema
 >;
 
 export const sessionSummarySchema = z.object({

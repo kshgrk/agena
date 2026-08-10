@@ -1,0 +1,329 @@
+.chamber-composer {
+  position: relative;
+  display: flex;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.11));
+  border-radius: 18px;
+  background: var(--bg-surface, #181818);
+  box-shadow: 0 6px 24px -16px rgb(0 0 0 / 0.65);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chamber-composer:focus-within {
+  border-color: var(--border-strong, rgba(255, 255, 255, 0.18));
+  box-shadow: 0 8px 28px -18px rgb(0 0 0 / 0.8);
+}
+
+.chamber-composer-editor {
+  min-height: 44px;
+  padding: 13px 14px 7px;
+  color: var(--fg);
+  font:
+    400 14px / 20px ui-sans-serif,
+    system-ui,
+    sans-serif;
+}
+
+.chamber-composer-editor .cm-scroller {
+  max-height: 160px;
+  scrollbar-width: thin;
+}
+
+.chamber-composer.is-mobile {
+  border-radius: 20px;
+  animation: chamber-composer-expand 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chamber-composer.is-mobile .chamber-composer-editor .cm-scroller {
+  max-height: 320px;
+}
+
+.chamber-composer-token-command,
+.chamber-composer-token-skill {
+  color: var(--accent, #d8a56d);
+  font-weight: 600;
+}
+
+.chamber-composer-token-mention {
+  color: var(--info, #74a7df);
+  font-weight: 600;
+}
+
+.chamber-composer-token-snippet {
+  color: var(--success, #73b08a);
+  font-weight: 600;
+}
+
+.chamber-composer-footer {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 7px 7px;
+}
+
+.chamber-composer-footer-start,
+.chamber-composer-footer-end {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+}
+
+.chamber-composer-footer-end {
+  justify-content: flex-end;
+}
+
+.chamber-composer-icon-button,
+.chamber-composer-primary,
+.chamber-composer-attachment button,
+.chamber-mobile-new {
+  display: inline-flex;
+  height: 30px;
+  width: 30px;
+  flex: none;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg-secondary);
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.chamber-composer-icon-button:hover,
+.chamber-composer-attachment button:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
+}
+
+.chamber-composer-icon-button svg,
+.chamber-composer-primary svg,
+.chamber-mobile-new svg {
+  width: 17px;
+  height: 17px;
+}
+
+.chamber-composer-primary {
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg-canvas);
+}
+
+.chamber-composer-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.chamber-composer-primary:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.chamber-composer-primary:disabled,
+.chamber-composer-icon-button:disabled {
+  cursor: default;
+  opacity: 0.36;
+}
+
+.chamber-composer-primary.is-stop {
+  background: var(--danger);
+  color: white;
+}
+
+.chamber-composer-file-input {
+  display: none;
+}
+
+.chamber-composer-attachments {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 9px 10px 0;
+}
+
+.chamber-composer-attachment {
+  position: relative;
+  display: flex;
+  height: 48px;
+  max-width: 180px;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 4px 5px;
+  background: var(--bg-raised);
+  color: var(--fg-secondary);
+  font-size: 12px;
+}
+
+.chamber-composer-attachment > img,
+.chamber-composer-attachment > svg {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.chamber-composer-attachment > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chamber-composer-attachment button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-overlay);
+}
+
+.chamber-composer-attachment button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.chamber-composer-drop-target {
+  position: absolute;
+  inset: 5px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+  animation: chamber-drop-in 120ms ease-out;
+}
+
+.chamber-mobile-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chamber-mobile-pill-shell {
+  display: flex;
+  height: 44px;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface);
+  box-shadow: 0 4px 16px -8px rgb(0 0 0 / 0.55);
+}
+
+.chamber-mobile-pill {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  flex: 1;
+  cursor: text;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: inherit;
+  padding: 0 11px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+}
+
+.chamber-mobile-pill > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chamber-mobile-pill > svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.chamber-mobile-pill .is-placeholder {
+  color: var(--fg-muted);
+}
+
+.chamber-mobile-pill-stop {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  cursor: pointer;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--danger);
+}
+
+.chamber-mobile-pill-stop svg {
+  width: 17px;
+  height: 17px;
+}
+
+.chamber-mobile-new {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-surface);
+  color: var(--fg);
+  box-shadow: 0 4px 16px -8px rgb(0 0 0 / 0.55);
+}
+
+.is-spinning {
+  animation: chamber-spin 0.8s linear infinite;
+}
+
+@keyframes chamber-composer-expand {
+  from {
+    opacity: 0.7;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+@keyframes chamber-drop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes chamber-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chamber-composer,
+  .chamber-composer *,
+  .chamber-composer-drop-target {
+    animation: none;
+    transition-duration: 0.01ms;
+  }
+}

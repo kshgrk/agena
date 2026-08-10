@@ -411,6 +411,8 @@ agena/
 │       └── test/
 │           ├── integration/        # real WS + real SQLite (tmpdir) + FakeRuntime
 │           └── e2e/                # spawned daemon driven via @agena/client (P16)
+│   ├── desktopNew/                 # current Agena Electron renderer
+│   ├── desktopChamber/             # parallel OpenChamber-derived Electron renderer
 │   └── conductor/                  # private iOS/Android phone client (Capacitor)
 │       ├── src/main.tsx            # secure pairing gate, then shared responsive renderer
 │       ├── capacitor.config.ts     # native shell; HTTPS/WSS cloud daemon only
@@ -503,6 +505,7 @@ Allowed edges — anything not listed is forbidden:
 | `@agena/client` | protocol | No core import — clients never see domain internals. |
 | `@agena/tui` | client, protocol | **Only** package importing `@earendil-works/pi-tui`. |
 | `@agena/desktop-new` | client, importer, protocol | Electron UI; never imports core, storage, or runtime-pi. |
+| `@agena/desktop-chamber` | client, importer, protocol | Parallel OpenChamber-derived Electron UI; never imports core, storage, or runtime-pi. |
 | `@agena/conductor` | client | Capacitor host reusing the responsive desktop-new renderer; native secure storage only. |
 | `apps/daemon` | core, protocol, runtime-pi, storage-sqlite | Composition root; Hono, node-pty live here. |
 | `apps/cli` | client, tui, protocol | Never imports core, storage, or runtime-pi. |
@@ -1902,6 +1905,8 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/sessions/:id` | Read one | Includes `lastSeq`, `status`, `activeBranchId`, `source`, `scope`, `projectId`, `cwd` |
 | PATCH | `/v1/sessions/:id` | Rename/archive | Appends `session.title.changed` / `session.status.changed` |
 | GET | `/v1/sessions/:id/events` | **Cold read with fromSeq** | `?fromSeq=0&limit=500&branchId=` → `{events, nextFromSeq}`; `limit` max 2000; branch reads follow INV-11; identical `AgenaEvent` shape to WS replay |
+| GET | `/v1/sessions/:id/transcript` | Compact turn-based cold read for renderers | `?limitTurns=10&beforeMessageId=` or `?aroundMessageId=` → complete active-path user turns, lightweight tool summaries, and an `upToSeq` subscribe cursor; durable events remain unchanged. |
+| GET | `/v1/sessions/:id/tool-calls/:toolCallId` | Lazy full tool-call detail | Returns projected args/result for an explicitly opened tool card; keeps large tool bodies out of initial transcript reads. |
 | POST | `/v1/sessions/:id/fork` | Create branch | `{fromSeq, name?}`; appends `branch.created` (+`branch.switched`) |
 | GET | `/v1/search` | Full-text search | `?q=&limit=` → FTS5 hits `{sessionId, messageId, snippet, rank, seq}` (P7) |
 | GET | `/v1/approvals` | Pending approvals | `?pending=1` → events-scan-derived list; backs `agena approvals` |

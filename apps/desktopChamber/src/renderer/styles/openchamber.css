@@ -1,0 +1,237 @@
+/*
+ * Agena Chamber visual foundation.
+ * Derived from OpenChamber v1.18.1 at commit
+ * 8702c6d5cefabc07777a8da9878e5f94138d234c under the MIT License.
+ * See ../../../THIRD_PARTY_NOTICES.md.
+ *
+ * This file deliberately maps OpenChamber's palette and geometry onto Agena's
+ * existing tokens. The renderer keeps Agena's protocol, stores, and runtime.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg-canvas: #120f0e;
+  --bg-surface: #171615;
+  --bg-raised: #181715;
+  --bg-overlay: #181715;
+  --bg-inset: #211f1d;
+
+  --fg: #c9c5ba;
+  --fg-secondary: #aba9a3;
+  --fg-muted: #8f8b81;
+  --fg-faint: #68655e;
+
+  --accent: #da7c47;
+  --accent-hover: #eb8c57;
+  --accent-active: #fd9b66;
+  --accent-fg: #000000;
+
+  --success: #76ad4f;
+  --warn: #c67f13;
+  --danger: #da5b4a;
+  --info: #479fe6;
+
+  --border-subtle: #24232399;
+  --border: #242323;
+  --border-strong: #504e4c;
+
+  --tool-pending: var(--fg-muted);
+  --tool-running: var(--accent);
+  --tool-success: var(--success);
+  --tool-error: var(--danger);
+  --tool-aborted: var(--fg-muted);
+  --tool-denied: var(--warn);
+
+  --diff-add-bg: #4d934e20;
+  --diff-add-hl: #4d934e40;
+  --diff-add-gutter: #4d934e25;
+  --diff-add-fg: #4d934e;
+  --diff-del-bg: #cb767620;
+  --diff-del-hl: #cb767640;
+  --diff-del-gutter: #cb767625;
+  --diff-del-fg: #cb7676;
+
+  --scrollbar-thumb: #504e4c66;
+  --scrollbar-thumb-hover: #504e4c99;
+
+  /* OpenChamber semantic typography: 14px UI, 15px prose, 13px code. */
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+
+  --radius-md: 0.4375rem;
+  --radius-lg: 0.5625rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 0.75rem;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-canvas: #fdfcfa;
+  --bg-surface: #f7f6f4;
+  --bg-raised: #f8f7f5;
+  --bg-overlay: #f8f7f5;
+  --bg-inset: #f4f3f1;
+
+  --fg: #393a34;
+  --fg-secondary: #5c5c54;
+  --fg-muted: #6b6b63;
+  --fg-faint: #9a9891;
+
+  --accent: #b35017;
+  --accent-hover: #9a4310;
+  --accent-active: #85390c;
+  --accent-fg: #ffffff;
+
+  --success: #5f8d3d;
+  --warn: #8d6c15;
+  --danger: #b7493f;
+  --info: #2d72c4;
+
+  --border-subtle: #d8d5d099;
+  --border: #e5e1de;
+  --border-strong: #cbc7c2;
+
+  --diff-add-bg: #2c751e20;
+  --diff-add-hl: #2c751e40;
+  --diff-add-gutter: #2c751e25;
+  --diff-add-fg: #2c751e;
+  --diff-del-bg: #ab595920;
+  --diff-del-hl: #ab595940;
+  --diff-del-gutter: #ab595925;
+  --diff-del-fg: #ab5959;
+
+  --scrollbar-thumb: #6b6b6340;
+  --scrollbar-thumb-hover: #6b6b6366;
+}
+
+/* OpenChamber keeps transcript and composer on the same readable measure. */
+.transcript-column {
+  width: min(100%, 48rem);
+  padding-inline: calc(clamp(0.75rem, 2.5vw, 1rem));
+}
+
+.wide-chat-layout .transcript-column {
+  width: min(100%, 64rem);
+}
+
+/* One stable user surface across sticky, historical, and imported turns. */
+.oc-user-prompt-card {
+  --user-prompt-bg: color-mix(in srgb, var(--accent) 8%, var(--bg-canvas));
+
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background-color: var(--user-prompt-bg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 18%);
+}
+
+.oc-user-prompt-fade {
+  background: linear-gradient(to bottom, transparent, var(--user-prompt-bg));
+}
+
+/* Keep the phone composer clear of native navigation chrome. */
+.oc-mobile-composer {
+  padding: 0.5rem 0.75rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+}
+
+html[data-native-platform="android"] .oc-mobile-composer {
+  padding-bottom: max(3rem, env(safe-area-inset-bottom, 0px));
+}
+
+@media (hover: none), (pointer: coarse) {
+  .oc-session-toggle:not(.pointer-events-none),
+  .oc-session-actions {
+    opacity: 1;
+  }
+
+  .group\/session > div:first-child {
+    min-height: 2.75rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .transcript-column {
+    padding-inline: clamp(1rem, 2.5vw, 1.5rem);
+  }
+}
+
+/* Keep streamed growth aligned to device pixels to prevent bottom creep. */
+.transcript-column .text-base,
+.transcript-column .prose,
+.transcript-column p {
+  line-height: round(1.625em, 1px);
+}
+
+.font-mono.text-sm,
+.transcript-column code,
+.transcript-column pre {
+  font-size: 0.8125rem;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--fg);
+}
+
+* {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+}
+
+/* The current Agena composer shell mapped to OpenChamber's subtle surface. */
+.transcript-column > .rounded-2xl {
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: var(--radius-xl);
+  background: #171616;
+  box-shadow: 0 4px 16px -4px rgb(0 0 0 / 12%);
+}
+
+[data-theme="light"] .transcript-column > .rounded-2xl {
+  background: #f7f6f4;
+}
+
+/* Agena exposes more runtime controls than OpenChamber. On phone, keep every
+   control reachable without crushing labels by moving send/queue to row two. */
+.agena-mobile .chamber-composer-footer {
+  flex-wrap: wrap;
+  row-gap: 0.25rem;
+}
+
+.agena-mobile .chamber-composer-footer > .ml-auto {
+  flex: 1 0 100%;
+  justify-content: flex-end;
+}
+
+/* OpenChamber tool calls are quiet rows until expanded, not stacked cards. */
+.transcript-column .oc-tool-card {
+  border-color: transparent;
+  border-radius: var(--radius-xl);
+  background: transparent;
+}
+
+.transcript-column .oc-tool-card > button[aria-expanded] {
+  padding-inline: 0.125rem 0.5rem;
+}
+
+.transcript-column
+  .oc-tool-card
+  > button[aria-expanded="true"]
+  + div
+  > div
+  > div {
+  margin-left: 0.5rem;
+  border-top: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 0.75rem;
+}

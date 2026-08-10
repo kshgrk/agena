@@ -7,7 +7,7 @@ const linkRe = /!?\[[^\]]*]\(([^)]+)\)/g;
 const failures = [];
 
 for (const file of markdownFiles(root)) {
-  const text = readFileSync(file, "utf8");
+  const text = withoutCode(readFileSync(file, "utf8"));
   for (const match of text.matchAll(linkRe)) {
     const target = cleanTarget(match[1]);
     if (!target || skipTarget(target)) continue;
@@ -16,6 +16,13 @@ for (const file of markdownFiles(root)) {
     const abs = resolve(dirname(file), decodeURIComponent(path));
     if (!existsSync(abs)) failures.push(`${relativeFile(file)} -> ${target}`);
   }
+}
+
+function withoutCode(markdown) {
+  return markdown
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/~~~[\s\S]*?~~~/g, "")
+    .replace(/`[^`\n]*`/g, "");
 }
 
 if (failures.length > 0) {

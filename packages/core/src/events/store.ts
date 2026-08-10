@@ -7,12 +7,15 @@ import type {
   AgentTaskSummary,
   ApprovalRequested,
   BlobRef,
+  CompactTranscriptQuery,
+  CompactTranscriptResponse,
   ContentBlock,
   EventSource,
   SearchHit,
   SessionOrigin,
   SessionStatus,
   SnapshotSummary,
+  ToolCallDetail,
   UserMessageAnchor,
 } from "@agena/protocol";
 
@@ -246,6 +249,17 @@ export interface SearchStore {
 
 export interface MessageQueryStore {
   listUserMessages(sessionId: string): Promise<UserMessageAnchor[]>;
+}
+
+export interface TranscriptQueryStore {
+  readCompactTranscript(
+    sessionId: string,
+    query: CompactTranscriptQuery,
+  ): Promise<CompactTranscriptResponse>;
+  getToolCallDetail(
+    sessionId: string,
+    toolCallId: string,
+  ): Promise<ToolCallDetail | null>;
 }
 
 export interface ProjectionStore {

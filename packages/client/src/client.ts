@@ -7,6 +7,8 @@ import {
   COMMAND_ACK_TIMEOUT_MS,
   type CommandName,
   type CompactAck,
+  type CompactTranscriptQuery,
+  type CompactTranscriptResponse,
   type ContentBlock,
   type CreateDerivedSessionRequest,
   type CreatePairingResponse,
@@ -68,6 +70,7 @@ import {
   setThinkingLevelAckSchema,
   subscribeAckSchema,
   type ThinkingLevel,
+  type ToolCallDetail,
   type UserMessageAnchor,
   uploadImageResponseSchema,
   VISIBLE_BROWSER_CAPABILITY,
@@ -188,6 +191,7 @@ export type SearchOptions = Partial<Omit<SearchQuery, "q">>;
 export type ListFilesOptions = { path?: string };
 export type UploadFilesOptions = { path: string; format?: "tar" };
 export type ReadEventsOptions = { fromSeq?: number; limit?: number };
+export type ReadCompactTranscriptOptions = Partial<CompactTranscriptQuery>;
 export type ReadEventsPage = {
   events: AgenaEvent[];
   nextFromSeq: number | null;
@@ -515,6 +519,38 @@ export class AgenaClient {
       `/v1/sessions/${encodeURIComponent(sessionId)}/user-messages`,
     );
     return (body as { messages: UserMessageAnchor[] }).messages;
+  }
+
+  async readCompactTranscript(
+    sessionId: string,
+    opts: ReadCompactTranscriptOptions = {},
+  ): Promise<CompactTranscriptResponse> {
+    const query = new URLSearchParams();
+    if (opts.limitTurns !== undefined) {
+      query.set("limitTurns", String(opts.limitTurns));
+    }
+    if (opts.beforeMessageId) {
+      query.set("beforeMessageId", opts.beforeMessageId);
+    }
+    if (opts.aroundMessageId) {
+      query.set("aroundMessageId", opts.aroundMessageId);
+    }
+    const qs = query.toString();
+    return this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/transcript${qs ? `?${qs}` : ""}`,
+    ) as Promise<CompactTranscriptResponse>;
+  }
+
+  async getToolCallDetail(
+    sessionId: string,
+    toolCallId: string,
+  ): Promise<ToolCallDetail> {
+    const body = await this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(toolCallId)}`,
+    );
+    return (body as { toolCall: ToolCallDetail }).toolCall;
   }
 
   async listFiles(opts: ListFilesOptions = {}): Promise<FileEntry[]> {

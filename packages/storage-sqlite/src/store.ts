@@ -31,6 +31,12 @@ import type {
   AgenaEvent,
   AgentTaskCreated,
   AgentTaskSummary,
+  CompactTranscriptEntry,
+  CompactTranscriptQuery,
+  CompactTranscriptResponse,
+  CompactTranscriptTurn,
+  CompactTranscriptUser,
+  ContentBlock,
   EventSource,
   ImportLedgerEntry,
   McpSummary,
@@ -39,6 +45,7 @@ import type {
   SessionStatus,
   SkillSummary,
   SnapshotSummary,
+  ToolCallDetail,
   UserMessageAnchor,
 } from "@agena/protocol";
 import { durableEventSchemas } from "@agena/protocol";
@@ -69,13 +76,6 @@ type SessionRow = {
   session_kind: "primary" | "subagent";
   source_message_id: string | null;
   derived_mode: "fork" | "clone" | null;
-};
-
-type UserMessageRow = {
-  id: string;
-  seq: number;
-  content: string;
-  created_at: string;
 };
 
 type AgentTaskRow = {
@@ -127,6 +127,26 @@ type EventRow = {
   source_runtime: string | null;
   source_client_id: string | null;
   payload: string;
+  created_at: string;
+};
+
+type BranchRow = {
+  id: string;
+  parent_branch_id: string | null;
+  forked_from_seq: number | null;
+};
+
+type ToolCallRow = {
+  id: string;
+  session_id: string;
+  branch_id: string;
+  message_id: string | null;
+  name: string;
+  args: string | null;
+  result: string | null;
+  status: ToolCallDetail["status"];
+  started_seq: number;
+  ended_seq: number | null;
   created_at: string;
 };
 
@@ -1134,20 +1154,299 @@ export class SqliteEventStore implements EventStore {
   }
 
   async listUserMessages(sessionId: string): Promise<UserMessageAnchor[]> {
+    const session = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(sessionId) as SessionRow | undefined;
+    if (!session) {
+      throw new StoreError("session_not_found", `unknown session ${sessionId}`);
+    }
+    const branches = this.#activeBranchSegments(session.active_branch_id);
     const rows = this.#db
       .prepare(
-        `SELECT id, seq, content, created_at
-         FROM messages
-         WHERE session_id = ? AND role = 'user'
+        `SELECT * FROM events
+         WHERE session_id = ? AND type = 'message.user.created'
          ORDER BY seq ASC`,
       )
-      .all(sessionId) as UserMessageRow[];
-    return rows.map((row) => ({
-      messageId: row.id,
-      seq: row.seq,
-      preview: extractSearchText(JSON.parse(row.content)).slice(0, 320),
+      .all(sessionId) as EventRow[];
+    return activeUserEvents(
+      rows
+        .filter((row) => {
+          const upper = branches.get(row.branch_id);
+          return upper !== undefined && (upper === null || row.seq <= upper);
+        })
+        .map(eventFromRow),
+    ).map((event) => {
+      const payload = record(event.payload);
+      return {
+        messageId: stringField(payload, "messageId"),
+        seq: event.seq,
+        preview: extractSearchText(payload.content).slice(0, 320),
+        createdAt: event.createdAt,
+      };
+    });
+  }
+
+  async readCompactTranscript(
+    sessionId: string,
+    query: CompactTranscriptQuery,
+  ): Promise<CompactTranscriptResponse> {
+    const session = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(sessionId) as SessionRow | undefined;
+    if (!session) {
+      throw new StoreError("session_not_found", `unknown session ${sessionId}`);
+    }
+    const branches = this.#activeBranchSegments(session.active_branch_id);
+    const isActiveBranchEvent = (row: Pick<EventRow, "branch_id" | "seq">) => {
+      const segment = branches.get(row.branch_id);
+      return segment !== undefined && (segment === null || row.seq <= segment);
+    };
+    const userRows = (
+      this.#db
+        .prepare(
+          `SELECT * FROM events
+           WHERE session_id = ? AND type = 'message.user.created'
+           ORDER BY seq ASC`,
+        )
+        .all(sessionId) as EventRow[]
+    ).filter(isActiveBranchEvent);
+    const activeUsers = activeUserEvents(userRows.map(eventFromRow));
+    const anchorId = query.beforeMessageId ?? query.aroundMessageId;
+    const anchorIndex = anchorId
+      ? activeUsers.findIndex(
+          (event) => record(event.payload).messageId === anchorId,
+        )
+      : -1;
+    if (anchorId && anchorIndex < 0) {
+      throw new StoreError(
+        "invalid_payload",
+        `unknown active user message ${anchorId}`,
+      );
+    }
+    let start: number;
+    let end: number;
+    if (query.beforeMessageId) {
+      end = anchorIndex;
+      start = Math.max(0, end - query.limitTurns);
+    } else if (query.aroundMessageId) {
+      start = Math.max(0, anchorIndex - Math.floor(query.limitTurns / 2));
+      end = Math.min(activeUsers.length, start + query.limitTurns);
+      start = Math.max(0, end - query.limitTurns);
+    } else {
+      end = activeUsers.length;
+      start = Math.max(0, end - query.limitTurns);
+    }
+    const selected = activeUsers.slice(start, end);
+    if (selected.length === 0) {
+      return {
+        sessionId,
+        branchId: session.active_branch_id,
+        upToSeq: session.last_seq,
+        turns: [],
+        hasOlder: start > 0,
+        hasNewer: end < activeUsers.length,
+      };
+    }
+    const lowerSeq = selected[0]?.seq ?? 1;
+    const upperSeq = activeUsers[end]?.seq
+      ? (activeUsers[end]?.seq ?? session.last_seq + 1) - 1
+      : session.last_seq;
+    const windowRows = (
+      this.#db
+        .prepare(
+          `SELECT session_id, branch_id, seq, type, v, source_kind,
+                  source_runtime, source_client_id,
+                  CASE
+                    WHEN type = 'tool.call.completed'
+                      THEN json_remove(payload, '$.result')
+                    WHEN type IN ('tool.call.failed', 'tool.call.aborted')
+                      THEN json_remove(payload, '$.partialOutput')
+                    WHEN type = 'compaction.created'
+                      THEN json_remove(payload, '$.summary')
+                    ELSE payload
+                  END AS payload,
+                  created_at
+           FROM events
+           WHERE session_id = ? AND seq >= ? AND seq <= ?
+             AND type IN (
+               'message.user.created', 'message.assistant.started',
+               'message.assistant.completed', 'message.assistant.aborted',
+               'message.assistant.failed', 'message.runtime.created',
+               'tool.call.started', 'tool.call.completed', 'tool.call.failed',
+               'tool.call.aborted', 'tool.call.denied',
+               'approval.requested', 'approval.responded', 'approval.expired',
+               'approval.cancelled', 'model.changed',
+               'thinking.level.changed', 'compaction.created',
+               'compaction.failed', 'terminal.session.started',
+               'terminal.session.ended', 'run.failed'
+             )
+           ORDER BY seq ASC`,
+        )
+        .all(sessionId, lowerSeq, upperSeq) as EventRow[]
+    ).filter(isActiveBranchEvent);
+    const selectedIds = selected.map((event) =>
+      stringField(record(event.payload), "messageId"),
+    );
+    const associatedRows = this.#associatedTranscriptRows(
+      sessionId,
+      selectedIds,
+      windowRows
+        .filter((row) => row.type === "approval.requested")
+        .map((row) =>
+          stringField(record(eventFromRow(row).payload), "approvalId"),
+        ),
+    ).filter(isActiveBranchEvent);
+    const rows = [
+      ...new Map(
+        [...windowRows, ...associatedRows].map((row) => [row.seq, row]),
+      ).values(),
+    ].sort((a, b) => a.seq - b.seq);
+    return {
+      sessionId,
+      branchId: session.active_branch_id,
+      upToSeq: session.last_seq,
+      turns: compactTurns(selected, rows.map(eventFromRow)),
+      hasOlder: start > 0,
+      hasNewer: end < activeUsers.length,
+    };
+  }
+
+  async getToolCallDetail(
+    sessionId: string,
+    toolCallId: string,
+  ): Promise<ToolCallDetail | null> {
+    const row = this.#db
+      .prepare(`SELECT * FROM tool_calls WHERE session_id = ? AND id = ?`)
+      .get(sessionId, toolCallId) as ToolCallRow | undefined;
+    if (!row) return null;
+    return {
+      toolCallId: row.id,
+      sessionId: row.session_id,
+      branchId: row.branch_id,
+      ...(row.message_id ? { messageId: row.message_id } : {}),
+      name: row.name,
+      args: row.args === null ? null : (JSON.parse(row.args) as unknown),
+      ...(row.result === null
+        ? {}
+        : { result: JSON.parse(row.result) as unknown }),
+      status: row.status,
+      startedSeq: row.started_seq,
+      ...(row.ended_seq === null ? {} : { endedSeq: row.ended_seq }),
       createdAt: row.created_at,
-    }));
+    };
+  }
+
+  #activeBranchSegments(branchId: string): Map<string, number | null> {
+    const segments = new Map<string, number | null>();
+    let currentId: string | null = branchId;
+    let upper: number | null = null;
+    while (currentId) {
+      const row = this.#db
+        .prepare(
+          "SELECT id, parent_branch_id, forked_from_seq FROM branches WHERE id = ?",
+        )
+        .get(currentId) as BranchRow | undefined;
+      if (!row) break;
+      segments.set(row.id, upper);
+      upper = row.forked_from_seq;
+      currentId = row.parent_branch_id;
+    }
+    return segments;
+  }
+
+  #associatedTranscriptRows(
+    sessionId: string,
+    userMessageIds: string[],
+    windowApprovalIds: string[],
+  ): EventRow[] {
+    const byPayloadIds = (
+      types: string[],
+      jsonPath: string,
+      ids: string[],
+    ): EventRow[] => {
+      if (ids.length === 0) return [];
+      const typeSlots = types.map(() => "?").join(", ");
+      const idSlots = ids.map(() => "?").join(", ");
+      return this.#db
+        .prepare(
+          `SELECT session_id, branch_id, seq, type, v, source_kind,
+                  source_runtime, source_client_id,
+                  CASE
+                    WHEN type = 'tool.call.completed'
+                      THEN json_remove(payload, '$.result')
+                    WHEN type IN ('tool.call.failed', 'tool.call.aborted')
+                      THEN json_remove(payload, '$.partialOutput')
+                    ELSE payload
+                  END AS payload,
+                  created_at
+           FROM events
+           WHERE session_id = ? AND type IN (${typeSlots})
+             AND json_extract(payload, ?) IN (${idSlots})`,
+        )
+        .all(sessionId, ...types, jsonPath, ...ids) as EventRow[];
+    };
+    const assistantStarts = byPayloadIds(
+      ["message.assistant.started"],
+      "$.inResponseTo",
+      userMessageIds,
+    );
+    const assistantIds = assistantStarts.map((row) =>
+      stringField(record(eventFromRow(row).payload), "messageId"),
+    );
+    const assistantEnds = byPayloadIds(
+      [
+        "message.assistant.completed",
+        "message.assistant.aborted",
+        "message.assistant.failed",
+      ],
+      "$.messageId",
+      assistantIds,
+    );
+    const toolStarts = byPayloadIds(
+      ["tool.call.started"],
+      "$.messageId",
+      assistantIds,
+    );
+    const toolIds = toolStarts.map((row) =>
+      stringField(record(eventFromRow(row).payload), "toolCallId"),
+    );
+    const toolEnds = byPayloadIds(
+      [
+        "tool.call.completed",
+        "tool.call.failed",
+        "tool.call.aborted",
+        "tool.call.denied",
+      ],
+      "$.toolCallId",
+      toolIds,
+    );
+    const approvalStarts = byPayloadIds(
+      ["approval.requested"],
+      "$.toolCallId",
+      toolIds,
+    );
+    const approvalIds = approvalStarts.map((row) =>
+      stringField(record(eventFromRow(row).payload), "approvalId"),
+    );
+    const approvalEnds = byPayloadIds(
+      ["approval.responded", "approval.expired", "approval.cancelled"],
+      "$.approvalId",
+      [...new Set([...approvalIds, ...windowApprovalIds])],
+    );
+    const runFailures = byPayloadIds(
+      ["run.failed"],
+      "$.triggerMessageId",
+      userMessageIds,
+    );
+    return [
+      ...assistantStarts,
+      ...assistantEnds,
+      ...toolStarts,
+      ...toolEnds,
+      ...approvalStarts,
+      ...approvalEnds,
+      ...runFailures,
+    ];
   }
 
   insertImport(
@@ -2138,6 +2437,323 @@ function record(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === "object"
     ? (payload as Record<string, unknown>)
     : {};
+}
+
+function activeUserEvents(events: AgenaEvent[]): AgenaEvent[] {
+  const users = events.map((event) => {
+    const payload = record(event.payload);
+    return {
+      event,
+      messageId: stringField(payload, "messageId"),
+      editedFromMessageId:
+        typeof payload.editedFromMessageId === "string"
+          ? payload.editedFromMessageId
+          : undefined,
+    };
+  });
+  if (!users.some((user) => user.editedFromMessageId)) return events;
+  const byId = new Map(users.map((user) => [user.messageId, user]));
+  const previous = new Map<string, string | undefined>();
+  for (let index = 0; index < users.length; index += 1) {
+    previous.set(users[index]?.messageId ?? "", users[index - 1]?.messageId);
+  }
+  const active = new Set<string>();
+  let current = users.at(-1);
+  while (current && !active.has(current.messageId)) {
+    active.add(current.messageId);
+    const parentId = current.editedFromMessageId
+      ? previous.get(current.editedFromMessageId)
+      : previous.get(current.messageId);
+    current = parentId ? byId.get(parentId) : undefined;
+  }
+  return users
+    .filter((user) => active.has(user.messageId))
+    .map((user) => user.event);
+}
+
+function compactTurns(
+  selectedUsers: AgenaEvent[],
+  events: AgenaEvent[],
+): CompactTranscriptTurn[] {
+  type AssistantEntry = Extract<CompactTranscriptEntry, { kind: "assistant" }>;
+  type ToolEntry = Extract<CompactTranscriptEntry, { kind: "tool" }>;
+  type ApprovalEntry = Extract<CompactTranscriptEntry, { kind: "approval" }>;
+  const turns = new Map<string, CompactTranscriptTurn>();
+  for (const event of selectedUsers) {
+    const payload = record(event.payload);
+    const messageId = stringField(payload, "messageId");
+    const user: CompactTranscriptUser = {
+      ...compactBase(event),
+      kind: "user",
+      messageId,
+      content: payload.content as ContentBlock[],
+      ...(payload.queued === "steer" || payload.queued === "followUp"
+        ? { queued: payload.queued }
+        : {}),
+      ...(typeof payload.editedFromMessageId === "string"
+        ? { editedFromMessageId: payload.editedFromMessageId }
+        : {}),
+    };
+    turns.set(messageId, { user, entries: [] });
+  }
+  const assistantUsers = new Map<string, string>();
+  const assistantModels = new Map<string, AssistantEntry["model"]>();
+  const toolUsers = new Map<string, string>();
+  const toolEntries = new Map<string, ToolEntry>();
+  const approvalEntries = new Map<string, ApprovalEntry>();
+  let currentUserId: string | undefined;
+  const append = (
+    userId: string | undefined,
+    entry: CompactTranscriptEntry,
+  ) => {
+    if (userId) turns.get(userId)?.entries.push(entry);
+  };
+  for (const event of events) {
+    const payload = record(event.payload);
+    if (event.type === "message.user.created") {
+      currentUserId = stringField(payload, "messageId");
+      continue;
+    }
+    if (event.type === "message.assistant.started") {
+      const messageId = stringField(payload, "messageId");
+      assistantUsers.set(messageId, stringField(payload, "inResponseTo"));
+      assistantModels.set(messageId, payload.model as AssistantEntry["model"]);
+      continue;
+    }
+    if (
+      event.type === "message.assistant.completed" ||
+      event.type === "message.assistant.aborted" ||
+      event.type === "message.assistant.failed"
+    ) {
+      const messageId = stringField(payload, "messageId");
+      const shared = {
+        ...compactBase(event),
+        kind: "assistant" as const,
+        messageId,
+      };
+      const entry: AssistantEntry =
+        event.type === "message.assistant.completed"
+          ? {
+              ...shared,
+              content: payload.content as ContentBlock[],
+              model: payload.model as AssistantEntry["model"],
+              status: "completed",
+              stopReason: payload.stopReason as AssistantEntry["stopReason"],
+              ...(payload.usage
+                ? {
+                    usage: payload.usage as NonNullable<
+                      AssistantEntry["usage"]
+                    >,
+                  }
+                : {}),
+            }
+          : event.type === "message.assistant.aborted"
+            ? {
+                ...shared,
+                content: payload.partialContent as ContentBlock[],
+                status: "aborted",
+                abortReason: payload.reason as NonNullable<
+                  AssistantEntry["abortReason"]
+                >,
+                ...(assistantModels.get(messageId)
+                  ? { model: assistantModels.get(messageId) }
+                  : {}),
+              }
+            : {
+                ...shared,
+                content: payload.partialContent as ContentBlock[],
+                status: "failed",
+                error: payload.error as NonNullable<AssistantEntry["error"]>,
+                ...(assistantModels.get(messageId)
+                  ? { model: assistantModels.get(messageId) }
+                  : {}),
+              };
+      const userId = assistantUsers.get(messageId) ?? currentUserId;
+      if (userId && !assistantUsers.has(messageId)) {
+        assistantUsers.set(messageId, userId);
+      }
+      append(userId, entry);
+      continue;
+    }
+    if (event.type === "message.runtime.created") {
+      append(currentUserId, {
+        ...compactBase(event),
+        kind: "runtime",
+        messageId: stringField(payload, "messageId"),
+        runtimeType: payload.runtimeType as
+          | "custom"
+          | "bash"
+          | "branch-summary",
+        content: payload.content as ContentBlock[],
+        ...(payload.meta
+          ? {
+              meta: payload.meta as NonNullable<
+                Extract<CompactTranscriptEntry, { kind: "runtime" }>["meta"]
+              >,
+            }
+          : {}),
+      });
+      continue;
+    }
+    if (event.type === "tool.call.started") {
+      const toolCallId = stringField(payload, "toolCallId");
+      const messageId = stringField(payload, "messageId");
+      const userId = assistantUsers.get(messageId);
+      const entry: ToolEntry = {
+        ...compactBase(event),
+        kind: "tool",
+        toolCallId,
+        messageId,
+        name: stringField(payload, "name"),
+        argsPreview: previewValue(payload.args),
+        status: "running",
+        hasDetails: true,
+      };
+      toolUsers.set(toolCallId, userId ?? "");
+      toolEntries.set(toolCallId, entry);
+      append(userId, entry);
+      continue;
+    }
+    if (event.type.startsWith("tool.call.")) {
+      const toolCallId = stringField(payload, "toolCallId");
+      const entry = toolEntries.get(toolCallId);
+      if (!entry) continue;
+      if (event.type === "tool.call.completed") {
+        entry.status = "completed";
+        entry.durationMs = payload.durationMs as number;
+      } else if (event.type === "tool.call.failed") {
+        entry.status = "failed";
+        entry.error = payload.error as NonNullable<ToolEntry["error"]>;
+        if (typeof payload.durationMs === "number") {
+          entry.durationMs = payload.durationMs;
+        }
+      } else if (event.type === "tool.call.aborted") {
+        entry.status = "aborted";
+        entry.abortReason = String(payload.reason ?? "runtime_error");
+      } else if (event.type === "tool.call.denied") {
+        entry.status = "denied";
+        entry.deniedReason = String(payload.reason ?? "policy");
+        if (typeof payload.approvalId === "string") {
+          entry.approvalId = payload.approvalId;
+        }
+      }
+      continue;
+    }
+    if (event.type === "approval.requested") {
+      const approvalId = stringField(payload, "approvalId");
+      const entry: ApprovalEntry = {
+        ...compactBase(event),
+        kind: "approval",
+        approvalId,
+        request: payload as ApprovalEntry["request"],
+        state: "pending",
+      };
+      approvalEntries.set(approvalId, entry);
+      const toolCallId =
+        typeof payload.toolCallId === "string" ? payload.toolCallId : undefined;
+      append(toolCallId ? toolUsers.get(toolCallId) : currentUserId, entry);
+      continue;
+    }
+    if (event.type.startsWith("approval.")) {
+      const approvalId = stringField(payload, "approvalId");
+      const entry = approvalEntries.get(approvalId);
+      if (!entry) continue;
+      if (event.type === "approval.responded") {
+        entry.state = "responded";
+        entry.response = payload.response as NonNullable<
+          ApprovalEntry["response"]
+        >;
+        entry.respondedBy = stringField(payload, "respondedBy");
+      } else if (event.type === "approval.expired") {
+        entry.state = "expired";
+      } else if (event.type === "approval.cancelled") {
+        entry.state = "cancelled";
+        entry.cancelReason = String(payload.reason ?? "runtime_cancelled");
+      }
+      continue;
+    }
+    const marker = compactMarker(event, payload);
+    if (marker) {
+      const userId =
+        event.type === "run.failed" &&
+        typeof payload.triggerMessageId === "string"
+          ? payload.triggerMessageId
+          : currentUserId;
+      append(userId, marker);
+    }
+  }
+  return [...turns.values()].map((turn) => ({
+    ...turn,
+    entries: turn.entries.sort((a, b) => a.seq - b.seq),
+  }));
+}
+
+function compactBase(event: AgenaEvent) {
+  return { seq: event.seq, at: event.createdAt, source: event.source };
+}
+
+function compactMarker(
+  event: AgenaEvent,
+  payload: Record<string, unknown>,
+): CompactTranscriptEntry | null {
+  const base = { ...compactBase(event), kind: "marker" as const };
+  switch (event.type) {
+    case "model.changed": {
+      const to = record(payload.to);
+      return {
+        ...base,
+        markerKind: "model",
+        text: `model → ${String(to.provider)}/${String(to.id)}`,
+      };
+    }
+    case "thinking.level.changed":
+      return {
+        ...base,
+        markerKind: "thinking",
+        text: `thinking → ${String(payload.to)}`,
+      };
+    case "compaction.created":
+      return {
+        ...base,
+        markerKind: "compaction",
+        text: `compacted history up to seq ${String(payload.replacesUpToSeq)}`,
+      };
+    case "compaction.failed":
+      return {
+        ...base,
+        markerKind: "compaction-failed",
+        text: `compaction failed: ${String(record(payload.error).code)}`,
+      };
+    case "terminal.session.started":
+      return {
+        ...base,
+        markerKind: "terminal-start",
+        text: `terminal opened (${String(payload.shell)})`,
+      };
+    case "terminal.session.ended":
+      return {
+        ...base,
+        markerKind: "terminal-end",
+        text: `terminal closed${payload.exitCode === null ? "" : ` (exit ${String(payload.exitCode)})`}`,
+      };
+    case "run.failed":
+      return {
+        ...base,
+        markerKind: "run-failed",
+        text: `run failed${payload.phase ? ` at ${String(payload.phase)}` : ""}: ${String(record(payload.error).code)}`,
+      };
+    default:
+      return null;
+  }
+}
+
+function previewValue(value: unknown): string {
+  try {
+    const json = JSON.stringify(value);
+    return (json ?? String(value)).slice(0, 500);
+  } catch {
+    return String(value).slice(0, 500);
+  }
 }
 
 function stringField(payload: Record<string, unknown>, key: string): string {

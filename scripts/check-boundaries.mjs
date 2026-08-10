@@ -15,6 +15,11 @@ export const EDGES = {
   "@agena/tui": ["@agena/client", "@agena/protocol"],
   "@agena/desktop": ["@agena/client", "@agena/importer", "@agena/protocol"],
   "@agena/desktop-new": ["@agena/client", "@agena/importer", "@agena/protocol"],
+  "@agena/desktop-chamber": [
+    "@agena/client",
+    "@agena/importer",
+    "@agena/protocol",
+  ],
   "@agena/conductor": ["@agena/client"],
   "@agena/daemon": [
     "@agena/core",

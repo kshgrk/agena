@@ -1,4 +1,5 @@
-import "../../desktopNew/src/renderer/styles/theme.css";
+import "../../desktopChamber/src/renderer/styles/theme.css";
+import "../../desktopChamber/src/renderer/styles/openchamber.css";
 import { ulid } from "@agena/client";
 import { SecureStorage } from "@aparajita/capacitor-secure-storage";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -9,6 +10,17 @@ import { createRoot } from "react-dom/client";
 type Connection = { url: string; token: string };
 const CONNECTION_KEY = "agena.connection";
 const CLIENT_ID_KEY = "agena.clientId";
+
+if (Capacitor.isNativePlatform()) {
+  document.documentElement.dataset.nativePlatform = Capacitor.getPlatform();
+  void CapacitorApp.addListener("backButton", ({ canGoBack }) => {
+    const event = new Event("agena:native-back", { cancelable: true });
+    window.dispatchEvent(event);
+    if (event.defaultPrevented) return;
+    if (canGoBack) window.history.back();
+    else void CapacitorApp.minimizeApp();
+  });
+}
 
 async function readConnection(): Promise<Connection | null> {
   const value = await SecureStorage.get(CONNECTION_KEY);
@@ -174,8 +186,8 @@ async function boot(): Promise<void> {
     },
   };
   const [{ App }, { ensureBridge }] = await Promise.all([
-    import("../../desktopNew/src/renderer/app.tsx"),
-    import("../../desktopNew/src/renderer/lib/bridge.ts"),
+    import("../../desktopChamber/src/renderer/app.tsx"),
+    import("../../desktopChamber/src/renderer/lib/bridge.ts"),
   ]);
   await ensureBridge();
   root.render(

@@ -19,7 +19,7 @@ test("delegation creates ordinary read-only child sessions and returns summaries
     const session = await getSession(sessionId);
     const parentSessionId = parents.get(sessionId);
     return session && parentSessionId
-      ? { ...session, parentSessionId }
+      ? { ...session, parentSessionId, sessionKind: "subagent" as const }
       : session;
   };
   store.createSubagentSession = async (input: {
@@ -56,7 +56,11 @@ test("delegation creates ordinary read-only child sessions and returns summaries
       ],
     });
     return {
-      session: { ...session, parentSessionId: input.parentSessionId },
+      session: {
+        ...session,
+        parentSessionId: input.parentSessionId,
+        sessionKind: "subagent" as const,
+      },
       task,
     };
   };

@@ -1,0 +1,46 @@
+/* Re-theme @git-diff-view/react with Agena tokens (design.md §9). The library
+ * paints from --diff-*-- vars scoped under .diff-tailwindcss-wrapper; both of
+ * its theme blocks are overridden with the same token set so our [data-theme]
+ * flip (not the library's prop alone) controls every color. Imported AFTER
+ * the library stylesheet — equal specificity, later wins. */
+
+.diff-tailwindcss-wrapper[data-theme="light"] .diff-style-root,
+.diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
+  --diff-border--: var(--border-subtle);
+  --diff-add-content--: var(--diff-add-bg);
+  --diff-del-content--: var(--diff-del-bg);
+  --diff-add-lineNumber--: var(--diff-add-gutter);
+  --diff-del-lineNumber--: var(--diff-del-gutter);
+  --diff-plain-content--: var(--bg-inset);
+  --diff-expand-content--: var(--bg-surface);
+  --diff-plain-lineNumber--: var(--bg-inset);
+  --diff-expand-lineNumber--: var(--bg-surface);
+  --diff-plain-lineNumber-color--: var(--fg-faint);
+  --diff-expand-lineNumber-color--: var(--fg-faint);
+  --diff-hunk-content--: var(--bg-surface);
+  --diff-hunk-content-color--: var(--fg-muted);
+  --diff-hunk-lineNumber--: var(--bg-surface);
+  --diff-hunk-lineNumber-hover--: var(--accent);
+  --diff-add-content-highlight--: var(--diff-add-hl);
+  --diff-del-content-highlight--: var(--diff-del-hl);
+  --diff-add-widget--: var(--accent);
+  --diff-add-widget-color--: var(--accent-fg);
+  --diff-empty-content--: var(--bg-surface);
+
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+
+/* Line numbers: 11px, faint (design.md §9); mono is inherited. */
+.diff-tailwindcss-wrapper .diff-line-old-num,
+.diff-tailwindcss-wrapper .diff-line-new-num,
+.diff-tailwindcss-wrapper .diff-line-num {
+  font-size: var(--text-2xs);
+}
+
+/* A sticky gutter covers horizontally scrolled code on phone-width views. */
+[data-mobile="true"] .diff-tailwindcss-wrapper .diff-line-old-num,
+[data-mobile="true"] .diff-tailwindcss-wrapper .diff-line-new-num,
+[data-mobile="true"] .diff-tailwindcss-wrapper .diff-line-num {
+  position: static;
+}

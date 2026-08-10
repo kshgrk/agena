@@ -131,6 +131,288 @@ test("lists user-message anchors in sequence order", async () => {
   store.close();
 });
 
+test("reads complete turn pages without eager tool results and loads tool detail on demand", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  const u1 = ulid();
+  const u2 = ulid();
+  const u3 = ulid();
+  const assistantId = ulid();
+  const toolCallId = ulid();
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: { messageId: u1, content: [{ type: "text", text: "one" }] },
+      },
+      {
+        type: "message.assistant.started",
+        v: 1,
+        source: pi,
+        payload: {
+          messageId: assistantId,
+          runId: ulid(),
+          turnId: ulid(),
+          model: { provider: "fake", id: "model" },
+          inResponseTo: u1,
+        },
+      },
+      {
+        type: "tool.call.started",
+        v: 1,
+        source: pi,
+        payload: {
+          toolCallId,
+          messageId: assistantId,
+          runId: ulid(),
+          turnId: ulid(),
+          name: "browser",
+          args: { url: "https://example.com" },
+        },
+      },
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: {
+          messageId: u2,
+          content: [{ type: "text", text: "queued next" }],
+          queued: "followUp",
+        },
+      },
+      {
+        type: "tool.call.completed",
+        v: 1,
+        source: pi,
+        payload: {
+          toolCallId,
+          result: [{ type: "text", text: "heavy-result-body" }],
+          durationMs: 12,
+        },
+      },
+      {
+        type: "message.assistant.completed",
+        v: 1,
+        source: pi,
+        payload: {
+          messageId: assistantId,
+          content: [{ type: "text", text: "done" }],
+          model: { provider: "fake", id: "model" },
+          stopReason: "end_turn",
+        },
+      },
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: {
+          messageId: u3,
+          content: [{ type: "text", text: "three" }],
+        },
+      },
+    ],
+  });
+
+  const newest = await store.readCompactTranscript(session.sessionId, {
+    limitTurns: 2,
+  });
+  expect(newest).toMatchObject({
+    branchId: session.rootBranchId,
+    upToSeq: 8,
+    hasOlder: true,
+    hasNewer: false,
+  });
+  expect(newest.turns.map((turn) => turn.user.messageId)).toEqual([u2, u3]);
+
+  const older = await store.readCompactTranscript(session.sessionId, {
+    limitTurns: 2,
+    beforeMessageId: u3,
+  });
+  expect(older.turns.map((turn) => turn.user.messageId)).toEqual([u1, u2]);
+  expect(JSON.stringify(older)).not.toContain("heavy-result-body");
+  expect(older.turns[0]?.entries).toMatchObject([
+    {
+      kind: "tool",
+      toolCallId,
+      argsPreview: '{"url":"https://example.com"}',
+      status: "completed",
+      durationMs: 12,
+      hasDetails: true,
+    },
+    { kind: "assistant", content: [{ type: "text", text: "done" }] },
+  ]);
+  const firstOnly = await store.readCompactTranscript(session.sessionId, {
+    limitTurns: 1,
+    aroundMessageId: u1,
+  });
+  expect(firstOnly.turns[0]?.entries).toMatchObject([
+    { kind: "tool", status: "completed" },
+    { kind: "assistant", status: "completed" },
+  ]);
+
+  await expect(
+    store.getToolCallDetail(session.sessionId, toolCallId),
+  ).resolves.toMatchObject({
+    toolCallId,
+    args: { url: "https://example.com" },
+    result: [{ type: "text", text: "heavy-result-body" }],
+    status: "ok",
+  });
+  store.close();
+});
+
+test("compact transcript associates imported assistants and tools without start events", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  const userMessageId = ulid();
+  const assistantMessageId = ulid();
+  const finalAssistantMessageId = ulid();
+  const toolCallId = ulid();
+  const importer = { kind: "importer" } as const;
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: importer,
+        payload: {
+          messageId: userMessageId,
+          content: [{ type: "text", text: "inspect this" }],
+        },
+      },
+      {
+        type: "message.assistant.completed",
+        v: 1,
+        source: importer,
+        payload: {
+          messageId: assistantMessageId,
+          content: [{ type: "text", text: "I will inspect it" }],
+          model: { provider: "imported", id: "model" },
+          stopReason: "tool_use",
+        },
+      },
+      {
+        type: "tool.call.started",
+        v: 1,
+        source: importer,
+        payload: {
+          toolCallId,
+          messageId: assistantMessageId,
+          runId: ulid(),
+          turnId: ulid(),
+          name: "read",
+          args: { path: "note.txt" },
+        },
+      },
+      {
+        type: "tool.call.completed",
+        v: 1,
+        source: importer,
+        payload: {
+          toolCallId,
+          result: [{ type: "text", text: "contents" }],
+          durationMs: 0,
+        },
+      },
+      {
+        type: "message.assistant.completed",
+        v: 1,
+        source: importer,
+        payload: {
+          messageId: finalAssistantMessageId,
+          content: [{ type: "text", text: "Inspection complete" }],
+          model: { provider: "imported", id: "model" },
+          stopReason: "end_turn",
+        },
+      },
+    ],
+  });
+
+  const page = await store.readCompactTranscript(session.sessionId, {
+    limitTurns: 10,
+  });
+  expect(page.turns[0]?.entries).toMatchObject([
+    {
+      kind: "assistant",
+      messageId: assistantMessageId,
+      content: [{ type: "text", text: "I will inspect it" }],
+    },
+    { kind: "tool", toolCallId, status: "completed" },
+    {
+      kind: "assistant",
+      messageId: finalAssistantMessageId,
+      content: [{ type: "text", text: "Inspection complete" }],
+    },
+  ]);
+  store.close();
+});
+
+test("compact transcript follows the active edited-message path", async () => {
+  const store = new SqliteEventStore(dbPath());
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  const first = ulid();
+  const replaced = ulid();
+  const edit = ulid();
+  await store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: {
+          messageId: first,
+          content: [{ type: "text", text: "first" }],
+        },
+      },
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: {
+          messageId: replaced,
+          content: [{ type: "text", text: "old second" }],
+        },
+      },
+      {
+        type: "message.user.created",
+        v: 1,
+        source: user,
+        payload: {
+          messageId: edit,
+          editedFromMessageId: replaced,
+          content: [{ type: "text", text: "new second" }],
+        },
+      },
+    ],
+  });
+
+  const page = await store.readCompactTranscript(session.sessionId, {
+    limitTurns: 10,
+  });
+  expect(page.turns.map((turn) => turn.user.messageId)).toEqual([first, edit]);
+  await expect(
+    store.listUserMessages(session.sessionId),
+  ).resolves.toMatchObject([
+    { messageId: first, preview: "first" },
+    { messageId: edit, preview: "new second" },
+  ]);
+  await expect(
+    store.readCompactTranscript(session.sessionId, {
+      limitTurns: 1,
+      aroundMessageId: replaced,
+    }),
+  ).rejects.toThrow(`unknown active user message ${replaced}`);
+  store.close();
+});
+
 test("persists runtime session refs across store reopen", async () => {
   const path = dbPath();
   const first = new SqliteEventStore(path);

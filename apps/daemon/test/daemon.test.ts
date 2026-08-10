@@ -920,6 +920,94 @@ test("snapshots restore workspace files without deleting session history", async
   );
 });
 
+test("compact transcript and tool detail routes use the SQLite projections", async () => {
+  const daemon = await boot(new FakeRuntimeAdapter(), {
+    stateDir: stateDir(),
+    storage: "sqlite",
+  });
+  const session = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const userMessageId = "user-1";
+  const assistantMessageId = "assistant-1";
+  const toolCallId = "tool-1";
+  await daemon.store.appendEvents({
+    sessionId: session.sessionId,
+    branchId: session.rootBranchId,
+    events: [
+      {
+        type: "message.user.created",
+        v: 1,
+        source: { kind: "user" },
+        payload: {
+          messageId: userMessageId,
+          content: [{ type: "text", text: "research this" }],
+        },
+      },
+      {
+        type: "message.assistant.started",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: {
+          messageId: assistantMessageId,
+          runId: "run-1",
+          turnId: "turn-1",
+          model: { provider: "fake", id: "fake-1" },
+          inResponseTo: userMessageId,
+        },
+      },
+      {
+        type: "tool.call.started",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: {
+          toolCallId,
+          messageId: assistantMessageId,
+          runId: "run-1",
+          turnId: "turn-1",
+          name: "browser",
+          args: { query: "agena" },
+        },
+      },
+      {
+        type: "tool.call.completed",
+        v: 1,
+        source: { kind: "runtime", runtime: "pi" },
+        payload: {
+          toolCallId,
+          result: [{ type: "text", text: "large private output" }],
+          durationMs: 4,
+        },
+      },
+    ],
+  });
+  const headers = { authorization: `Bearer ${TOKEN}` };
+  const transcriptResponse = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/sessions/${session.sessionId}/transcript?limitTurns=1`,
+    { headers },
+  );
+  expect(transcriptResponse.status).toBe(200);
+  const transcript = (await transcriptResponse.json()) as {
+    upToSeq: number;
+    turns: Array<{ entries: Array<{ kind: string }> }>;
+  };
+  expect(transcript.upToSeq).toBe(5);
+  expect(transcript.turns[0]?.entries).toMatchObject([
+    { kind: "tool", status: "completed" },
+  ]);
+  expect(JSON.stringify(transcript)).not.toContain("large private output");
+
+  const detailResponse = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/sessions/${session.sessionId}/tool-calls/${toolCallId}`,
+    { headers },
+  );
+  expect(detailResponse.status).toBe(200);
+  expect(await detailResponse.json()).toMatchObject({
+    toolCall: {
+      toolCallId,
+      result: [{ type: "text", text: "large private output" }],
+    },
+  });
+});
+
 test("subscribe → prompt: requestId acks and an ordered, gap-free stream", async () => {
   const daemon = await boot();
   const session = await daemon.store.createSession({ workspaceId: "ws-1" });

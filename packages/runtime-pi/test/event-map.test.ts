@@ -146,7 +146,11 @@ it("maps the M1 text-streaming fixture to the exact RuntimeEvent stream", () => 
 
 it("maps Pi tool execution into runtime tool events", () => {
   let n = 0;
-  const state = createMapperState(() => `id-${++n}`);
+  let now = 1_000;
+  const state = createMapperState(
+    () => `id-${++n}`,
+    () => now,
+  );
   state.triggerMessageId = "m-user";
   const out = [
     { type: "agent_start" },
@@ -180,7 +184,10 @@ it("maps Pi tool execution into runtime tool events", () => {
       result: "ok",
       isError: false,
     },
-  ].flatMap((ev) => mapPiEvent(state, ev as AgentSessionEvent));
+  ].flatMap((ev) => {
+    if (ev.type === "tool_execution_end") now = 2_234;
+    return mapPiEvent(state, ev as AgentSessionEvent);
+  });
 
   expect(out).toEqual([
     {
@@ -230,7 +237,7 @@ it("maps Pi tool execution into runtime tool events", () => {
       type: "tool-call-completed",
       toolCallId: "t1",
       result: [{ type: "text", text: "ok" }],
-      durationMs: 0,
+      durationMs: 1234,
     },
   ] satisfies RuntimeEvent[]);
 });

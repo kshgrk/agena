@@ -37,6 +37,7 @@ import type {
   SessionFilter,
   SessionRecord,
   SessionStatusStore,
+  TranscriptQueryStore,
 } from "@agena/core";
 import {
   AgentOrchestrator,
@@ -50,6 +51,7 @@ import {
 import { synthesizeEvents } from "@agena/importer";
 import {
   type CreateSessionRequest,
+  compactTranscriptQuerySchema,
   completeMcpOAuthRequestSchema,
   createDerivedSessionRequestSchema,
   createPairingRequestSchema,
@@ -1394,6 +1396,86 @@ export async function startDaemon(
     }
     return c.json({ messages: await messages.listUserMessages(sessionId) });
   });
+  app.get("/v1/sessions/:id/transcript", async (c) => {
+    const parsed = compactTranscriptQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid compact transcript query",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    const transcripts = transcriptQueryStore(store);
+    if (!transcripts) {
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: "store does not support compact transcript queries",
+          retryable: false,
+        },
+        500,
+      );
+    }
+    try {
+      return c.json(
+        await transcripts.readCompactTranscript(c.req.param("id"), parsed.data),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json(
+        {
+          code:
+            error instanceof StoreError && error.code === "session_not_found"
+              ? "SESSION_NOT_FOUND"
+              : "INVALID_PAYLOAD",
+          message,
+          retryable: false,
+        },
+        404,
+      );
+    }
+  });
+  app.get("/v1/sessions/:id/tool-calls/:toolCallId", async (c) => {
+    const transcripts = transcriptQueryStore(store);
+    if (!transcripts) {
+      return c.json(
+        {
+          code: "INTERNAL",
+          message: "store does not support tool-call detail queries",
+          retryable: false,
+        },
+        500,
+      );
+    }
+    if (!(await store.getSession(c.req.param("id")))) {
+      return c.json(
+        {
+          code: "SESSION_NOT_FOUND",
+          message: `unknown session ${c.req.param("id")}`,
+          retryable: false,
+        },
+        404,
+      );
+    }
+    const toolCall = await transcripts.getToolCallDetail(
+      c.req.param("id"),
+      c.req.param("toolCallId"),
+    );
+    return toolCall
+      ? c.json({ toolCall })
+      : c.json(
+          {
+            code: "INVALID_PAYLOAD",
+            message: `unknown tool call ${c.req.param("toolCallId")}`,
+            retryable: false,
+          },
+          404,
+        );
+  });
   app.patch("/v1/sessions/:id", async (c) => {
     const parsed = updateSessionStatusRequestSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -1851,6 +1933,12 @@ function searchStore(store: EventStore): SearchStore | null {
 function messageQueryStore(store: EventStore): MessageQueryStore | null {
   return "listUserMessages" in store
     ? (store as EventStore & MessageQueryStore)
+    : null;
+}
+
+function transcriptQueryStore(store: EventStore): TranscriptQueryStore | null {
+  return "readCompactTranscript" in store && "getToolCallDetail" in store
+    ? (store as EventStore & TranscriptQueryStore)
     : null;
 }
 

@@ -3,7 +3,10 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-const desktopRenderer = new URL("../desktopNew/src/renderer/", import.meta.url);
+const desktopRenderer = new URL(
+  "../desktopChamber/src/renderer/",
+  import.meta.url,
+);
 const nodeShim = fileURLToPath(
   new URL("lib/node-builtins-shim.ts", desktopRenderer),
 );

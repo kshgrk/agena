@@ -811,4 +811,48 @@ describe("AgenaClient", () => {
       "http://127.0.0.1:7777/v1/ptys/pty%2F1",
     ]);
   });
+
+  it("wraps compact transcript paging and lazy tool detail routes", async () => {
+    const response = {
+      sessionId: "session/1",
+      branchId: "branch-1",
+      upToSeq: 42,
+      turns: [],
+      hasOlder: true,
+      hasNewer: false,
+    };
+    const toolCall = {
+      toolCallId: "tool/1",
+      sessionId: "session/1",
+      branchId: "branch-1",
+      name: "browser",
+      args: { url: "https://example.com" },
+      status: "ok",
+      startedSeq: 3,
+      endedSeq: 4,
+      createdAt: "2026-07-06T00:00:00.000Z",
+    };
+    const fetchMock = vi.fn(async (url: string) =>
+      Response.json(url.includes("/tool-calls/") ? { toolCall } : response),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new AgenaClient({
+      url: "http://127.0.0.1:7777/",
+      token: "secret",
+    });
+
+    await expect(
+      client.readCompactTranscript("session/1", {
+        limitTurns: 7,
+        aroundMessageId: "message/1",
+      }),
+    ).resolves.toEqual(response);
+    await expect(
+      client.getToolCallDetail("session/1", "tool/1"),
+    ).resolves.toEqual(toolCall);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:7777/v1/sessions/session%2F1/transcript?limitTurns=7&aroundMessageId=message%2F1",
+      "http://127.0.0.1:7777/v1/sessions/session%2F1/tool-calls/tool%2F1",
+    ]);
+  });
 });
