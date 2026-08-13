@@ -46,6 +46,11 @@ export type UseChatAutoFollowResult = {
   getAnimationHandlers: (id: string) => AnimationHandlers;
 };
 
+/** Fired by the shell whenever the dock layout changes (splits, tab moves).
+ * Dock containers reparent panel DOM on those operations, which silently
+ * resets scrollTop with no resize tick — listeners re-apply scroll state. */
+export const DOCK_RELAYOUT_EVENT = "oc:dock-relayout";
+
 const AUTO_TTL_MS = 1500;
 const ANIMATION_GUARD_MS = 350;
 const SETTLE_MS = 300;
@@ -77,6 +82,11 @@ export function useChatAutoFollow({
   const settlingRef = useRef(false);
   const mobileRef = useRef(mobile);
   const previousTopRef = useRef(0);
+  // dockview hides inactive tabs with display:none, which zeroes the scroll
+  // element and resets scrollTop; remember the last visible offset so reshow
+  // restores the reader's place instead of landing at the top.
+  const lastVisibleTopRef = useRef(0);
+  const hiddenRef = useRef(false);
   const autoRef = useRef<{ top: number; at: number } | null>(null);
   const animationGuardUntil = useRef(0);
   const keyboardAnimating = useRef(false);
@@ -181,11 +191,12 @@ export function useChatAutoFollow({
     updateButton();
   }, [beginEntryStick, pin, updateButton]);
 
+  // Pin before first paint — a rAF pin paints one frame at the top first,
+  // which reads as a flash-then-jump on every session open.
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionKey is the restore trigger
-  useEffect(() => {
+  useLayoutEffect(() => {
     handlers.current.clear();
-    const frame = requestAnimationFrame(restoreAtLatest);
-    return () => cancelAnimationFrame(frame);
+    restoreAtLatest();
   }, [sessionKey, restoreAtLatest]);
 
   useEffect(() => {
@@ -252,6 +263,13 @@ export function useChatAutoFollow({
       }
     };
     const onScroll = () => {
+      // The browser zeroes scrollTop while display:none and delivers the
+      // stray scroll event around reshow, BEFORE ResizeObserver callbacks.
+      // Acting on it would save top=0 and flip following → released, landing
+      // the reader at the top. Ignore everything until the reshow restore
+      // (below, in the ResizeObserver) has run.
+      if (hiddenRef.current || container.clientHeight === 0) return;
+      lastVisibleTopRef.current = container.scrollTop;
       const previousTop = previousTopRef.current;
       const auto = autoRef.current;
       const programmatic = Boolean(
@@ -292,6 +310,23 @@ export function useChatAutoFollow({
   useEffect(() => {
     if (!container || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
+      // display:none tab (dockview): freeze all follow logic while hidden,
+      // then restore deterministically on reshow — pin if following, else
+      // put the reader back where they were.
+      if (container.clientHeight === 0) {
+        hiddenRef.current = true;
+        return;
+      }
+      if (hiddenRef.current) {
+        hiddenRef.current = false;
+        if (stateRef.current === "following") pinNow();
+        else container.scrollTop = lastVisibleTopRef.current;
+        // Resync so the restore write itself never reads as user scrolling.
+        previousTopRef.current = container.scrollTop;
+        lastVisibleTopRef.current = container.scrollTop;
+        updateButton();
+        return;
+      }
       updateButton();
       if (keyboardAnimating.current) return;
       if (!canScroll(container)) {
@@ -311,7 +346,45 @@ export function useChatAutoFollow({
     if (container.firstElementChild)
       observer.observe(container.firstElementChild);
     return () => observer.disconnect();
-  }, [armEntryQuiet, container, isActive, pin, setFollowState, updateButton]);
+  }, [
+    armEntryQuiet,
+    container,
+    isActive,
+    pin,
+    pinNow,
+    setFollowState,
+    updateButton,
+  ]);
+
+  // Dockview reparents panel DOM when splits are created or tabs move between
+  // groups. A same-frame detach+reattach resets scrollTop to 0 with no
+  // ResizeObserver tick and dispatches the stray scroll event before rAF
+  // callbacks run. Freeze scroll handling synchronously, then re-apply the
+  // remembered state before the frame paints.
+  useEffect(() => {
+    let frame = 0;
+    const onRelayout = () => {
+      hiddenRef.current = true;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        // still hidden (tab switched away): the ResizeObserver reshow path
+        // finishes the restore when the pane becomes visible again
+        if (!el || el.clientHeight === 0) return;
+        hiddenRef.current = false;
+        if (stateRef.current === "following") pinNow();
+        else el.scrollTop = lastVisibleTopRef.current;
+        previousTopRef.current = el.scrollTop;
+        lastVisibleTopRef.current = el.scrollTop;
+        updateButton();
+      });
+    };
+    window.addEventListener(DOCK_RELAYOUT_EVENT, onRelayout);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener(DOCK_RELAYOUT_EVENT, onRelayout);
+    };
+  }, [pinNow, updateButton]);
 
   // Capacitor emits these around its visual-viewport keyboard choreography.
   // Stand down during the animation, then perform one deterministic re-pin.

@@ -296,6 +296,7 @@ export type AgenaBridge = {
     sourceMessageId: string | undefined,
     mode: SessionForkMode,
   ): Promise<ForkSessionResult>;
+  createQuickChat(sourceSessionId: string): Promise<ForkSessionResult>;
   navigateSession(sessionId: string, sourceMessageId: string): Promise<string>;
   createProject(name: string): Promise<OpenedProject>;
   /** Full teardown: db rows, workspace files, pi sessions, snapshots. */

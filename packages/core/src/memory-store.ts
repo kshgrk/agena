@@ -16,6 +16,7 @@ import {
   type CreateSessionInput,
   type CreateSnapshotRecordInput,
   type EventStore,
+  latestCompletedAssistant,
   normalizeSessionScope,
   type PendingApproval,
   pendingApprovalsFromEvents,
@@ -102,7 +103,11 @@ export class InMemoryEventStore implements EventStore {
         `unknown session ${input.parentSessionId}`,
       );
     }
-    if (input.mode === "fork" && !input.sourceMessageId) {
+    if (
+      input.mode === "fork" &&
+      input.purpose !== "quick_chat" &&
+      !input.sourceMessageId
+    ) {
       throw new StoreError(
         "invalid_payload",
         "sourceMessageId is required for fork",
@@ -125,17 +130,21 @@ export class InMemoryEventStore implements EventStore {
     }
     const now = new Date().toISOString();
     const record: SessionRecord = {
-      sessionId: ulid(),
+      sessionId: input.sessionId ?? ulid(),
       workspaceId: parent.record.workspaceId,
       ...((input.title ?? parent.record.title)
         ? { title: input.title ?? parent.record.title }
         : {}),
       rootBranchId: ulid(),
+      ...(input.runtimeSessionRef
+        ? { runtimeSessionRef: input.runtimeSessionRef }
+        : {}),
       lastSeq: 0,
       createdAt: now,
       updatedAt: now,
       status: "active",
       origin: parent.record.origin,
+      ...(input.purpose ? { purpose: input.purpose } : {}),
       scope: parent.record.scope,
       ...(parent.record.projectId
         ? { projectId: parent.record.projectId }
@@ -177,6 +186,7 @@ export class InMemoryEventStore implements EventStore {
             cwd: record.cwd,
             ...(record.hostCwdHint ? { hostCwdHint: record.hostCwdHint } : {}),
             rootBranchId: record.rootBranchId,
+            ...(record.purpose ? { purpose: record.purpose } : {}),
             derivedFrom: record.derivedFrom,
           },
         },
@@ -200,6 +210,20 @@ export class InMemoryEventStore implements EventStore {
     const runtimeEntryId = (event?.payload as { runtimeEntryId?: unknown })
       ?.runtimeEntryId;
     return typeof runtimeEntryId === "string" ? runtimeEntryId : null;
+  }
+
+  async getLatestCompletedAssistant(sessionId: string) {
+    const events = this.#sessions.get(sessionId)?.events;
+    if (!events) return null;
+    const completed = latestCompletedAssistant(events);
+    const messageId = (completed?.payload as { messageId?: unknown })
+      ?.messageId;
+    if (!completed || typeof messageId !== "string") return null;
+    return {
+      messageId,
+      seq: completed.seq,
+      runtimeEntryId: await this.getRuntimeMessageRef(sessionId, messageId),
+    };
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | null> {

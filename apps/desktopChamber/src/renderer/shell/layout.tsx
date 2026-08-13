@@ -14,6 +14,7 @@ import {
   type IHeaderActionsRenderer,
   themeAbyss,
 } from "dockview";
+import { MessageSquare } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChildSessionBanner } from "../features/agents/task-group.tsx";
@@ -26,11 +27,16 @@ import { pane as diffPane } from "../features/diff/index.ts";
 import { pane as filesPane } from "../features/files/index.ts";
 import { pane as inspectorPane } from "../features/inspector/index.ts";
 import { pane as searchPane } from "../features/search/index.ts";
+import {
+  sideChatsForRoot,
+  sideChatTitle,
+} from "../features/sessions/side-chats.ts";
 import { pane as snapshotsPane } from "../features/snapshots/index.ts";
 import { pane as terminalPane } from "../features/terminal/index.ts";
 import { pane as timelinePane } from "../features/timeline/index.ts";
-import { pane as transcriptPane } from "../features/transcript/index.ts";
+import { getBridge } from "../lib/bridge.ts";
 import { AgenaChamberChat } from "../openchamber/adapters/agena-chat.tsx";
+import { DOCK_RELAYOUT_EVENT } from "../openchamber/chat/use-chat-auto-follow.ts";
 import {
   ensureSubscribed,
   pushToast,
@@ -53,6 +59,7 @@ import {
 // ---- center panel: the session workspace ------------------------------------
 
 const SESSION_PANEL_PREFIX = "session:";
+const QUICK_CHAT_PANEL_PREFIX = "quick-chat:";
 const EMPTY_SESSION_PANEL = "session.empty";
 
 function sessionPanelId(sessionId: string): string {
@@ -63,6 +70,18 @@ function panelSessionId(panelId: string): string | null {
   return panelId.startsWith(SESSION_PANEL_PREFIX)
     ? panelId.slice(SESSION_PANEL_PREFIX.length)
     : null;
+}
+
+function quickChatPanelParts(
+  panelId: string,
+): { rootSessionId: string; sessionId: string } | null {
+  if (!panelId.startsWith(QUICK_CHAT_PANEL_PREFIX)) return null;
+  const [, rootSessionId, sessionId] = panelId.split(":");
+  return rootSessionId && sessionId ? { rootSessionId, sessionId } : null;
+}
+
+function quickChatSessionId(panelId: string): string | null {
+  return quickChatPanelParts(panelId)?.sessionId ?? null;
 }
 
 function sessionTabTitle(sessionId: string): string {
@@ -118,6 +137,66 @@ function workbenchPrefix(group: {
   };
 }
 
+function quickChatActions(
+  group: { readonly activePanel: { id: string } | undefined },
+  onCreate: (rootSessionId: string, sourceSessionId: string) => void,
+): IHeaderActionsRenderer {
+  const element = document.createElement("div");
+  element.className = "chamber-quick-chat-actions";
+  const select = document.createElement("select");
+  select.className = "chamber-quick-chat-add";
+  select.setAttribute("aria-label", "Create side chat");
+  select.title = "Create side chat";
+  element.append(select);
+
+  let dispose = () => {};
+  return {
+    element,
+    init({ containerApi }) {
+      const refresh = () => {
+        const parts = group.activePanel
+          ? quickChatPanelParts(group.activePanel.id)
+          : null;
+        element.hidden = !parts;
+        if (!parts) return;
+        const byId = useSessions.getState().byId;
+        select.replaceChildren(
+          new Option("+", ""),
+          new Option("From main chat", parts.rootSessionId),
+          new Option(
+            `From ${sideChatTitle(byId, parts.sessionId)}`,
+            parts.sessionId,
+          ),
+        );
+      };
+      const create = () => {
+        const parts = group.activePanel
+          ? quickChatPanelParts(group.activePanel.id)
+          : null;
+        const sourceSessionId = select.value;
+        select.value = "";
+        if (!parts || !sourceSessionId) return;
+        onCreate(parts.rootSessionId, sourceSessionId);
+      };
+      const stopDrag = (event: PointerEvent) => event.stopPropagation();
+      select.addEventListener("change", create);
+      select.addEventListener("pointerdown", stopDrag);
+      const unsubscribeSessions = useSessions.subscribe(refresh);
+      const activeSubscription = containerApi.onDidActivePanelChange(refresh);
+      const layoutSubscription = containerApi.onDidLayoutChange(refresh);
+      refresh();
+      dispose = () => {
+        select.removeEventListener("change", create);
+        select.removeEventListener("pointerdown", stopDrag);
+        unsubscribeSessions();
+        activeSubscription.dispose();
+        layoutSubscription.dispose();
+      };
+    },
+    dispose: () => dispose(),
+  };
+}
+
 function SessionWorkspace({ sessionId }: { sessionId: string }) {
   const connState = useConnection((s) => s.state);
   // The displayed session is always subscribed — heals every race
@@ -153,7 +232,7 @@ function SessionWorkspace({ sessionId }: { sessionId: string }) {
 function EmptySessionWorkspace() {
   return (
     <EmptyState
-      icon={transcriptPane.icon}
+      icon={MessageSquare}
       title="Pick or create a session"
       hint={`${shortcutLabel("mod+n")} starts a new one.`}
     />
@@ -175,6 +254,8 @@ const RIGHT_PANES: readonly PaneDefinition[] = [
 const RIGHT_IDS: readonly string[] = RIGHT_PANES.map((p) => p.id);
 
 function panelNode(id: string): ReactNode {
+  const quickChatId = quickChatSessionId(id);
+  if (quickChatId) return <SessionWorkspace sessionId={quickChatId} />;
   const sessionId = panelSessionId(id);
   if (sessionId) return <SessionWorkspace sessionId={sessionId} />;
   if (id === EMPTY_SESSION_PANEL) return <EmptySessionWorkspace />;
@@ -222,6 +303,56 @@ function openSessionPanel(api: DockviewApi, sessionId: string): void {
   const empty = api.getPanel(EMPTY_SESSION_PANEL);
   if (empty) api.removePanel(empty);
   added.api.setActive();
+}
+
+function openQuickChatPanel(
+  api: DockviewApi,
+  rootSessionId: string,
+  childSessionId: string,
+): void {
+  const id = `${QUICK_CHAT_PANEL_PREFIX}${rootSessionId}:${childSessionId}`;
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    focusQuickChatComposer(childSessionId);
+    return;
+  }
+  const sibling = api.panels.find(
+    (panel) => quickChatPanelParts(panel.id)?.rootSessionId === rootSessionId,
+  );
+  const byId = useSessions.getState().byId;
+  const added = api.addPanel({
+    id,
+    component: id,
+    title: sideChatTitle(byId, childSessionId),
+    ...(sibling
+      ? {
+          position: { referencePanel: sibling.id, direction: "within" },
+        }
+      : {
+          position: {
+            referencePanel: api.getPanel(sessionPanelId(rootSessionId))
+              ? sessionPanelId(rootSessionId)
+              : centerPanelId(api),
+            direction: "right",
+          },
+          initialWidth: 420,
+        }),
+  });
+  added.api.setActive();
+  focusQuickChatComposer(childSessionId);
+}
+
+function focusQuickChatComposer(sessionId: string): void {
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(
+          `[data-chamber-session-workspace="${CSS.escape(sessionId)}"] .cm-content`,
+        )
+        ?.focus();
+    }),
+  );
 }
 
 /** Add a right-dock pane: joins the existing right group, or opens one. */
@@ -318,6 +449,9 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
 
     initBrowserStore();
 
+    let createQuickChatFromHeader:
+      | ((rootSessionId: string, sourceSessionId: string) => void)
+      | undefined;
     const api = createDockview(el, {
       theme: {
         ...themeAbyss,
@@ -340,6 +474,10 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         };
       },
       createPrefixHeaderActionComponent: (group) => workbenchPrefix(group),
+      createRightHeaderActionComponent: (group) =>
+        quickChatActions(group, (rootSessionId, sourceSessionId) =>
+          createQuickChatFromHeader?.(rootSessionId, sourceSessionId),
+        ),
     });
 
     // restore the persisted layout; anything bad → default rebuild
@@ -420,8 +558,11 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       }
       for (const panel of api.panels) {
         const sessionId = panelSessionId(panel.id);
-        if (!sessionId) continue;
-        const title = sessionTabTitle(sessionId);
+        const quickChatId = quickChatSessionId(panel.id);
+        if (!sessionId && !quickChatId) continue;
+        const title = sessionId
+          ? sessionTabTitle(sessionId)
+          : sideChatTitle(useSessions.getState().byId, quickChatId as string);
         if (panel.title !== title) panel.api.setTitle(title);
       }
     });
@@ -453,6 +594,52 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         window.dispatchEvent(new Event(OPEN_SEARCH_EVENT)),
       );
     };
+    const creatingQuickChats = new Set<string>();
+    const createQuickChat = async (
+      rootSessionId: string,
+      sourceSessionId: string,
+    ) => {
+      if (creatingQuickChats.has(sourceSessionId)) return;
+      creatingQuickChats.add(sourceSessionId);
+      try {
+        const bridge = getBridge();
+        const child = await bridge.createQuickChat(sourceSessionId);
+        await ensureSubscribed(child.sessionId, 0);
+        useSessions.getState().setAll(
+          await bridge.listSessionSummaries({
+            allProjects: true,
+            includeArchived: true,
+          }),
+        );
+        openQuickChatPanel(api, rootSessionId, child.sessionId);
+      } catch (error) {
+        pushToast({
+          kind: "err",
+          title: "Could not create side chat",
+          detail: error instanceof Error ? error.message : "Side chat failed",
+        });
+      } finally {
+        creatingQuickChats.delete(sourceSessionId);
+      }
+    };
+    const revealQuickChat = async () => {
+      const rootSessionId = useSessions.getState().activeSessionId;
+      if (!rootSessionId) return;
+      const chats = sideChatsForRoot(
+        useSessions.getState().byId,
+        rootSessionId,
+      );
+      if (chats.length > 0) {
+        for (const chat of chats) {
+          openQuickChatPanel(api, rootSessionId, chat.sessionId);
+        }
+        return;
+      }
+      await createQuickChat(rootSessionId, rootSessionId);
+    };
+    createQuickChatFromHeader = (rootSessionId, sourceSessionId) => {
+      void createQuickChat(rootSessionId, sourceSessionId);
+    };
     const unregister = registerCommands([
       ...[filesPane, timelinePane, snapshotsPane, diffPane].map((p) => ({
         id: `view.${p.id}`,
@@ -462,6 +649,20 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         ...(p.id === "diff" ? { shortcut: "mod+shift+d" } : {}),
         run: () => toggleRightPane(api, p.id),
       })),
+      {
+        id: "session.quickChat",
+        title: "Open Quick Chat",
+        group: "Session",
+        shortcut: "mod+shift+s",
+        when: () => {
+          const sessions = useSessions.getState();
+          const active = sessions.activeSessionId
+            ? sessions.byId[sessions.activeSessionId]
+            : undefined;
+          return Boolean(active && active.purpose !== "quick_chat");
+        },
+        run: revealQuickChat,
+      },
       {
         id: "search.open",
         title: "Search Transcripts",
@@ -485,7 +686,13 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         });
       }, 800);
     };
-    const layoutSub = api.onDidLayoutChange(scheduleSave);
+    const layoutSub = api.onDidLayoutChange(() => {
+      // Synchronous, NOT debounced: chat surfaces must freeze scroll handling
+      // before this frame's stray scroll events land (dockview reparents
+      // panel DOM on splits/moves, silently resetting scrollTop).
+      window.dispatchEvent(new Event(DOCK_RELAYOUT_EVENT));
+      scheduleSave();
+    });
     const unsubShell = useShellUi.subscribe((s, prev) => {
       if (s.sidebarCollapsed !== prev.sidebarCollapsed) scheduleSave();
     });

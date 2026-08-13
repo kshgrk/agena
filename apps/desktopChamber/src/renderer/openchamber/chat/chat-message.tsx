@@ -354,11 +354,13 @@ export function StreamingTail({
   const content = text ? [{ type: "text" as const, text }] : [];
   return (
     <div
-      className="transcript-column px-4 py-2"
+      className="animate-fade-in transcript-column px-4 py-2"
       data-message-id={tail.messageId}
     >
       {content.length > 0 ? (
-        renderContent({ content, role: "assistant", streaming: true })
+        <div className="stream-caret">
+          {renderContent({ content, role: "assistant", streaming: true })}
+        </div>
       ) : (
         <span className="text-sm text-muted-foreground">
           Working

@@ -1252,20 +1252,27 @@ export async function startDaemon(
       );
     }
     try {
-      const session = await orchestrator.forkSession({
-        parentSessionId: c.req.param("id"),
-        mode: parsed.data.mode,
-        ...(parsed.data.sourceMessageId
-          ? { sourceMessageId: parsed.data.sourceMessageId }
-          : {}),
-        ...(parsed.data.title ? { title: parsed.data.title } : {}),
-      });
+      const session =
+        parsed.data.purpose === "quick_chat"
+          ? await orchestrator.createQuickChat(c.req.param("id"))
+          : await orchestrator.forkSession({
+              parentSessionId: c.req.param("id"),
+              mode: parsed.data.mode,
+              ...(parsed.data.sourceMessageId
+                ? { sourceMessageId: parsed.data.sourceMessageId }
+                : {}),
+              ...(parsed.data.title ? { title: parsed.data.title } : {}),
+            });
       return c.json({ sessionId: session.sessionId }, 201);
     } catch (err) {
       if (err instanceof OrchestratorError) {
         const status = err.code === "SESSION_NOT_FOUND" ? 404 : 409;
         return c.json(
-          { code: err.code, message: err.message, retryable: false },
+          {
+            code: err.code,
+            message: err.message,
+            retryable: err.code === "NOT_READY",
+          },
           status,
         );
       }

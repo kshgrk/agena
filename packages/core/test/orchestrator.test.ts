@@ -211,6 +211,177 @@ test("forks an immutable primary child from a persisted runtime message ref", as
   });
 });
 
+test("quick chat inherits the latest completed assistant and stays read-only", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter({ delayMs: 5 });
+  const orch = new SessionOrchestrator(store, adapter);
+  const parent = await orch.createSession({ workspaceId: "ws-1" });
+
+  const firstDone = runCompleted(store);
+  await orch.handlePrompt(parent.sessionId, [{ type: "text", text: "first" }]);
+  await firstDone;
+  const completed = await store.getLatestCompletedAssistant(parent.sessionId);
+  expect(completed?.messageId).toBeTruthy();
+  await store.appendEvents({
+    sessionId: parent.sessionId,
+    branchId: parent.rootBranchId,
+    events: [
+      {
+        type: "message.runtime.ref",
+        v: 1,
+        source: { kind: "runtime" },
+        payload: {
+          messageId: completed?.messageId,
+          runtimeEntryId: "pi-assistant-entry",
+        },
+      },
+    ],
+  });
+
+  const secondDone = runCompleted(store);
+  await orch.handlePrompt(parent.sessionId, [{ type: "text", text: "second" }]);
+  const child = await orch.createQuickChat(parent.sessionId);
+  const sibling = await orch.createQuickChat(parent.sessionId);
+
+  expect(child).toMatchObject({
+    title: "Quick Chat 1",
+    purpose: "quick_chat",
+    parentSessionId: parent.sessionId,
+    runtimeSessionRef: `fake:${child.sessionId}`,
+    derivedFrom: {
+      parentSessionId: parent.sessionId,
+      sourceMessageId: completed?.messageId,
+      mode: "fork",
+    },
+  });
+  expect(sibling).toMatchObject({
+    title: "Quick Chat 2",
+    purpose: "quick_chat",
+    parentSessionId: parent.sessionId,
+  });
+  expect(sibling.sessionId).not.toBe(child.sessionId);
+  expect(adapter.forkInputs.at(-1)).toMatchObject({
+    runtimeEntryId: "pi-assistant-entry",
+    position: "at",
+    toolNames: ["read", "grep", "find", "ls"],
+  });
+  expect(adapter.forkInputs).toHaveLength(2);
+  await secondDone;
+});
+
+test("quick chat is empty when the parent has no completed turn", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const orch = new SessionOrchestrator(store, adapter);
+  const parent = await orch.createSession({ workspaceId: "ws-1" });
+
+  const child = await orch.createQuickChat(parent.sessionId);
+  const [sibling, grandchild] = await Promise.all([
+    orch.createQuickChat(parent.sessionId),
+    orch.createQuickChat(child.sessionId),
+  ]);
+
+  expect(child).toMatchObject({
+    title: "Quick Chat 1",
+    purpose: "quick_chat",
+    parentSessionId: parent.sessionId,
+    derivedFrom: { parentSessionId: parent.sessionId, mode: "fork" },
+  });
+  expect(grandchild).toMatchObject({
+    title: "Quick Chat 3",
+    purpose: "quick_chat",
+    parentSessionId: child.sessionId,
+    derivedFrom: { parentSessionId: child.sessionId, mode: "fork" },
+  });
+  expect(sibling).toMatchObject({
+    title: "Quick Chat 2",
+    purpose: "quick_chat",
+    parentSessionId: parent.sessionId,
+  });
+  expect(adapter.createInputs[0]).toMatchObject({
+    sessionId: child.sessionId,
+    toolNames: ["read", "grep", "find", "ls"],
+  });
+  expect(adapter.createInputs).toHaveLength(3);
+});
+
+test("quick chat waits for the latest completed assistant runtime reference", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const orch = new SessionOrchestrator(store, adapter);
+  const parent = await orch.createSession({ workspaceId: "ws-1" });
+  const done = runCompleted(store);
+  await orch.handlePrompt(parent.sessionId, [{ type: "text", text: "done" }]);
+  await done;
+
+  await expect(orch.createQuickChat(parent.sessionId)).rejects.toMatchObject({
+    code: "NOT_READY",
+  });
+  expect(adapter.forkInputs).toHaveLength(0);
+});
+
+test("quick-chat cutoff ignores abandoned completions after repeated edits", async () => {
+  const store = new InMemoryEventStore();
+  const session = await store.createSession({ workspaceId: "ws-1" });
+  const events = [
+    ["u1", undefined, "a1"],
+    ["u2", undefined, "a2"],
+    ["u2-edit-1", "u2", "a2-edit-1"],
+    ["u2-edit-2", "u2-edit-1", undefined],
+  ] as const;
+  for (const [userId, editedFromMessageId, assistantId] of events) {
+    await store.appendEvents({
+      sessionId: session.sessionId,
+      branchId: session.rootBranchId,
+      events: [
+        {
+          type: "message.user.created",
+          v: 1,
+          source: { kind: "user" },
+          payload: {
+            messageId: userId,
+            content: [{ type: "text", text: userId }],
+            ...(editedFromMessageId ? { editedFromMessageId } : {}),
+          },
+        },
+        ...(assistantId
+          ? [
+              {
+                type: "message.assistant.started",
+                v: 1,
+                source: { kind: "runtime" } as const,
+                payload: {
+                  messageId: assistantId,
+                  inResponseTo: userId,
+                  runId: `run-${assistantId}`,
+                  turnId: `turn-${assistantId}`,
+                  model: { provider: "fake", id: "fake-1" },
+                },
+              },
+              {
+                type: "message.assistant.completed",
+                v: 1,
+                source: { kind: "runtime" } as const,
+                payload: {
+                  messageId: assistantId,
+                  runId: `run-${assistantId}`,
+                  turnId: `turn-${assistantId}`,
+                  content: [{ type: "text", text: assistantId }],
+                  model: { provider: "fake", id: "fake-1" },
+                  stopReason: "end_turn" as const,
+                },
+              },
+            ]
+          : []),
+      ],
+    });
+  }
+
+  expect(
+    await store.getLatestCompletedAssistant(session.sessionId),
+  ).toMatchObject({ messageId: "a1" });
+});
+
 test("editing a previous message stays in the same session", async () => {
   const store = new InMemoryEventStore();
   const orch = new SessionOrchestrator(store, new FakeRuntimeAdapter());

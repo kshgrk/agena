@@ -450,6 +450,21 @@ export class AgenaClient {
     return (body as { sessionId: string }).sessionId;
   }
 
+  /** Create or reopenable read-only context through the last completed turn. */
+  async createQuickChat(sourceSessionId: string): Promise<string> {
+    const request: CreateDerivedSessionRequest = {
+      mode: "fork",
+      purpose: "quick_chat",
+      title: "Quick Chat",
+    };
+    const body = await this.fetchJson(
+      "POST",
+      `/v1/sessions/${encodeURIComponent(sourceSessionId)}/derived`,
+      request,
+    );
+    return (body as { sessionId: string }).sessionId;
+  }
+
   /** Move the active Pi leaf within this session and return its editable prompt. */
   async navigateSession(
     sessionId: string,

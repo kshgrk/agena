@@ -509,6 +509,9 @@ export function createWsBridge(
         mode,
       ),
     }),
+    createQuickChat: async (sourceSessionId) => ({
+      sessionId: await need().createQuickChat(sourceSessionId),
+    }),
     navigateSession: (sessionId, sourceMessageId) =>
       need().navigateSession(sessionId, sourceMessageId),
     createProject: async (name) => ({

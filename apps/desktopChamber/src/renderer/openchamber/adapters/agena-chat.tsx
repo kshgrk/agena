@@ -1,5 +1,5 @@
 import type { UserMessageAnchor } from "@agena/protocol";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BlockView, ContentView } from "../../features/transcript/blocks.tsx";
 import { visibleCodexSubagentBlocks } from "../../features/transcript/codex-subagent.ts";
 import { UserMessageActions } from "../../features/transcript/session-actions.tsx";
@@ -43,6 +43,22 @@ export function AgenaChamberChat({
       visibleCodexSubagentBlocks(session, transcript?.blocks ?? EMPTY_BLOCKS),
     [session, transcript?.blocks],
   );
+
+  // Reveal animations run only for blocks newer than the moment this surface
+  // opened the session — replayed/paged history must never animate.
+  const mountSeqRef = useRef<{ sessionId: string; seq: number } | null>(null);
+  if (mountSeqRef.current?.sessionId !== sessionId) {
+    mountSeqRef.current = {
+      sessionId,
+      seq: transcript?.lastSeq ?? Number.MAX_SAFE_INTEGER,
+    };
+  }
+  // transcript wasn't loaded at mount: arm at the replay boundary so restored
+  // history stays still while genuinely new blocks still animate
+  if (mountSeqRef.current.seq === Number.MAX_SAFE_INTEGER && transcript?.live) {
+    mountSeqRef.current.seq = transcript.lastSeq;
+  }
+  const mountSeq = mountSeqRef.current.seq;
   const oldestSeq = transcript?.rawEvents[0]?.seq;
   const canLoadEarlier = transcript?.historyInitialized
     ? transcript.hasOlderHistory
@@ -92,6 +108,28 @@ export function AgenaChamberChat({
         loaded: users.has(prompt.messageId),
       }));
   }, [promptIndex, users]);
+
+  const animateUserMessageId = useMemo(() => {
+    for (let i = visibleBlocks.length - 1; i >= 0; i--) {
+      const block = visibleBlocks[i];
+      if (block?.kind !== "user") continue;
+      return block.seq > mountSeq ? block.messageId : null;
+    }
+    return null;
+  }, [mountSeq, visibleBlocks]);
+
+  // ids must mirror activityOf() in project-turns.ts
+  const animateActivityIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const block of visibleBlocks) {
+      if (block.seq <= mountSeq) continue;
+      if (block.kind === "tool") ids.add(block.toolCallId);
+      else if (block.kind === "approval") ids.add(block.approvalId);
+      else if (block.kind === "runtime") ids.add(block.messageId);
+      else if (block.kind === "marker") ids.add(`marker-${block.seq}`);
+    }
+    return ids;
+  }, [mountSeq, visibleBlocks]);
 
   useEffect(() => {
     setPromptIndex([]);
@@ -160,6 +198,8 @@ export function AgenaChamberChat({
       }
       hasNewer={transcript?.hasNewerHistory ?? false}
       onLoadLatest={() => useTranscripts.getState().loadLatest(sessionId)}
+      animateUserMessageId={animateUserMessageId}
+      animateActivityIds={animateActivityIds}
     />
   );
 }

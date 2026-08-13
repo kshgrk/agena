@@ -28,18 +28,41 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 }
 
 const sessions: SessionSummary[] = [
-  summary({ sessionId: "05", scope: "project", projectId: "p1", projectRoot: "/workspace/checkout", cwd: "/workspace/checkout", title: "fix login" }),
+  summary({ sessionId: "06", purpose: "quick_chat", title: "Quick Chat" }),
+  summary({
+    sessionId: "05",
+    scope: "project",
+    projectId: "p1",
+    projectRoot: "/workspace/checkout",
+    cwd: "/workspace/checkout",
+    title: "fix login",
+  }),
   summary({ sessionId: "04", scope: "global", title: "scratch" }),
-  summary({ sessionId: "03", scope: "project", projectId: "p1", projectRoot: "/workspace/checkout", cwd: "/workspace/checkout/api", status: "archived" }),
+  summary({
+    sessionId: "03",
+    scope: "project",
+    projectId: "p1",
+    projectRoot: "/workspace/checkout",
+    cwd: "/workspace/checkout/api",
+    status: "archived",
+  }),
   summary({ sessionId: "02", scope: "control" }),
-  summary({ sessionId: "01", scope: "project", projectRoot: "/workspace/tools", cwd: "/workspace/tools" }), // no projectId
+  summary({
+    sessionId: "01",
+    scope: "project",
+    projectRoot: "/workspace/tools",
+    cwd: "/workspace/tools",
+  }), // no projectId
 ];
 const byId = Object.fromEntries(sessions.map((s) => [s.sessionId, s]));
-const order = ["05", "04", "03", "02", "01"]; // newest-first
+const order = ["06", "05", "04", "03", "02", "01"]; // newest-first
 
 test("splitSessionSections groups, buckets archived, skips control", () => {
   const s = splitSessionSections(byId, order);
-  assert.deepEqual(s.projectGroups.map((g) => g.key), ["p1", "project:01"]);
+  assert.deepEqual(
+    s.projectGroups.map((g) => g.key),
+    ["p1", "project:01"],
+  );
   assert.deepEqual(s.projectGroups[0]?.ids, ["05"]);
   assert.equal(s.projectGroups[0]?.projectId, "p1");
   assert.equal(s.projectGroups[1]?.projectId, null);
@@ -50,7 +73,10 @@ test("splitSessionSections groups, buckets archived, skips control", () => {
 
 test("query filters across title, cwd, and group label", () => {
   assert.equal(splitSessionSections(byId, order, "login").visibleCount, 1);
-  assert.deepEqual(splitSessionSections(byId, order, "login").projectGroups[0]?.ids, ["05"]);
+  assert.deepEqual(
+    splitSessionSections(byId, order, "login").projectGroups[0]?.ids,
+    ["05"],
+  );
   // group label "checkout" also matches the archived project session
   assert.equal(splitSessionSections(byId, order, "checkout").visibleCount, 2);
   assert.equal(splitSessionSections(byId, order, "nope").visibleCount, 0);
@@ -70,8 +96,20 @@ test("cycleOrder flattens projects then global, excludes archived", () => {
 });
 
 test("group label prefers hostCwdHint over projectRoot over projectId", () => {
-  assert.equal(sessionGroupLabel(summary({ hostCwdHint: "/Users/me/dev/app", projectRoot: "/workspace/x", projectId: "p" })), "app");
-  assert.equal(sessionGroupLabel(summary({ projectRoot: "/workspace/x", projectId: "p" })), "x");
+  assert.equal(
+    sessionGroupLabel(
+      summary({
+        hostCwdHint: "/Users/me/dev/app",
+        projectRoot: "/workspace/x",
+        projectId: "p",
+      }),
+    ),
+    "app",
+  );
+  assert.equal(
+    sessionGroupLabel(summary({ projectRoot: "/workspace/x", projectId: "p" })),
+    "x",
+  );
   assert.equal(sessionGroupLabel(summary({ projectId: "p" })), "p");
   assert.equal(sessionGroupLabel(summary({})), "Global");
 });
@@ -86,7 +124,14 @@ test("create inputs", () => {
   assert.deepEqual(createGlobalSessionInput(), { scope: "global", cwd: "." });
   assert.equal(createProjectSessionInput(summary({})), null);
   assert.deepEqual(
-    createProjectSessionInput(summary({ projectId: "p1", projectRoot: "/workspace/checkout" })),
-    { scope: "project", projectId: "p1", projectRoot: "/workspace/checkout", cwd: "/workspace/checkout" },
+    createProjectSessionInput(
+      summary({ projectId: "p1", projectRoot: "/workspace/checkout" }),
+    ),
+    {
+      scope: "project",
+      projectId: "p1",
+      projectRoot: "/workspace/checkout",
+      cwd: "/workspace/checkout",
+    },
   );
 });

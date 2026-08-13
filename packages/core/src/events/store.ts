@@ -65,11 +65,75 @@ export interface CreateSessionInput {
 }
 
 export interface CreateDerivedSessionInput {
+  sessionId?: string;
   parentSessionId: string;
   sourceMessageId?: string;
   mode: "fork" | "clone";
+  purpose?: "quick_chat";
+  runtimeSessionRef?: string;
   title?: string;
   source?: EventSource;
+}
+
+export function latestCompletedAssistant(
+  events: readonly AgenaEvent[],
+): AgenaEvent | null {
+  const users = events
+    .filter((event) => event.type === "message.user.created")
+    .map((event) => {
+      const payload = event.payload as {
+        messageId?: unknown;
+        editedFromMessageId?: unknown;
+      };
+      return {
+        messageId:
+          typeof payload.messageId === "string" ? payload.messageId : "",
+        editedFromMessageId:
+          typeof payload.editedFromMessageId === "string"
+            ? payload.editedFromMessageId
+            : undefined,
+      };
+    })
+    .filter((user) => user.messageId.length > 0);
+  const previous = new Map<string, string | undefined>();
+  let tail: string | undefined;
+  for (const user of users) {
+    const predecessor = user.editedFromMessageId
+      ? previous.get(user.editedFromMessageId)
+      : tail;
+    previous.set(user.messageId, predecessor);
+    tail = user.messageId;
+  }
+  const active = new Set<string>();
+  while (tail && !active.has(tail)) {
+    active.add(tail);
+    tail = previous.get(tail);
+  }
+  const assistantUsers = new Map<string, string>();
+  let latest: AgenaEvent | null = null;
+  for (const event of events) {
+    const payload = event.payload as Record<string, unknown>;
+    if (
+      event.type === "message.assistant.started" &&
+      typeof payload.messageId === "string" &&
+      typeof payload.inResponseTo === "string"
+    ) {
+      assistantUsers.set(payload.messageId, payload.inResponseTo);
+    } else if (
+      event.type === "message.assistant.completed" &&
+      typeof payload.messageId === "string" &&
+      active.has(assistantUsers.get(payload.messageId) ?? "")
+    ) {
+      latest = event;
+    }
+  }
+  return latest;
+}
+
+export interface CompletedAssistantCutoff {
+  messageId: string;
+  seq: number;
+  runtimeEntryId: string | null;
 }
 
 export interface DerivedFrom {
@@ -94,6 +158,7 @@ export interface SessionRecord {
   cwd: string;
   hostCwdHint?: string;
   origin: SessionOrigin;
+  purpose?: "quick_chat";
   sessionKind?: "primary" | "subagent";
   parentSessionId?: string;
   parentTaskId?: string;
@@ -186,6 +251,9 @@ export interface EventStore {
     sessionId: string,
     messageId: string,
   ): Promise<string | null>;
+  getLatestCompletedAssistant(
+    sessionId: string,
+  ): Promise<CompletedAssistantCutoff | null>;
   getSession(sessionId: string): Promise<SessionRecord | null>;
   listSessions(filter?: SessionFilter): Promise<SessionRecord[]>;
 

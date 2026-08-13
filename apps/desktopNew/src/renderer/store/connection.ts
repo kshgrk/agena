@@ -148,12 +148,13 @@ export async function connectAndBootstrap(profileName?: string): Promise<void> {
   // Activate: keep the current session if still known, else the persisted
   // last-active one, else the newest; then subscribe it from its cursor.
   const s = useSessions.getState();
-  const next =
-    s.activeSessionId && s.byId[s.activeSessionId]
-      ? s.activeSessionId
-      : persisted.lastActiveSessionId && s.byId[persisted.lastActiveSessionId]
-        ? persisted.lastActiveSessionId
-        : (s.order[0] ?? null);
+  const isPrimary = (id: string | null | undefined) =>
+    Boolean(id && s.byId[id]?.purpose !== "quick_chat");
+  const next = isPrimary(s.activeSessionId)
+    ? s.activeSessionId
+    : isPrimary(persisted.lastActiveSessionId)
+      ? persisted.lastActiveSessionId
+      : (s.order.find((id) => isPrimary(id)) ?? null);
   if (!next) return;
   if (next !== s.activeSessionId) s.setActive(next);
   try {

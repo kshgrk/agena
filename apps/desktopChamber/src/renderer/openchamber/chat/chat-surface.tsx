@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { distanceFromBottom } from "./auto-follow-logic.ts";
 import { MessageList, type MessageListHandle } from "./message-list.tsx";
 import { MobilePromptNavigator } from "./mobile-prompt-navigator.tsx";
 import {
@@ -128,7 +129,11 @@ export function ChamberChatSurface({
         tabIndex={0}
         aria-label="Conversation transcript"
         className="chat-scroll h-full overflow-y-auto overflow-x-hidden outline-none"
-        style={{ overflowAnchor: "none", overscrollBehavior: "contain" }}
+        // Native scroll anchoring keeps the viewport stable through
+        // older-history prepends and content-visibility re-measures; the
+        // auto-follow hook's explicit pins run after layout and win while
+        // following, so the two never fight.
+        style={{ overscrollBehavior: "contain" }}
       >
         {mobile && canLoadEarlier ? (
           <div className="flex justify-center py-3">
@@ -145,11 +150,9 @@ export function ChamberChatSurface({
         <MessageList
           key={sessionKey}
           ref={listRef}
-          sessionKey={sessionKey}
           history={timeline.history}
           tail={timeline.tail}
           scrollRef={autoFollow.scrollRef}
-          mobile={mobile}
           stickyUserHeader={stickyUserHeader}
           renderContent={renderContent}
           {...(renderActivity ? { renderActivity } : {})}
@@ -176,7 +179,11 @@ export function ChamberChatSurface({
             });
             return;
           }
-          listRef.current?.scrollToEnd();
+          // Glide when close; long distances jump (smooth over thousands of
+          // pixels reads as lag, not polish).
+          const el = autoFollow.scrollRef.current;
+          const smooth = el && distanceFromBottom(el) < el.clientHeight * 3;
+          listRef.current?.scrollToEnd(smooth ? "smooth" : "auto");
         }}
       />
       {!mobile && promptNavigator ? (

@@ -711,6 +711,16 @@ export function createMockBridge(): AgenaBridge {
       return { sessionId };
     },
 
+    async createQuickChat(sourceSessionId) {
+      const child = await this.forkSession(sourceSessionId, undefined, "clone");
+      const summary = world.sessions.get(child.sessionId)?.summary;
+      if (summary) {
+        summary.title = "Quick Chat";
+        summary.purpose = "quick_chat";
+      }
+      return child;
+    },
+
     async navigateSession(sessionId, sourceMessageId) {
       requireConnected();
       const source = getSession(sessionId);

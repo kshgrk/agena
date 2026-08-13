@@ -83,6 +83,10 @@ export class SessionOrchestrator {
   #subagents: SubagentController | undefined;
   #runtimeSource: EventSource;
   #sessions = new Map<string, SessionState>();
+  #quickChatCreations = new Map<string, Promise<SessionRecord>>();
+  // ponytail: one personal-workspace queue keeps ordinal titles unique; split
+  // by root only if side-chat creation throughput ever matters.
+  #quickChatCreationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     store: EventStore,
@@ -105,6 +109,96 @@ export class SessionOrchestrator {
 
   createSession(input: CreateSessionInput): Promise<SessionRecord> {
     return this.#store.createSession(input); // store appends session.created (§7.4)
+  }
+
+  async createQuickChat(parentSessionId: string): Promise<SessionRecord> {
+    const parent = await this.#state(parentSessionId);
+    const inFlight = this.#quickChatCreations.get(parentSessionId);
+    if (inFlight) return inFlight;
+    const creation = this.#quickChatCreationQueue.then(() =>
+      this.#createQuickChat(parent),
+    );
+    this.#quickChatCreationQueue = creation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#quickChatCreations.set(parentSessionId, creation);
+    try {
+      return await creation;
+    } finally {
+      this.#quickChatCreations.delete(parentSessionId);
+    }
+  }
+
+  async #createQuickChat(parent: SessionState): Promise<SessionRecord> {
+    const parentSessionId = parent.record.sessionId;
+    const sessions = await this.#store.listSessions({
+      allProjects: true,
+      includeArchived: true,
+    });
+    const byId = new Map(
+      sessions.map((session) => [session.sessionId, session]),
+    );
+    const rootSessionId = quickChatRootSessionId(parent.record, byId);
+    const number =
+      sessions.filter(
+        (session) =>
+          session.purpose === "quick_chat" &&
+          quickChatRootSessionId(session, byId) === rootSessionId,
+      ).length + 1;
+    if (!this.#adapter.createForkSession) {
+      throw new OrchestratorError(
+        "INVALID_PAYLOAD",
+        "runtime does not support session forks",
+      );
+    }
+    const cutoff =
+      await this.#store.getLatestCompletedAssistant(parentSessionId);
+    if (cutoff && !cutoff.runtimeEntryId) {
+      throw new OrchestratorError(
+        "NOT_READY",
+        "the latest completed turn is not ready to inherit",
+      );
+    }
+    if (cutoff && !parent.record.runtimeSessionRef) {
+      throw new OrchestratorError(
+        "NOT_READY",
+        "the parent runtime is not ready to inherit",
+      );
+    }
+    const sessionId = ulid();
+    const common = {
+      sessionId,
+      workspaceDir: this.#workspaceDir,
+      cwd: resolve(this.#workspaceDir, parent.record.cwd),
+      toolNames: ["read", "grep", "find", "ls"],
+    };
+    const runtime = cutoff
+      ? await this.#adapter.createForkSession({
+          ...common,
+          sourceRuntimeSessionRef: parent.record.runtimeSessionRef as string,
+          runtimeEntryId: cutoff.runtimeEntryId as string,
+          position: "at",
+        })
+      : await this.#adapter.createSession(common);
+    try {
+      const child = await this.#store.createDerivedSession({
+        sessionId,
+        parentSessionId,
+        mode: "fork",
+        purpose: "quick_chat",
+        runtimeSessionRef: runtime.runtimeSessionRef,
+        ...(cutoff ? { sourceMessageId: cutoff.messageId } : {}),
+        title: `Quick Chat ${number}`,
+      });
+      const state = await this.#state(child.sessionId);
+      state.runtime = runtime;
+      void this.#pump(state, runtime);
+      return child;
+    } catch (error) {
+      await runtime.dispose().catch(() => {});
+      throw error;
+    }
   }
 
   async forkSession(input: CreateDerivedSessionInput): Promise<SessionRecord> {
@@ -506,7 +600,8 @@ export class SessionOrchestrator {
       ...(s.record.sessionKind !== "subagent" && this.#subagents
         ? { subagents: this.#subagents }
         : {}),
-      ...(s.record.sessionKind === "subagent"
+      ...(s.record.sessionKind === "subagent" ||
+      s.record.purpose === "quick_chat"
         ? { toolNames: ["read", "grep", "find", "ls"] }
         : {}),
     });
@@ -997,6 +1092,22 @@ export class SessionOrchestrator {
     const { events } = await this.#store.readEvents(sessionId, 0);
     return pendingApprovalsFromEvents(events);
   }
+}
+
+function quickChatRootSessionId(
+  session: SessionRecord,
+  byId: ReadonlyMap<string, SessionRecord>,
+): string {
+  let current = session;
+  const seen = new Set<string>();
+  while (current.purpose === "quick_chat" && current.parentSessionId) {
+    if (seen.has(current.sessionId)) return session.sessionId;
+    seen.add(current.sessionId);
+    const parent = byId.get(current.parentSessionId);
+    if (!parent) return current.parentSessionId;
+    current = parent;
+  }
+  return current.sessionId;
 }
 
 function message(err: unknown): string {

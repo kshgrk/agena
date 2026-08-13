@@ -28,6 +28,7 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 }
 
 const sessions: SessionSummary[] = [
+  summary({ sessionId: "06", purpose: "quick_chat", title: "Quick Chat" }),
   summary({
     sessionId: "05",
     scope: "project",
@@ -54,7 +55,7 @@ const sessions: SessionSummary[] = [
   }), // no projectId
 ];
 const byId = Object.fromEntries(sessions.map((s) => [s.sessionId, s]));
-const order = ["05", "04", "03", "02", "01"]; // newest-first
+const order = ["06", "05", "04", "03", "02", "01"]; // newest-first
 
 test("splitSessionSections groups, buckets archived, skips control", () => {
   const s = splitSessionSections(byId, order);

@@ -71,7 +71,7 @@ export function splitSessionSections(
   let visibleCount = 0;
   for (const id of order) {
     const s = byId[id];
-    if (!s || s.scope === "control") continue;
+    if (!s || s.scope === "control" || s.purpose === "quick_chat") continue;
     const label = s.scope === "global" ? "Global" : sessionGroupLabel(s);
     if (!matchesQuery(s, label, query)) continue;
     visibleCount++;

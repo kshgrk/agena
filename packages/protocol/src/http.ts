@@ -381,10 +381,29 @@ export const createDerivedSessionRequestSchema = z
   .object({
     sourceMessageId: z.string().min(1).optional(),
     mode: z.enum(["fork", "clone"]),
+    purpose: z.literal("quick_chat").optional(),
     title: z.string().min(1).max(160).optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.mode === "fork" && !value.sourceMessageId) {
+    if (value.purpose === "quick_chat" && value.mode !== "fork") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mode"],
+        message: "quick chat must use fork mode",
+      });
+    }
+    if (value.purpose === "quick_chat" && value.sourceMessageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sourceMessageId"],
+        message: "quick chat cutoff is selected by the daemon",
+      });
+    }
+    if (
+      value.mode === "fork" &&
+      value.purpose !== "quick_chat" &&
+      !value.sourceMessageId
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["sourceMessageId"],
@@ -614,6 +633,7 @@ export const sessionSummarySchema = z.object({
   cwd: z.string().min(1),
   hostCwdHint: z.string().min(1).optional(),
   origin: sessionOriginSchema.optional(),
+  purpose: z.literal("quick_chat").optional(),
   sessionKind: z.enum(["primary", "subagent"]).optional(),
   parentSessionId: z.string().min(1).optional(),
   parentTaskId: z.string().min(1).optional(),

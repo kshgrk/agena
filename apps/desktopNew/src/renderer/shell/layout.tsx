@@ -28,6 +28,7 @@ import { pane as terminalPane } from "../features/terminal/index.ts";
 import { pane as timelinePane } from "../features/timeline/index.ts";
 import { pane as transcriptPane } from "../features/transcript/index.ts";
 import { Transcript } from "../features/transcript/transcript-pane.tsx";
+import { getBridge } from "../lib/bridge.ts";
 import {
   ensureSubscribed,
   pushToast,
@@ -50,6 +51,7 @@ import {
 // ---- center panel: the session workspace ------------------------------------
 
 const SESSION_PANEL_PREFIX = "session:";
+const QUICK_CHAT_PANEL_PREFIX = "quick-chat:";
 const EMPTY_SESSION_PANEL = "session.empty";
 
 function sessionPanelId(sessionId: string): string {
@@ -60,6 +62,11 @@ function panelSessionId(panelId: string): string | null {
   return panelId.startsWith(SESSION_PANEL_PREFIX)
     ? panelId.slice(SESSION_PANEL_PREFIX.length)
     : null;
+}
+
+function quickChatSessionId(panelId: string): string | null {
+  if (!panelId.startsWith(QUICK_CHAT_PANEL_PREFIX)) return null;
+  return panelId.split(":")[2] ?? null;
 }
 
 function SessionWorkspace({ sessionId }: { sessionId: string }) {
@@ -77,7 +84,10 @@ function SessionWorkspace({ sessionId }: { sessionId: string }) {
     });
   }, [sessionId, connState]);
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_auto] bg-canvas lg:grid-cols-[28px_minmax(0,1fr)]">
+    <div
+      className="grid h-full min-h-0 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_auto] bg-canvas lg:grid-cols-[28px_minmax(0,1fr)]"
+      data-session-workspace={sessionId}
+    >
       <div className="col-start-1 row-start-1 lg:col-span-2">
         <ChildSessionBanner sessionId={sessionId} />
       </div>
@@ -114,6 +124,8 @@ const RIGHT_PANES: readonly PaneDefinition[] = [
 const RIGHT_IDS: readonly string[] = RIGHT_PANES.map((p) => p.id);
 
 function panelNode(id: string): ReactNode {
+  const quickChatId = quickChatSessionId(id);
+  if (quickChatId) return <SessionWorkspace sessionId={quickChatId} />;
   const sessionId = panelSessionId(id);
   if (sessionId) return <SessionWorkspace sessionId={sessionId} />;
   if (id === EMPTY_SESSION_PANEL) return <EmptySessionWorkspace />;
@@ -162,6 +174,46 @@ function openSessionPanel(api: DockviewApi, sessionId: string): void {
   const empty = api.getPanel(EMPTY_SESSION_PANEL);
   if (empty) api.removePanel(empty);
   added.api.setActive();
+}
+
+function openQuickChatPanel(
+  api: DockviewApi,
+  parentSessionId: string,
+  childSessionId: string,
+): void {
+  const id = `${QUICK_CHAT_PANEL_PREFIX}${parentSessionId}:${childSessionId}`;
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    focusQuickChatComposer(childSessionId);
+    return;
+  }
+  const added = api.addPanel({
+    id,
+    component: id,
+    title: "Quick Chat",
+    position: {
+      referencePanel: api.getPanel(sessionPanelId(parentSessionId))
+        ? sessionPanelId(parentSessionId)
+        : centerPanelId(api),
+      direction: "right",
+    },
+    initialWidth: 420,
+  });
+  added.api.setActive();
+  focusQuickChatComposer(childSessionId);
+}
+
+function focusQuickChatComposer(sessionId: string): void {
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLTextAreaElement>(
+          `[data-session-workspace="${CSS.escape(sessionId)}"] textarea[aria-label="Composer"]`,
+        )
+        ?.focus();
+    }),
+  );
 }
 
 /** Add a right-dock pane: joins the existing right group, or opens one. */
@@ -392,6 +444,42 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         window.dispatchEvent(new Event(OPEN_SEARCH_EVENT)),
       );
     };
+    let creatingQuickChat = false;
+    const revealQuickChat = async () => {
+      const parentSessionId = useSessions.getState().activeSessionId;
+      if (!parentSessionId || creatingQuickChat) return;
+      const existing = Object.values(useSessions.getState().byId).find(
+        (session) =>
+          session.purpose === "quick_chat" &&
+          session.parentSessionId === parentSessionId &&
+          session.status !== "archived",
+      );
+      if (existing) {
+        openQuickChatPanel(api, parentSessionId, existing.sessionId);
+        return;
+      }
+      creatingQuickChat = true;
+      try {
+        const bridge = getBridge();
+        const child = await bridge.createQuickChat(parentSessionId);
+        await ensureSubscribed(child.sessionId, 0);
+        useSessions.getState().setAll(
+          await bridge.listSessionSummaries({
+            allProjects: true,
+            includeArchived: true,
+          }),
+        );
+        openQuickChatPanel(api, parentSessionId, child.sessionId);
+      } catch (error) {
+        pushToast({
+          kind: "err",
+          title: "Could not open Quick Chat",
+          detail: error instanceof Error ? error.message : "Quick Chat failed",
+        });
+      } finally {
+        creatingQuickChat = false;
+      }
+    };
     const unregister = registerCommands([
       ...[filesPane, timelinePane, snapshotsPane, diffPane].map((p) => ({
         id: `view.${p.id}`,
@@ -401,6 +489,20 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         ...(p.id === "diff" ? { shortcut: "mod+shift+d" } : {}),
         run: () => toggleRightPane(api, p.id),
       })),
+      {
+        id: "session.quickChat",
+        title: "Open Quick Chat",
+        group: "Session",
+        shortcut: "mod+shift+s",
+        when: () => {
+          const sessions = useSessions.getState();
+          const active = sessions.activeSessionId
+            ? sessions.byId[sessions.activeSessionId]
+            : undefined;
+          return Boolean(active && active.purpose !== "quick_chat");
+        },
+        run: revealQuickChat,
+      },
       {
         id: "search.open",
         title: "Search Transcripts",

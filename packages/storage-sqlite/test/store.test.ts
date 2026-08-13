@@ -608,6 +608,34 @@ test("creates a primary derived session with durable fork provenance", async () 
   reopened.close();
 });
 
+test("persists an empty quick chat with its runtime reference", async () => {
+  const path = dbPath();
+  const store = new SqliteEventStore(path);
+  const parent = await store.createSession({ workspaceId: "ws-1" });
+  const child = await store.createDerivedSession({
+    sessionId: ulid(),
+    parentSessionId: parent.sessionId,
+    mode: "fork",
+    purpose: "quick_chat",
+    runtimeSessionRef: "pi:quick-chat",
+  });
+
+  expect(child).toMatchObject({
+    purpose: "quick_chat",
+    runtimeSessionRef: "pi:quick-chat",
+    parentSessionId: parent.sessionId,
+    derivedFrom: { parentSessionId: parent.sessionId, mode: "fork" },
+  });
+  store.close();
+
+  const reopened = new SqliteEventStore(path);
+  expect(await reopened.getSession(child.sessionId)).toMatchObject({
+    purpose: "quick_chat",
+    runtimeSessionRef: "pi:quick-chat",
+  });
+  reopened.close();
+});
+
 test("rolls back the child session when task creation fails", async () => {
   const store = new SqliteEventStore(dbPath());
   const parent = await store.createSession({ workspaceId: "ws-1" });

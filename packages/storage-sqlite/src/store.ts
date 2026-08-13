@@ -23,6 +23,7 @@ import type {
 } from "@agena/core";
 import {
   extractSearchText,
+  latestCompletedAssistant,
   normalizeSessionScope,
   pendingApprovalsFromEvents,
   StoreError,
@@ -71,6 +72,7 @@ type SessionRow = {
   cwd: string;
   host_cwd_hint: string | null;
   origin: SessionOrigin;
+  purpose: "quick_chat" | null;
   parent_session_id: string | null;
   parent_task_id: string | null;
   session_kind: "primary" | "subagent";
@@ -307,6 +309,7 @@ export class SqliteEventStore implements EventStore {
         parent_task_id    TEXT,
         source_message_id TEXT,
         derived_mode      TEXT CHECK (derived_mode IN ('fork','clone')),
+        purpose           TEXT CHECK (purpose IN ('quick_chat')),
         session_kind      TEXT NOT NULL DEFAULT 'primary'
                           CHECK (session_kind IN ('primary','subagent'))
       ) STRICT;
@@ -648,7 +651,11 @@ export class SqliteEventStore implements EventStore {
         `unknown session ${input.parentSessionId}`,
       );
     }
-    if (input.mode === "fork" && !input.sourceMessageId) {
+    if (
+      input.mode === "fork" &&
+      input.purpose !== "quick_chat" &&
+      !input.sourceMessageId
+    ) {
       throw new StoreError(
         "invalid_payload",
         "sourceMessageId is required for fork",
@@ -672,7 +679,7 @@ export class SqliteEventStore implements EventStore {
       }
     }
     const now = new Date().toISOString();
-    const sessionId = ulid();
+    const sessionId = input.sessionId ?? ulid();
     const rootBranchId = ulid();
     const title = input.title ?? parent.title ?? undefined;
     const derivedFrom = {
@@ -687,12 +694,16 @@ export class SqliteEventStore implements EventStore {
       workspaceId: parent.workspace_id,
       ...(title ? { title } : {}),
       rootBranchId,
+      ...(input.runtimeSessionRef
+        ? { runtimeSessionRef: input.runtimeSessionRef }
+        : {}),
       lastSeq: 1,
       createdAt: now,
       updatedAt: now,
       scope: parent.scope,
       status: "active",
       origin: parent.origin,
+      ...(input.purpose ? { purpose: input.purpose } : {}),
       ...(parent.project_id ? { projectId: parent.project_id } : {}),
       ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
       cwd: parent.cwd,
@@ -719,6 +730,7 @@ export class SqliteEventStore implements EventStore {
         cwd: parent.cwd,
         ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
         rootBranchId,
+        ...(input.purpose ? { purpose: input.purpose } : {}),
         derivedFrom,
       },
       createdAt: now,
@@ -730,8 +742,8 @@ export class SqliteEventStore implements EventStore {
            (id, workspace_id, title, active_branch_id, last_seq, created_at,
             pi_session_path, updated_at, scope, project_id, project_root, cwd,
             host_cwd_hint, origin, status, is_control, parent_session_id, source_message_id,
-            derived_mode, session_kind)
-           VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, 'primary')`,
+            derived_mode, purpose, session_kind)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, 'primary')`,
         )
         .run(
           sessionId,
@@ -739,6 +751,7 @@ export class SqliteEventStore implements EventStore {
           title ?? null,
           rootBranchId,
           now,
+          input.runtimeSessionRef ?? null,
           now,
           parent.scope,
           parent.project_id,
@@ -749,6 +762,7 @@ export class SqliteEventStore implements EventStore {
           parent.id,
           input.sourceMessageId ?? null,
           input.mode,
+          input.purpose ?? null,
         );
       this.#db
         .prepare(
@@ -774,6 +788,39 @@ export class SqliteEventStore implements EventStore {
       )
       .get(sessionId, messageId) as { runtime_entry_id: string } | undefined;
     return row?.runtime_entry_id ?? null;
+  }
+
+  async getLatestCompletedAssistant(sessionId: string) {
+    const session = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(sessionId) as SessionRow | undefined;
+    if (!session) return null;
+    const branches = this.#activeBranchSegments(session.active_branch_id);
+    const events = (
+      this.#db
+        .prepare(
+          `SELECT * FROM events
+         WHERE session_id = ?
+           AND type IN ('message.user.created', 'message.assistant.started',
+                        'message.assistant.completed')
+         ORDER BY seq ASC`,
+        )
+        .all(sessionId) as EventRow[]
+    )
+      .filter((row) => {
+        const upper = branches.get(row.branch_id);
+        return upper !== undefined && (upper === null || row.seq <= upper);
+      })
+      .map(eventFromRow);
+    const completed = latestCompletedAssistant(events);
+    const messageId = (completed?.payload as { messageId?: unknown })
+      ?.messageId;
+    if (!completed || typeof messageId !== "string") return null;
+    return {
+      messageId,
+      seq: completed.seq,
+      runtimeEntryId: await this.getRuntimeMessageRef(sessionId, messageId),
+    };
   }
 
   async createSubagentSession(input: CreateSubagentSessionInput): Promise<{
@@ -1830,6 +1877,7 @@ export class SqliteEventStore implements EventStore {
       "derived_mode",
       "derived_mode TEXT CHECK (derived_mode IN ('fork','clone'))",
     );
+    add("purpose", "purpose TEXT CHECK (purpose IN ('quick_chat'))");
     add(
       "session_kind",
       "session_kind TEXT NOT NULL DEFAULT 'primary' CHECK (session_kind IN ('primary','subagent'))",
@@ -2236,6 +2284,7 @@ function sessionFromRow(row: SessionRow): SessionRecord {
     cwd: row.cwd,
     ...(row.host_cwd_hint !== null ? { hostCwdHint: row.host_cwd_hint } : {}),
     origin: row.origin,
+    ...(row.purpose !== null ? { purpose: row.purpose } : {}),
     sessionKind: row.session_kind,
     ...(row.parent_session_id !== null
       ? { parentSessionId: row.parent_session_id }

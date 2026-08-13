@@ -104,6 +104,37 @@
   color: var(--fg);
 }
 
+.chamber-quick-chat-actions {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  padding-inline: 0.375rem;
+}
+
+.chamber-quick-chat-actions[hidden] {
+  display: none;
+}
+
+.chamber-quick-chat-add {
+  width: 1.75rem;
+  height: 1.75rem;
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.chamber-quick-chat-add:hover,
+.chamber-quick-chat-add:focus-visible {
+  background: var(--bg-raised);
+  color: var(--fg);
+  outline: none;
+}
+
 /* Portal host for every dockview panel (see shell/layout.tsx createComponent). */
 .dv-agena-panel {
   height: 100%;

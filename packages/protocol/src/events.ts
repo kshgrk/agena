@@ -44,6 +44,7 @@ export const sessionCreatedSchema = z
     cwd: z.string().min(1),
     hostCwdHint: z.string().min(1).optional(),
     rootBranchId: z.string().min(1),
+    purpose: z.literal("quick_chat").optional(),
     derivedFrom: z
       .object({
         parentSessionId: z.string().min(1),

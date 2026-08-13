@@ -552,6 +552,8 @@ export function createBridgeHost({
         return {
           sessionId: await need().forkSession(args[0], args[1], args[2]),
         };
+      case "createQuickChat":
+        return { sessionId: await need().createQuickChat(args[0]) };
       case "navigateSession":
         return need().navigateSession(args[0], args[1]);
       case "createProject":

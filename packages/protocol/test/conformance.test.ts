@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AgenaEvent,
   commandSchemas,
+  createDerivedSessionRequestSchema,
   createProjectRequestSchema,
   createPtyRequestSchema,
   createPtyResponseSchema,
@@ -30,6 +31,28 @@ import {
   WS_CLOSE_CODES,
   wireEnvelopeSchema,
 } from "../src/index.ts";
+
+it("keeps quick-chat cutoff selection server-owned", () => {
+  expect(
+    createDerivedSessionRequestSchema.parse({
+      mode: "fork",
+      purpose: "quick_chat",
+    }),
+  ).toEqual({ mode: "fork", purpose: "quick_chat" });
+  expect(() =>
+    createDerivedSessionRequestSchema.parse({
+      mode: "clone",
+      purpose: "quick_chat",
+    }),
+  ).toThrow();
+  expect(() =>
+    createDerivedSessionRequestSchema.parse({
+      mode: "fork",
+      purpose: "quick_chat",
+      sourceMessageId: "caller-cutoff",
+    }),
+  ).toThrow();
+});
 
 it("visible browser actions and results carry deterministic tab identity", () => {
   expect(
