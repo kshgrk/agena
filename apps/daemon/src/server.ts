@@ -89,6 +89,7 @@ import {
   type SessionSummary,
   saveProviderApiKeyRequestSchema,
   searchQuerySchema,
+  sessionChangeDiffQuerySchema,
   setPluginEnabledRequestSchema,
   updateSessionStatusRequestSchema,
   WS_PATH,
@@ -105,6 +106,7 @@ import { OneTimeTokenStore } from "./one-time-tokens.ts";
 import { PluginService } from "./plugin-service.ts";
 import { ProviderAuthService } from "./provider-auth-service.ts";
 import { PtyManager } from "./pty-manager.ts";
+import { SessionChangesService } from "./session-changes.ts";
 import { SkillService } from "./skill-service.ts";
 import { SnapshotManager } from "./snapshots.ts";
 import { TunnelManager } from "./tunnel-manager.ts";
@@ -490,6 +492,8 @@ export async function startDaemon(
       ? new SqliteEventStore(join(config.stateDir, "db", "agena.db"))
       : null;
   const store: EventStore = sqlite ?? new InMemoryEventStore();
+  const sessionChanges = new SessionChangesService(config.workspaceDir, store);
+  const stopSessionChanges = sessionChanges.watch();
   const mcps = sqlite ? new McpService(sqlite, config.stateDir) : null;
   const skills = sqlite ? new SkillService(sqlite, config.stateDir) : null;
   const providers =
@@ -1446,6 +1450,50 @@ export async function startDaemon(
       );
     }
   });
+  app.get("/v1/sessions/:id/changes", async (c) => {
+    try {
+      return c.json(await sessionChanges.get(c.req.param("id")));
+    } catch (error) {
+      const missing =
+        error instanceof Error && error.message === "SESSION_NOT_FOUND";
+      return c.json(
+        {
+          code: missing ? "SESSION_NOT_FOUND" : "INTERNAL",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: !missing,
+        },
+        missing ? 404 : 500,
+      );
+    }
+  });
+  app.get("/v1/sessions/:id/changes/diff", async (c) => {
+    const parsed = sessionChangeDiffQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "invalid session change diff query",
+          retryable: false,
+          details: parsed.error.issues,
+        },
+        400,
+      );
+    }
+    try {
+      return c.json(await sessionChanges.diff(c.req.param("id"), parsed.data));
+    } catch (error) {
+      const missing =
+        error instanceof Error && error.message === "SESSION_NOT_FOUND";
+      return c.json(
+        {
+          code: missing ? "SESSION_NOT_FOUND" : "INTERNAL",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: !missing,
+        },
+        missing ? 404 : 500,
+      );
+    }
+  });
   app.get("/v1/sessions/:id/tool-calls/:toolCallId", async (c) => {
     const transcripts = transcriptQueryStore(store);
     if (!transcripts) {
@@ -1903,6 +1951,7 @@ export async function startDaemon(
     orchestrator,
     // ponytail: compact shutdown path; full §9.7 drain metrics/counters land later.
     close: async () => {
+      stopSessionChanges();
       await orchestrator.shutdown();
       await ptys.close();
       await tunnels.close();

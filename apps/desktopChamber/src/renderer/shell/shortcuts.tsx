@@ -64,7 +64,10 @@ export function GlobalShortcuts() {
         keywords: ["dark", "light"],
         run: () => {
           const ui = useUi.getState();
-          ui.setTheme(ui.theme === "light" ? "dark" : "light");
+          ui.setTheme({
+            ...ui.theme,
+            appearance: ui.theme.appearance === "light" ? "dark" : "light",
+          });
         },
       },
       // session.new (mod+n, the new-session dialog) is owned by the

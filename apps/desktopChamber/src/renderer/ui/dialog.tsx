@@ -37,6 +37,7 @@ export function Dialog({
             "fixed left-1/2 z-50 w-[calc(100vw-32px)] -translate-x-1/2",
             bottomSheet ? "bottom-0" : "top-1/2 -translate-y-1/2",
             "rounded-xl border border-border bg-overlay p-4 shadow-overlay",
+            "max-md:bottom-0 max-md:top-auto max-md:w-full max-md:max-w-none max-md:translate-y-0 max-md:rounded-b-none max-md:pb-[max(1rem,env(safe-area-inset-bottom))]",
             "animate-fade-in",
             sizeCls[size],
             className,

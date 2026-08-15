@@ -32,8 +32,15 @@ registerCommands([
     id: "settings.open.connection",
     title: "Settings: Connection & Diagnostics",
     group: "Settings",
-    keywords: ["daemon", "profile", "theme", "diagnostics"],
+    keywords: ["daemon", "profile", "diagnostics"],
     run: () => openSettings("connection"),
+  },
+  {
+    id: "settings.open.appearance",
+    title: "Settings: Appearance",
+    group: "Settings",
+    keywords: ["theme", "dark", "light", "system", "color", "accessibility"],
+    run: () => openSettings("appearance"),
   },
   {
     id: "settings.open.providers",

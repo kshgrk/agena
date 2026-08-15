@@ -18,6 +18,7 @@ import type {
 import type {
   BridgeConnectionState,
   ConnectedInfo,
+  ThemePreference,
 } from "../../shared/bridge.ts";
 
 // ---- transcript blocks ------------------------------------------------------
@@ -244,7 +245,7 @@ export type UiSlice = {
   jump: { sessionId: string; seq: number; nonce: number } | null;
   /** Cross-pane "insert into composer" request (e.g. terminal selection). */
   composerInsert: { text: string; nonce: number } | null;
-  theme: "dark" | "light" | "system";
+  theme: ThemePreference;
   paletteOpen: boolean;
   settingsOpen: boolean;
   inspectorOpen: boolean;

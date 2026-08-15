@@ -1,3 +1,4 @@
+import { argSummary } from "../../features/transcript/layout.ts";
 import type { Block, TranscriptState } from "../../store/types.ts";
 import type {
   ChamberActivity,
@@ -10,6 +11,84 @@ import type {
 
 export const userTurnCount = (blocks: readonly Pick<Block, "kind">[]) =>
   blocks.reduce((count, block) => count + (block.kind === "user" ? 1 : 0), 0);
+
+type ToolCategory = "read" | "search" | "edit" | "command" | "web" | "other";
+
+const CATEGORY_COPY: Record<ToolCategory, { noun: string; active: string }> = {
+  read: { noun: "read", active: "Reading" },
+  search: { noun: "search", active: "Searching" },
+  edit: { noun: "edit", active: "Editing" },
+  command: { noun: "command", active: "Running" },
+  web: { noun: "web action", active: "Browsing" },
+  other: { noun: "other", active: "Using" },
+};
+
+function toolCategory(name: string): ToolCategory {
+  const value = name.toLowerCase();
+  if (/(read|cat)/.test(value)) return "read";
+  if (/(grep|search|find|glob|list|\bls\b)/.test(value)) return "search";
+  if (/(edit|write|patch)/.test(value)) return "edit";
+  if (/(bash|shell|exec|terminal)/.test(value)) return "command";
+  if (/(web|browser|fetch|http)/.test(value)) return "web";
+  return "other";
+}
+
+export type ToolGroupSummary = {
+  state: "running" | "success" | "issue";
+  title: string;
+  detail: string;
+};
+
+/** Compact, deterministic turn summary; full tool bodies stay lazy. */
+export function summarizeToolActivities(
+  activities: readonly ChamberActivity[],
+): ToolGroupSummary {
+  const tools = activities.filter((activity) => activity.block.kind === "tool");
+  const issues = tools.filter((activity) =>
+    ["failed", "aborted", "denied"].includes(activity.status),
+  );
+  const running = tools.filter((activity) => activity.status === "running");
+  const focus = issues.at(-1) ?? running.at(-1);
+  if (focus?.block.kind === "tool") {
+    const category = CATEGORY_COPY[toolCategory(focus.block.name)];
+    const subject = argSummary(focus.block.args);
+    const action = `${category.active}${subject ? ` ${subject}` : ""}`;
+    if (issues.length > 0) {
+      return {
+        state: "issue",
+        title: `Stopped at “${subject || focus.block.name}” · ${issues.length} issue${issues.length === 1 ? "" : "s"}`,
+        detail:
+          focus.block.error?.message ??
+          focus.block.deniedReason?.replace(/_/g, " ") ??
+          focus.block.abortReason?.replace(/_/g, " ") ??
+          "Stopped",
+      };
+    }
+    return {
+      state: "running",
+      title: `Working · ${tools.length} action${tools.length === 1 ? "" : "s"}`,
+      detail: action,
+    };
+  }
+
+  const counts = new Map<ToolCategory, number>();
+  for (const activity of tools) {
+    if (activity.block.kind !== "tool") continue;
+    const category = toolCategory(activity.block.name);
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  const detail = [...counts]
+    .map(([category, count]) => {
+      const noun = CATEGORY_COPY[category].noun;
+      return `${count} ${noun}${count === 1 || noun === "other" ? "" : "s"}`;
+    })
+    .join(" · ");
+  return {
+    state: "success",
+    title: `Done · ${tools.length} action${tools.length === 1 ? "" : "s"}`,
+    detail,
+  };
+}
 
 export function needsMoreTurnHistory(
   blocks: readonly Pick<Block, "kind">[],

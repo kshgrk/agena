@@ -5,6 +5,7 @@ import {
   completeTurnBlocks,
   needsMoreTurnHistory,
   projectTurns,
+  summarizeToolActivities,
 } from "./project-turns.ts";
 
 const base = {
@@ -185,6 +186,92 @@ test("approval activity interrupts adjacent tool groups", () => {
     turn.turn.entries.map((entry) => entry.kind),
     ["tool-group", "activity", "tool-group"],
   );
+});
+
+test("summarizes settled work and exposes the active or failed action", () => {
+  const tools = (
+    projectTurns(
+      [
+        {
+          ...base,
+          seq: 1,
+          kind: "user",
+          messageId: "u1",
+          content: [{ type: "text", text: "check it" }],
+        },
+        {
+          ...base,
+          seq: 2,
+          kind: "tool",
+          toolCallId: "t1",
+          name: "read",
+          args: { path: "package.json" },
+          status: "completed",
+          liveOutput: "",
+          result: [],
+        },
+        {
+          ...base,
+          seq: 3,
+          kind: "tool",
+          toolCallId: "t2",
+          name: "bash",
+          args: { command: "pnpm test" },
+          status: "running",
+          liveOutput: "",
+        },
+      ],
+      null,
+    ).history[0] as Extract<
+      ReturnType<typeof projectTurns>["history"][number],
+      { kind: "turn" }
+    >
+  ).turn.entries[0];
+  assert.equal(tools?.kind, "tool-group");
+  if (tools?.kind !== "tool-group") return;
+  assert.deepEqual(summarizeToolActivities(tools.activities), {
+    state: "running",
+    title: "Working · 2 actions",
+    detail: "Running pnpm test",
+  });
+
+  const failed = tools.activities.map((activity) =>
+    activity.id === "t2"
+      ? {
+          ...activity,
+          status: "failed" as const,
+          block: {
+            ...activity.block,
+            status: "failed" as const,
+            error: { code: "exit_1", message: "Typecheck failed" },
+          },
+        }
+      : activity,
+  );
+  assert.deepEqual(summarizeToolActivities(failed), {
+    state: "issue",
+    title: "Stopped at “pnpm test” · 1 issue",
+    detail: "Typecheck failed",
+  });
+
+  const settled = tools.activities.map((activity) =>
+    activity.id === "t2"
+      ? {
+          ...activity,
+          status: "completed" as const,
+          block: {
+            ...activity.block,
+            status: "completed" as const,
+            result: [],
+          },
+        }
+      : activity,
+  );
+  assert.deepEqual(summarizeToolActivities(settled), {
+    state: "success",
+    title: "Done · 2 actions",
+    detail: "1 read · 1 command",
+  });
 });
 
 test("subagents render separately from adjacent tool groups", () => {

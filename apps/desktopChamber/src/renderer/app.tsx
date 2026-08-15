@@ -27,6 +27,7 @@ import {
 import { GlobalShortcuts } from "./shell/shortcuts.tsx";
 import { StatusBar } from "./shell/statusbar.tsx";
 import {
+  applyThemeToDocument,
   connectAndBootstrap,
   hasOverlay,
   hydrateUiFromPersisted,
@@ -63,6 +64,16 @@ export function App() {
   const sidebarCollapsed = useShellUi((s) => s.sidebarCollapsed);
   const mobile = useMobileHost();
   const autoCollapsed = useRef(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const sync = () => {
+      const theme = useUi.getState().theme;
+      if (theme.appearance === "system") applyThemeToDocument(theme);
+    };
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 900px)");

@@ -55,6 +55,9 @@ import {
   runtimeInfoAckSchema,
   type SearchHit,
   type SearchQuery,
+  type SessionChangeDiffQuery,
+  type SessionChangeDiffResponse,
+  type SessionChangesResponse,
   type SessionStatus,
   type SessionSummary,
   type SetFastModeAck,
@@ -566,6 +569,29 @@ export class AgenaClient {
       `/v1/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(toolCallId)}`,
     );
     return (body as { toolCall: ToolCallDetail }).toolCall;
+  }
+
+  async getSessionChanges(sessionId: string): Promise<SessionChangesResponse> {
+    return this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/changes`,
+    ) as Promise<SessionChangesResponse>;
+  }
+
+  async getSessionChangeDiff(
+    sessionId: string,
+    input: SessionChangeDiffQuery,
+  ): Promise<SessionChangeDiffResponse> {
+    const query = new URLSearchParams({
+      worktreeId: input.worktreeId,
+      source: input.source,
+      path: input.path,
+    });
+    if (input.commit) query.set("commit", input.commit);
+    return this.fetchJson(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/changes/diff?${query}`,
+    ) as Promise<SessionChangeDiffResponse>;
   }
 
   async listFiles(opts: ListFilesOptions = {}): Promise<FileEntry[]> {

@@ -1,21 +1,13 @@
-// Connection section: active profile/URL, live connection state, theme
-// preference, and the daemon diagnostics report (versions, protocol,
+// Connection section: active profile/URL and daemon diagnostics (versions, protocol,
 // workspace, .agena discovery with per-descriptor errors).
 import type { DiagnosticsResponse, DiscoveryEntry } from "@agena/protocol";
 import QRCode from "qrcode";
 import { useCallback, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
 import { formatDuration } from "../../lib/format.ts";
-import { useConnection, useUi } from "../../store/index.ts";
+import { useConnection } from "../../store/index.ts";
+import { Badge, type BadgeTone, Button, StatusDot } from "../../ui/index.ts";
 import {
-  Badge,
-  type BadgeTone,
-  Button,
-  Segmented,
-  StatusDot,
-} from "../../ui/index.ts";
-import {
-  Field,
   GroupLabel,
   InlineError,
   ListCard,
@@ -184,8 +176,6 @@ export function ConnectionSection() {
   const state = useConnection((s) => s.state);
   const detail = useConnection((s) => s.detail);
   const info = useConnection((s) => s.info);
-  const theme = useUi((s) => s.theme);
-  const setTheme = useUi((s) => s.setTheme);
 
   const loadDiagnostics = useCallback(
     (_refresh: boolean): Promise<DiagnosticsResponse> =>
@@ -239,22 +229,6 @@ export function ConnectionSection() {
             )}
           </ListCard>
         </div>
-
-        <Field
-          label="Theme"
-          hint="System follows your OS appearance. The terminal stays dark in both."
-        >
-          <Segmented
-            ariaLabel="Theme"
-            value={theme}
-            onValueChange={setTheme}
-            options={[
-              { value: "dark", label: "Dark" },
-              { value: "light", label: "Light" },
-              { value: "system", label: "System" },
-            ]}
-          />
-        </Field>
 
         {info ? <ConductorPairing daemonUrl={info.url} /> : null}
 

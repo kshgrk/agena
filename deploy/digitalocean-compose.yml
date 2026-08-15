@@ -1,0 +1,55 @@
+name: agena-prod
+
+services:
+  daemon:
+    image: agena:local
+    restart: unless-stopped
+    entrypoint: ["/opt/agena-digitalocean-entry.sh"]
+    environment:
+      AGENA_AUTH_TOKEN: ${AGENA_AUTH_TOKEN}
+      AGENA_BROWSER_TOOL: ${AGENA_BROWSER_TOOL:-1}
+      AGENA_PI_DEFAULT_MODEL: ${AGENA_PI_DEFAULT_MODEL:-anthropic/claude-sonnet-5}
+      AGENA_SQLITE_JOURNAL: wal
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY}
+      R2_BUCKET: ${R2_BUCKET:-agena}
+      R2_ENDPOINT: ${R2_ENDPOINT}
+    volumes:
+      - workspace:/workspace
+      - state:/var/lib/agena
+      - home:/home/agena
+      - ./litestream:/usr/local/bin/litestream:ro
+      - ./digitalocean-entry.sh:/opt/agena-digitalocean-entry.sh:ro
+    mem_limit: 6g
+    pids_limit: 2048
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7777/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 30s
+      retries: 5
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      daemon:
+        condition: service_healthy
+    environment:
+      AGENA_DOMAIN: ${AGENA_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.digitalocean:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  workspace: { name: agena-workspace }
+  state: { name: agena-state }
+  home: { name: agena-home }
+  caddy-data: { name: agena-caddy-data }
+  caddy-config: { name: agena-caddy-config }

@@ -849,6 +849,22 @@ type TerminalSessionEnded   = { terminalId: string; exitCode: number | null;
 
 (`terminal.pty.opened/closed` from the daemon draft are dead.) Emitted only for PTYs with a `sessionId` association; standalone PTYs produce no durable events.
 
+### git.* (session change attribution)
+
+```ts
+type GitBaselineRecorded = {
+  worktreeId: string; worktreeRoot: string; cwd: string;
+  head?: string; headRef?: string; detached: boolean; unborn: boolean;
+};
+type GitHeadObserved = {
+  worktreeId: string; worktreeRoot: string;
+  previousHead?: string; head?: string; previousRef?: string; headRef?: string;
+  reason: "tool_completed" | "turn_completed" | "session_resume" | "manual_refresh";
+};
+```
+
+These events record only the durable observation boundary. Git remains authoritative for commit metadata, changed paths, and file contents; Agena does not mirror patches or invent attribution before the first observed baseline. The session-changes read model includes descendant sessions, groups observed commits per worktree, marks commits that left the current branch as abandoned, and reads staged, unstaged, untracked, and conflicted files live.
+
 ### snapshot.* / workspace.* (appended to the workspace control session)
 
 ```ts
@@ -1907,6 +1923,8 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/sessions/:id/events` | **Cold read with fromSeq** | `?fromSeq=0&limit=500&branchId=` → `{events, nextFromSeq}`; `limit` max 2000; branch reads follow INV-11; identical `AgenaEvent` shape to WS replay |
 | GET | `/v1/sessions/:id/transcript` | Compact turn-based cold read for renderers | `?limitTurns=10&beforeMessageId=` or `?aroundMessageId=` → complete active-path user turns, lightweight tool summaries, and an `upToSeq` subscribe cursor; durable events remain unchanged. |
 | GET | `/v1/sessions/:id/tool-calls/:toolCallId` | Lazy full tool-call detail | Returns projected args/result for an explicitly opened tool card; keeps large tool bodies out of initial transcript reads. |
+| GET | `/v1/sessions/:id/changes` | Session-attributed Git review summary | Observed commits plus current staged, unstaged, untracked, and conflicted files grouped by exact worktree; includes file/line totals for the transcript pill. |
+| GET | `/v1/sessions/:id/changes/diff` | Lazy file contents for one reviewed change | `?worktreeId=&source=commit\|staged\|unstaged\|untracked\|conflict&path=&commit=`; the daemon validates session attribution and workspace containment before returning old/new text or an unavailable/binary result. |
 | POST | `/v1/sessions/:id/fork` | Create branch | `{fromSeq, name?}`; appends `branch.created` (+`branch.switched`) |
 | GET | `/v1/search` | Full-text search | `?q=&limit=` → FTS5 hits `{sessionId, messageId, snippet, rank, seq}` (P7) |
 | GET | `/v1/approvals` | Pending approvals | `?pending=1` → events-scan-derived list; backs `agena approvals` |

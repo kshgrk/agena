@@ -1127,6 +1127,78 @@ export function createMockBridge(): AgenaBridge {
       return entries;
     },
 
+    async getSessionChanges(sessionId) {
+      requireConnected();
+      return {
+        sessionId,
+        observedAt: new Date().toISOString(),
+        worktrees: [
+          {
+            worktreeId: "mock-worktree",
+            sessionId,
+            label: "agena",
+            root: ".",
+            cwd: ".",
+            branch: "codex/session-changes",
+            head: "b41d52c",
+            available: true,
+            trackingStartedAt: new Date(Date.now() - 1_800_000).toISOString(),
+            commits: [
+              {
+                oid: "b41d52c063d47a105413cb91ebef67d726b6d5dd",
+                shortOid: "b41d52c",
+                title: "Add session change reviewer",
+                author: "Agena",
+                committedAt: new Date(Date.now() - 600_000).toISOString(),
+                observedAt: new Date(Date.now() - 590_000).toISOString(),
+                observationSeq: 24,
+                state: "current" as const,
+                files: [
+                  {
+                    path: "src/session-changes.ts",
+                    status: "added" as const,
+                    additions: 128,
+                    deletions: 0,
+                    binary: false,
+                  },
+                ],
+                additions: 128,
+                deletions: 0,
+              },
+            ],
+            current: {
+              staged: [],
+              unstaged: [
+                {
+                  path: "src/renderer/changes.tsx",
+                  status: "modified" as const,
+                  additions: 41,
+                  deletions: 12,
+                  binary: false,
+                },
+              ],
+              untracked: [],
+              conflicts: [],
+            },
+          },
+        ],
+        totals: { files: 2, additions: 169, deletions: 12, conflicts: 0 },
+      };
+    },
+
+    async getSessionChangeDiff(_sessionId, input) {
+      requireConnected();
+      return {
+        kind: "text" as const,
+        path: input.path,
+        oldText: 'export function reviewChanges() {\n  return "session";\n}\n',
+        newText:
+          'export function reviewChanges(scope = "session") {\n  return { scope, files: 2 };\n}\n',
+        additions: 2,
+        deletions: 2,
+      };
+    },
+
     async readFile(path: string): Promise<Uint8Array> {
       requireConnected();
       const content = readFixtureFile(path);

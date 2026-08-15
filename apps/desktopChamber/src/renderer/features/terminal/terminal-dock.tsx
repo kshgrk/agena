@@ -181,9 +181,7 @@ export function TerminalDock() {
     [],
   );
 
-  // Live theme switch: re-read the token-built xterm theme when data-theme
-  // flips (the --term-* values match across themes today, but the tokens own
-  // that decision — the observer keeps xterm honest if they ever diverge).
+  // Live theme switch: each family owns a terminal palette.
   useEffect(() => {
     const mo = new MutationObserver(() => {
       const theme = readXtermTheme();
@@ -192,7 +190,7 @@ export function TerminalDock() {
     });
     mo.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["data-theme"],
+      attributeFilter: ["data-theme", "data-appearance"],
     });
     return () => mo.disconnect();
   }, []);

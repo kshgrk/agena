@@ -55,7 +55,7 @@ function toXtermColor(css: string): string {
 }
 
 /** xterm theme from the --term-* design tokens (design.md §10). Read at each
- * terminal mount and re-read on data-theme mutation. */
+ * terminal mount and re-read on theme/appearance mutation. */
 export function readXtermTheme(): ITheme {
   const css = getComputedStyle(document.documentElement);
   return buildXtermTheme((varName) => {

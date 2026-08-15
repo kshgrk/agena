@@ -4,7 +4,6 @@ import {
   ChevronRight,
   ChevronUp,
   LoaderCircle,
-  Wrench,
   X,
 } from "lucide-react";
 import {
@@ -16,6 +15,7 @@ import {
   useState,
 } from "react";
 import { ActivityReveal, BusyDots, UserSendReveal } from "./animations.tsx";
+import { summarizeToolActivities } from "./project-turns.ts";
 import type {
   ActivityRenderer,
   ChamberActivity,
@@ -205,11 +205,7 @@ function ToolActivityGroup({
   delayMs: number;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const running = activities.some((activity) => activity.status === "running");
-  const issues = activities.filter((activity) =>
-    ["failed", "aborted", "denied"].includes(activity.status),
-  ).length;
-  const label = `${activities.length} tool call${activities.length === 1 ? "" : "s"}`;
+  const summary = summarizeToolActivities(activities);
 
   return (
     <ActivityReveal animate={animate} delayMs={delayMs}>
@@ -217,7 +213,7 @@ function ToolActivityGroup({
         <button
           type="button"
           onClick={() => setExpanded((value) => !value)}
-          className="flex min-h-8 w-full items-center gap-2 rounded-md px-1 text-left text-sm text-muted-foreground hover:bg-[var(--interactive-hover)]"
+          className="flex min-h-10 w-full items-start gap-2 rounded-md px-1 py-1.5 text-left text-sm text-muted-foreground hover:bg-[var(--interactive-hover)]"
           aria-expanded={expanded}
         >
           {expanded ? (
@@ -225,24 +221,34 @@ function ToolActivityGroup({
           ) : (
             <ChevronRight className="size-3.5 shrink-0" />
           )}
-          <Wrench className="size-3.5 shrink-0" />
-          <span className="font-medium text-foreground">{label}</span>
-          <span className="ml-auto flex items-center gap-1.5 text-xs">
-            {running ? (
-              <>
-                <LoaderCircle className="size-3.5 animate-spin text-tool-running" />
-                Working
-              </>
-            ) : issues > 0 ? (
-              <>
-                <X className="size-3.5 text-tool-error" />
-                {issues} issue{issues === 1 ? "" : "s"}
-              </>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 font-medium text-foreground">
+              {summary.state === "running" ? (
+                <LoaderCircle className="size-3.5 shrink-0 animate-spin text-tool-running" />
+              ) : summary.state === "issue" ? (
+                <X className="size-3.5 shrink-0 text-tool-error" />
+              ) : (
+                <Check className="size-3.5 shrink-0 text-tool-success" />
+              )}
+              <span className="truncate">{summary.title}</span>
+            </span>
+            <span
+              className={
+                summary.state === "issue"
+                  ? "mt-0.5 block truncate text-xs text-tool-error"
+                  : "mt-0.5 block truncate text-xs text-muted-foreground"
+              }
+            >
+              {summary.detail}
+            </span>
+          </span>
+          <span className="mt-0.5 shrink-0 text-xs">
+            {summary.state === "running" ? (
+              <>active</>
+            ) : summary.state === "issue" ? (
+              "review"
             ) : (
-              <>
-                <Check className="size-3.5 text-tool-success" />
-                done
-              </>
+              "details"
             )}
           </span>
         </button>

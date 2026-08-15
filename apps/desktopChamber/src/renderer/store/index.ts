@@ -20,6 +20,7 @@ export {
 } from "./connection.ts";
 export { ensureSubscribed, ingestBatch, resetSubscriptions } from "./ingest.ts";
 export { type SessionsStore, useSessions } from "./sessions.ts";
+export { resolveAppearance } from "./theme.ts";
 export {
   activeBranchBlocks,
   applyEvent,

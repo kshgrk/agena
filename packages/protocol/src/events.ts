@@ -286,6 +286,33 @@ export const agentTaskSummarySchema = agentTaskCreatedSchema.extend({
 });
 export type AgentTaskSummary = z.infer<typeof agentTaskSummarySchema>;
 
+export const gitBaselineRecordedSchema = z.object({
+  worktreeId: z.string().min(1),
+  worktreeRoot: z.string().min(1),
+  cwd: z.string().min(1),
+  head: z.string().min(1).optional(),
+  headRef: z.string().min(1).optional(),
+  detached: z.boolean(),
+  unborn: z.boolean(),
+});
+export type GitBaselineRecorded = z.infer<typeof gitBaselineRecordedSchema>;
+
+export const gitHeadObservedSchema = z.object({
+  worktreeId: z.string().min(1),
+  worktreeRoot: z.string().min(1),
+  previousHead: z.string().min(1).optional(),
+  head: z.string().min(1).optional(),
+  previousRef: z.string().min(1).optional(),
+  headRef: z.string().min(1).optional(),
+  reason: z.enum([
+    "tool_completed",
+    "turn_completed",
+    "session_resume",
+    "manual_refresh",
+  ]),
+});
+export type GitHeadObserved = z.infer<typeof gitHeadObservedSchema>;
+
 export const terminalSessionStartedSchema = z.object({
   terminalId: z.string().min(1),
   shell: z.string().min(1),
@@ -452,6 +479,8 @@ export const durableEventSchemas = {
   "agent.task.failed": agentTaskFailedSchema,
   "agent.task.cancelled": agentTaskCancelledSchema,
   "agent.task.message.sent": agentTaskMessageSentSchema,
+  "git.baseline.recorded": gitBaselineRecordedSchema,
+  "git.head.observed": gitHeadObservedSchema,
   "terminal.session.started": terminalSessionStartedSchema,
   "terminal.session.ended": terminalSessionEndedSchema,
   "model.changed": modelChangedSchema,
@@ -634,6 +663,18 @@ export const knownAgenaEventSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("agent.task.message.sent"),
     payload: agentTaskMessageSentSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("git.baseline.recorded"),
+    payload: gitBaselineRecordedSchema,
+  }),
+  z.object({
+    ...eventBase,
+    v: z.literal(1),
+    type: z.literal("git.head.observed"),
+    payload: gitHeadObservedSchema,
   }),
   z.object({
     ...eventBase,

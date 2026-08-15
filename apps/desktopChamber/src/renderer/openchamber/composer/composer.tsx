@@ -117,14 +117,16 @@ export const ChamberComposer = forwardRef<
           ) : null}
         </div>
         {usage}
-        <button
-          className="chamber-mobile-new"
-          type="button"
-          onClick={onNewSession ?? expandMobile}
-          aria-label="Open message composer"
-        >
-          <Plus aria-hidden="true" />
-        </button>
+        {onNewSession ? (
+          <button
+            className="chamber-mobile-new"
+            type="button"
+            onClick={onNewSession}
+            aria-label="New session"
+          >
+            <Plus aria-hidden="true" />
+          </button>
+        ) : null}
       </div>
     );
   }

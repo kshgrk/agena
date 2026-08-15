@@ -8,7 +8,6 @@ import {
 } from "../../features/sessions/sections.ts";
 import { getBridge } from "../../lib/bridge.ts";
 import { formatBridgeError } from "../../lib/errors.ts";
-import { formatRelativeTime } from "../../lib/format.ts";
 import {
   ensureSubscribed,
   pushToast,
@@ -34,8 +33,6 @@ function nodeOf(
   return {
     id: session.sessionId,
     title: session.title || "Untitled session",
-    context: session.subagent?.role ?? session.cwd,
-    time: formatRelativeTime(session.updatedAt).replace(" ago", ""),
     activity: activity(session),
     readOnly: session.sessionKind === "subagent",
     ...(children.length ? { children } : {}),

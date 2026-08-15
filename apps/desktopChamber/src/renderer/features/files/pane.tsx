@@ -18,7 +18,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBridge } from "../../lib/bridge.ts";
 import { formatBridgeError } from "../../lib/errors.ts";
 import { formatBytes } from "../../lib/format.ts";
-import { pushToast, useSessions, useUi } from "../../store/index.ts";
+import {
+  pushToast,
+  resolveAppearance,
+  useSessions,
+  useUi,
+} from "../../store/index.ts";
 import {
   cx,
   EmptyState,
@@ -47,14 +52,6 @@ type ViewerState =
   | { kind: "binary"; path: string; size: number }
   | { kind: "image"; path: string }
   | { kind: "text"; path: string; size: number; content: string; lang: string };
-
-function resolvedTheme(theme: "dark" | "light" | "system"): "dark" | "light" {
-  if (theme !== "system") return theme;
-  return typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
-}
 
 // ---- tree ------------------------------------------------------------------------
 
@@ -273,7 +270,7 @@ function Viewer({ viewer }: { viewer: ViewerState }) {
         <CodeView
           code={viewer.content}
           lang={viewer.lang}
-          theme={resolvedTheme(theme)}
+          theme={resolveAppearance(theme.appearance)}
         />
       );
   }

@@ -1,0 +1,6 @@
+{$AGENA_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy daemon:7777 {
+		flush_interval -1
+	}
+}

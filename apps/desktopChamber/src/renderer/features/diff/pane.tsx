@@ -7,6 +7,7 @@ import { DiffModeEnum, DiffView } from "@git-diff-view/react";
 import { ChevronLeft, FileDiff, FilePen, X } from "lucide-react";
 import { useMemo } from "react";
 import { useSessions } from "../../store/sessions.ts";
+import { resolveAppearance } from "../../store/theme.ts";
 import { useTranscripts } from "../../store/transcript.ts";
 import { useUi } from "../../store/ui.ts";
 import {
@@ -26,14 +27,6 @@ import {
   useDiff,
 } from "./diff-store.ts";
 import { listFileEdits } from "./edit-tools.ts";
-
-function resolvedTheme(theme: "dark" | "light" | "system"): "dark" | "light" {
-  if (theme !== "system") return theme;
-  return typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
-}
 
 const MODE_OPTIONS = [
   { value: "unified", label: "Unified" },
@@ -113,7 +106,7 @@ function DiffBody({ entry, mode }: { entry: DiffEntry; mode: DiffMode }) {
       diffViewMode={
         mode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified
       }
-      diffViewTheme={resolvedTheme(theme)}
+      diffViewTheme={resolveAppearance(theme.appearance)}
       diffViewHighlight
       diffViewFontSize={13}
     />

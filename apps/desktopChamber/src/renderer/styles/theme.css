@@ -3,17 +3,20 @@
  * Owner: design agent (W1). See docs/contracts/design.md — the two files are one contract.
  *
  * Architecture (borrowed from openchamber, MIT):
- *   1. Raw CSS custom properties on :root (dark = default) and [data-theme="light"].
+ *   1. Raw CSS custom properties on :root plus family/appearance overrides.
  *   2. `@theme inline` maps raw vars → Tailwind tokens so utilities re-resolve per theme.
  *   3. Components use ONLY Tailwind utilities backed by these tokens (or var(--*)).
  *      Raw hex/oklch values in components are forbidden.
  */
 
 @import "tailwindcss";
+@import "./theme-families.css";
 
 @source "../**/*.{ts,tsx,html}";
 
-@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+@custom-variant light (
+  &:where([data-appearance="light"], [data-appearance="light"] *)
+);
 
 /* ────────────────────────────────────────────────────────────────────────────
    RAW TOKENS — DARK (default). "Graphite & Iris": cool graphite neutrals
@@ -126,7 +129,7 @@
    RAW TOKENS — LIGHT override. Same hues, inverted lightness. Terminal and
    its ANSI palette are intentionally NOT overridden (terminal stays dark).
    ──────────────────────────────────────────────────────────────────────────── */
-[data-theme="light"] {
+:root:not([data-theme])[data-appearance="light"] {
   color-scheme: light;
 
   --bg-canvas: oklch(0.985 0.002 270);

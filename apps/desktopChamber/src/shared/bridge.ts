@@ -31,6 +31,9 @@ import type {
   RespondToApprovalAck,
   RuntimeInfoAck,
   SearchHit,
+  SessionChangeDiffQuery,
+  SessionChangeDiffResponse,
+  SessionChangesResponse,
   SessionStatus,
   SessionSummary,
   SetFastModeAck,
@@ -125,6 +128,20 @@ export type PtyHandle = {
 
 // ---- persistence ------------------------------------------------------------
 
+export type ThemeFamily =
+  | "graphite"
+  | "folio"
+  | "cobalt"
+  | "signal"
+  | "evergreen"
+  | "clay"
+  | "harbor";
+export type ThemeAppearance = "dark" | "dim" | "light" | "system";
+export type ThemePreference = {
+  family: ThemeFamily;
+  appearance: ThemeAppearance;
+};
+
 /** Desktop-local state (FN-9 scope: losing this loses nothing but comfort). */
 export type PersistedState = {
   /** sessionId → replay cursor; interoperable with the CLI's cursors.json shape. */
@@ -134,7 +151,7 @@ export type PersistedState = {
   /** Dockview serialized layout, opaque to main. */
   layout: unknown;
   prefs: {
-    theme: "dark" | "light" | "system";
+    theme: ThemePreference;
   };
   lastActiveSessionId: string | null;
   activeProfile: string | null;
@@ -144,7 +161,7 @@ export const EMPTY_PERSISTED: PersistedState = {
   cursors: {},
   drafts: {},
   layout: null,
-  prefs: { theme: "dark" },
+  prefs: { theme: { family: "graphite", appearance: "system" } },
   lastActiveSessionId: null,
   activeProfile: null,
 };
@@ -321,6 +338,11 @@ export type AgenaBridge = {
     sessionId: string,
     toolCallId: string,
   ): Promise<ToolCallDetail>;
+  getSessionChanges(sessionId: string): Promise<SessionChangesResponse>;
+  getSessionChangeDiff(
+    sessionId: string,
+    input: SessionChangeDiffQuery,
+  ): Promise<SessionChangeDiffResponse>;
   listUserMessages(sessionId: string): Promise<UserMessageAnchor[]>;
   search(
     query: string,

@@ -8,6 +8,7 @@ import {
   Blocks,
   FolderInput,
   Info,
+  Palette,
   Plug,
   Server,
   Sparkles,
@@ -19,6 +20,7 @@ import { useMemo, useState } from "react";
 import { useUi } from "../../store/index.ts";
 import { cx, IconButton, Input, ScrollArea } from "../../ui/index.ts";
 import { AboutSection } from "./about.tsx";
+import { AppearanceSection } from "./appearance.tsx";
 import { ConnectionSection } from "./connection.tsx";
 import { filterSettingsItems } from "./lib.ts";
 import { McpSection } from "./mcp.tsx";
@@ -39,6 +41,12 @@ const SECTIONS: ReadonlyArray<{
     title: "Connection",
     icon: Plug,
     keywords: ["daemon", "profile", "diagnostics", "theme"],
+  },
+  {
+    id: "appearance",
+    title: "Appearance",
+    icon: Palette,
+    keywords: ["theme", "dark", "light", "system", "color", "accessibility"],
   },
   {
     id: "providers",
@@ -82,6 +90,8 @@ function SectionBody({ section }: { section: SettingsSection }) {
   switch (section) {
     case "connection":
       return <ConnectionSection />;
+    case "appearance":
+      return <AppearanceSection />;
     case "providers":
       return <ProvidersSection />;
     case "plugins":
@@ -118,12 +128,13 @@ export function SettingsWindow() {
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
             "flex h-[600px] max-h-[85vh] w-[880px] max-w-[calc(100vw-32px)]",
             "overflow-hidden rounded-xl border border-border bg-surface shadow-overlay",
+            "max-md:inset-0 max-md:h-full max-md:max-h-none max-md:w-full max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:flex-col max-md:rounded-none max-md:border-0 max-md:pb-[env(safe-area-inset-bottom)] max-md:pt-[env(safe-area-inset-top)]",
             "animate-fade-in",
           )}
         >
           <nav
             aria-label="Settings sections"
-            className="flex w-40 shrink-0 flex-col border-r border-border-subtle p-2"
+            className="flex w-40 shrink-0 flex-col border-r border-border-subtle p-2 max-md:w-full max-md:border-b max-md:border-r-0 max-md:p-3"
           >
             <RadixDialog.Title className="px-2 pb-2 pt-1 text-lg font-semibold text-fg">
               Settings
@@ -136,14 +147,14 @@ export function SettingsWindow() {
               className="mb-2"
               onChange={(event) => setQuery(event.target.value)}
             />
-            <div className="space-y-0.5">
+            <div className="space-y-0.5 max-md:flex max-md:gap-1 max-md:overflow-x-auto max-md:space-y-0">
               {visibleSections.map(({ id, title, icon: Icon }) => (
                 <button
                   key={id}
                   type="button"
                   onClick={() => setSection(id)}
                   className={cx(
-                    "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors",
+                    "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors max-md:h-11 max-md:w-auto max-md:shrink-0 max-md:px-3",
                     section === id
                       ? "bg-raised text-fg"
                       : "text-fg-secondary hover:bg-raised/60",
@@ -168,7 +179,7 @@ export function SettingsWindow() {
                 </IconButton>
               </RadixDialog.Close>
             </div>
-            <ScrollArea className="h-full p-6">
+            <ScrollArea className="h-full p-6 max-md:p-4">
               <div className="max-w-[560px]">
                 <SectionBody section={section} />
               </div>

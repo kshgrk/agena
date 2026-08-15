@@ -846,6 +846,111 @@ export const fileEntrySchema = z.object({
 });
 export type FileEntry = z.infer<typeof fileEntrySchema>;
 
+export const gitChangedFileSchema = z.object({
+  path: z.string().min(1),
+  previousPath: z.string().min(1).optional(),
+  status: z.enum([
+    "added",
+    "modified",
+    "deleted",
+    "renamed",
+    "untracked",
+    "conflict",
+  ]),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  binary: z.boolean(),
+});
+export type GitChangedFile = z.infer<typeof gitChangedFileSchema>;
+
+export const gitCommitChangeSchema = z.object({
+  oid: z.string().min(1),
+  shortOid: z.string().min(1),
+  title: z.string(),
+  author: z.string(),
+  committedAt: z.string(),
+  observedAt: z.string(),
+  observationSeq: z.number().int().positive(),
+  state: z.enum(["current", "abandoned"]),
+  files: z.array(gitChangedFileSchema),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+});
+export type GitCommitChange = z.infer<typeof gitCommitChangeSchema>;
+
+export const gitCurrentChangesSchema = z.object({
+  staged: z.array(gitChangedFileSchema),
+  unstaged: z.array(gitChangedFileSchema),
+  untracked: z.array(gitChangedFileSchema),
+  conflicts: z.array(gitChangedFileSchema),
+});
+export type GitCurrentChanges = z.infer<typeof gitCurrentChangesSchema>;
+
+export const gitWorktreeChangesSchema = z.object({
+  worktreeId: z.string().min(1),
+  sessionId: z.string().min(1),
+  label: z.string().min(1),
+  root: z.string().min(1),
+  cwd: z.string().min(1),
+  branch: z.string().optional(),
+  head: z.string().optional(),
+  available: z.boolean(),
+  trackingStartedAt: z.string().optional(),
+  error: z.string().optional(),
+  commits: z.array(gitCommitChangeSchema),
+  current: gitCurrentChangesSchema,
+});
+export type GitWorktreeChanges = z.infer<typeof gitWorktreeChangesSchema>;
+
+export const sessionChangesResponseSchema = z.object({
+  sessionId: z.string().min(1),
+  observedAt: z.string(),
+  worktrees: z.array(gitWorktreeChangesSchema),
+  totals: z.object({
+    files: z.number().int().nonnegative(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    conflicts: z.number().int().nonnegative(),
+  }),
+});
+export type SessionChangesResponse = z.infer<
+  typeof sessionChangesResponseSchema
+>;
+
+export const sessionChangeDiffQuerySchema = z.object({
+  worktreeId: z.string().min(1),
+  source: z.enum(["commit", "staged", "unstaged", "untracked", "conflict"]),
+  path: z.string().min(1),
+  commit: z.string().min(1).optional(),
+});
+export type SessionChangeDiffQuery = z.infer<
+  typeof sessionChangeDiffQuerySchema
+>;
+
+export const sessionChangeDiffResponseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("text"),
+    path: z.string().min(1),
+    oldText: z.string(),
+    newText: z.string(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+  }),
+  z.object({
+    kind: z.literal("binary"),
+    path: z.string().min(1),
+    message: z.string(),
+  }),
+  z.object({
+    kind: z.literal("unavailable"),
+    path: z.string().min(1),
+    message: z.string(),
+  }),
+]);
+export type SessionChangeDiffResponse = z.infer<
+  typeof sessionChangeDiffResponseSchema
+>;
+
 export const listFilesResponseSchema = z.object({
   entries: z.array(fileEntrySchema),
   nextCursor: z.string().nullable(),
@@ -1145,6 +1250,19 @@ export const PTY_HTTP_ROUTES = {
     path: "/v1/files",
     query: listFilesQuerySchema,
     response: listFilesResponseSchema,
+  },
+  getSessionChanges: {
+    method: "GET",
+    path: "/v1/sessions/:id/changes",
+    params: sessionIdParamsSchema,
+    response: sessionChangesResponseSchema,
+  },
+  getSessionChangeDiff: {
+    method: "GET",
+    path: "/v1/sessions/:id/changes/diff",
+    params: sessionIdParamsSchema,
+    query: sessionChangeDiffQuerySchema,
+    response: sessionChangeDiffResponseSchema,
   },
   readFile: {
     method: "GET",

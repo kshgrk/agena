@@ -528,6 +528,9 @@ export function createWsBridge(
       need().readCompactTranscript(sessionId, o ?? {}),
     getToolCallDetail: (sessionId, toolCallId) =>
       need().getToolCallDetail(sessionId, toolCallId),
+    getSessionChanges: (sessionId) => need().getSessionChanges(sessionId),
+    getSessionChangeDiff: (sessionId, input) =>
+      need().getSessionChangeDiff(sessionId, input),
     listUserMessages: (sessionId) => need().listUserMessages(sessionId),
     search: (query, o) => need().search(query, o ?? {}),
     listApprovals: () => need().listApprovals(),

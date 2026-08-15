@@ -15,14 +15,7 @@ import {
   useSessions,
   useTranscripts,
 } from "../../store/index.ts";
-import {
-  Button,
-  cx,
-  EmptyState,
-  Input,
-  RelativeTime,
-  Spinner,
-} from "../../ui/index.ts";
+import { Button, cx, EmptyState, Input, Spinner } from "../../ui/index.ts";
 import {
   nestedSessionRows,
   projectSidebarAgentTasks,
@@ -30,7 +23,6 @@ import {
 import {
   createGlobalSessionInput,
   createProjectSessionInput,
-  pathTail,
   splitSessionSections,
 } from "./sections.ts";
 
@@ -182,7 +174,7 @@ export function MobileSessions() {
               type="button"
               onClick={() => void activate(id)}
               className={cx(
-                "flex min-h-13 min-w-0 flex-1 items-center gap-3 overflow-hidden rounded-xl px-3 py-2 text-left active:bg-raised",
+                "flex min-h-11 min-w-0 flex-1 items-center gap-3 overflow-hidden rounded-xl px-3 text-left active:bg-raised",
                 activeSessionId === id && "bg-raised",
               )}
             >
@@ -200,30 +192,8 @@ export function MobileSessions() {
                           : "bg-fg-faint",
                 )}
               />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-fg">
-                  {session.title || row.task?.role || "Untitled session"}
-                </span>
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
-                  <span className="truncate font-mono">
-                    {row.task
-                      ? `${row.task.role} agent`
-                      : pathTail(session.cwd)}
-                  </span>
-                  <span aria-hidden="true" className="shrink-0 text-fg-faint">
-                    ·
-                  </span>
-                  {row.task ? (
-                    <span className="shrink-0 capitalize">
-                      {row.task.status}
-                    </span>
-                  ) : (
-                    <RelativeTime
-                      iso={session.updatedAt}
-                      className="shrink-0"
-                    />
-                  )}
-                </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+                {session.title || row.task?.role || "Untitled session"}
               </span>
               {childCount > 0 ? (
                 <span className="rounded-full bg-raised px-2 py-1 text-2xs tabular-nums text-fg-muted">

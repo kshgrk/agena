@@ -67,7 +67,7 @@
   --radius-2xl: 0.75rem;
 }
 
-[data-theme="light"] {
+[data-appearance="light"] {
   color-scheme: light;
 
   --bg-canvas: #fdfcfa;
@@ -193,24 +193,51 @@ html[data-native-platform="android"] .oc-mobile-composer {
 .transcript-column > .rounded-2xl {
   border-color: color-mix(in srgb, var(--border) 80%, transparent);
   border-radius: var(--radius-xl);
-  background: #171616;
+  background: var(--bg-surface);
   box-shadow: 0 4px 16px -4px rgb(0 0 0 / 12%);
-}
-
-[data-theme="light"] .transcript-column > .rounded-2xl {
-  background: #f7f6f4;
 }
 
 /* Agena exposes more runtime controls than OpenChamber. On phone, keep every
    control reachable without crushing labels by moving send/queue to row two. */
-.agena-mobile .chamber-composer-footer {
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-footer {
   flex-wrap: wrap;
   row-gap: 0.25rem;
 }
 
-.agena-mobile .chamber-composer-footer > .ml-auto {
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-footer-start,
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-footer-end {
   flex: 1 0 100%;
+}
+
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-footer-start {
+  justify-content: space-between;
+}
+
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-footer-end {
   justify-content: flex-end;
+}
+
+.agena-mobile
+  .chamber-composer.is-mobile
+  .chamber-composer-footer-end
+  .agena-composer-control
+  > span,
+.agena-mobile
+  .chamber-composer.is-mobile
+  .chamber-composer-footer-end
+  .agena-composer-control
+  > svg:last-child {
+  display: none;
+}
+
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-icon-button,
+.agena-mobile .chamber-composer.is-mobile .chamber-composer-primary,
+.agena-mobile .chamber-composer.is-mobile .agena-composer-control {
+  width: 2.75rem;
+  height: 2.75rem;
+  max-width: none;
+  justify-content: center;
+  padding-inline: 0;
 }
 
 /* OpenChamber tool calls are quiet rows until expanded, not stacked cards. */

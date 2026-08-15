@@ -5,6 +5,11 @@
 import { create } from "zustand";
 import { EMPTY_PERSISTED, type PersistedState } from "../../shared/bridge.ts";
 import { useSessions } from "./sessions.ts";
+import {
+  DEFAULT_THEME,
+  normalizeThemePreference,
+  resolveAppearance,
+} from "./theme.ts";
 import { getBridge, useTranscripts } from "./transcript.ts";
 import type { Toast, ToastKind, TranscriptState, UiSlice } from "./types.ts";
 
@@ -33,7 +38,7 @@ export const uiInitial: UiSlice = {
   selected: null,
   jump: null,
   composerInsert: null,
-  theme: "dark",
+  theme: DEFAULT_THEME,
   paletteOpen: false,
   settingsOpen: false,
   inspectorOpen: false,
@@ -49,17 +54,12 @@ export const hasOverlay = (s: UiSlice): boolean =>
 
 // ---- theme --------------------------------------------------------------------
 
-/** "system" resolves via prefers-color-scheme; theme.css defaults to dark. */
+/** The family stays stable while "system" resolves through the OS appearance. */
 export function applyThemeToDocument(theme: UiSlice["theme"]): void {
   if (typeof document === "undefined") return;
-  const resolved =
-    theme === "system"
-      ? typeof window !== "undefined" &&
-        window.matchMedia?.("(prefers-color-scheme: light)").matches
-        ? "light"
-        : "dark"
-      : theme;
-  document.documentElement.dataset.theme = resolved;
+  document.documentElement.dataset.theme = theme.family;
+  document.documentElement.dataset.appearance =
+    theme.appearance === "dim" ? "dim" : resolveAppearance(theme.appearance);
 }
 
 let nonce = 0; // monotonically increasing so repeated requests re-trigger
@@ -76,9 +76,10 @@ export const useUi = create<UiStore>((set, get) => ({
   requestComposerInsert: (text) =>
     set({ composerInsert: { text, nonce: ++nonce } }),
   setTheme: (theme) => {
-    applyThemeToDocument(theme);
-    set({ theme });
-    savePersistedPatch({ prefs: { theme } });
+    const normalized = normalizeThemePreference(theme);
+    applyThemeToDocument(normalized);
+    set({ theme: normalized });
+    savePersistedPatch({ prefs: { theme: normalized } });
   },
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
@@ -153,8 +154,9 @@ let diskCursors: Record<string, { branchId: string; seq: number }> = {};
  * re-persisting. */
 export function hydrateUiFromPersisted(persisted: PersistedState): void {
   diskCursors = { ...persisted.cursors };
-  useUi.setState({ theme: persisted.prefs.theme });
-  applyThemeToDocument(persisted.prefs.theme);
+  const theme = normalizeThemePreference(persisted.prefs.theme);
+  useUi.setState({ theme });
+  applyThemeToDocument(theme);
 }
 
 /**

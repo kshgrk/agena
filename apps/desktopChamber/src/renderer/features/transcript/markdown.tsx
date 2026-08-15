@@ -8,6 +8,7 @@ import remarkGfm from "remark-gfm";
 import { cx } from "../../ui/index.ts";
 import { openInAppBrowser } from "../browser/url.ts";
 import { CodeBlock, InlineCode } from "./code-block.tsx";
+import { MermaidDiagram } from "./mermaid-diagram.tsx";
 
 const REMARK_PLUGINS = [remarkGfm];
 
@@ -39,6 +40,9 @@ const components: Components = {
   code: ({ className, children }) => {
     const match = /language-(\S+)/.exec(className ?? "");
     const text = String(children ?? "").replace(/\n$/, "");
+    if (match?.[1]?.toLowerCase() === "mermaid") {
+      return <MermaidDiagram code={text} />;
+    }
     if (match || text.includes("\n")) {
       return (
         <CodeBlock

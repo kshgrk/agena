@@ -570,6 +570,10 @@ export function createBridgeHost({
         return need().readCompactTranscript(args[0], args[1] ?? {});
       case "getToolCallDetail":
         return need().getToolCallDetail(args[0], args[1]);
+      case "getSessionChanges":
+        return need().getSessionChanges(args[0]);
+      case "getSessionChangeDiff":
+        return need().getSessionChangeDiff(args[0], args[1]);
       case "listUserMessages":
         return need().listUserMessages(args[0]);
       case "search":

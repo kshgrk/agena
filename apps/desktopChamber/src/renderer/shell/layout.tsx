@@ -22,6 +22,11 @@ import {
   pane as browserPane,
   initBrowserStore,
 } from "../features/browser/index.ts";
+import {
+  OPEN_SESSION_CHANGES_EVENT,
+  SessionChangesPill,
+  SessionChangesWorkspace,
+} from "../features/changes/index.tsx";
 import { Composer } from "../features/composer/composer.tsx";
 import { pane as diffPane } from "../features/diff/index.ts";
 import { pane as filesPane } from "../features/files/index.ts";
@@ -60,6 +65,7 @@ import {
 
 const SESSION_PANEL_PREFIX = "session:";
 const QUICK_CHAT_PANEL_PREFIX = "quick-chat:";
+const CHANGES_PANEL_PREFIX = "changes:";
 const EMPTY_SESSION_PANEL = "session.empty";
 
 function sessionPanelId(sessionId: string): string {
@@ -82,6 +88,12 @@ function quickChatPanelParts(
 
 function quickChatSessionId(panelId: string): string | null {
   return quickChatPanelParts(panelId)?.sessionId ?? null;
+}
+
+function changesSessionId(panelId: string): string | null {
+  return panelId.startsWith(CHANGES_PANEL_PREFIX)
+    ? panelId.slice(CHANGES_PANEL_PREFIX.length)
+    : null;
 }
 
 function sessionTabTitle(sessionId: string): string {
@@ -219,8 +231,9 @@ function SessionWorkspace({ sessionId }: { sessionId: string }) {
       <div className="col-start-1 row-start-1 lg:col-span-2">
         <ChildSessionBanner sessionId={sessionId} />
       </div>
-      <div className="col-start-1 row-start-2 min-h-0 min-w-0 lg:col-start-2">
+      <div className="relative col-start-1 row-start-2 min-h-0 min-w-0 lg:col-start-2">
         <AgenaChamberChat sessionId={sessionId} />
+        <SessionChangesPill sessionId={sessionId} />
       </div>
       <div className="col-start-1 row-start-3 min-w-0 lg:col-start-2">
         <Composer sessionId={sessionId} />
@@ -254,6 +267,8 @@ const RIGHT_PANES: readonly PaneDefinition[] = [
 const RIGHT_IDS: readonly string[] = RIGHT_PANES.map((p) => p.id);
 
 function panelNode(id: string): ReactNode {
+  const changesId = changesSessionId(id);
+  if (changesId) return <SessionChangesWorkspace sessionId={changesId} />;
   const quickChatId = quickChatSessionId(id);
   if (quickChatId) return <SessionWorkspace sessionId={quickChatId} />;
   const sessionId = panelSessionId(id);
@@ -341,6 +356,27 @@ function openQuickChatPanel(
   });
   added.api.setActive();
   focusQuickChatComposer(childSessionId);
+}
+
+function openChangesPanel(api: DockviewApi, sessionId: string): void {
+  const id = `${CHANGES_PANEL_PREFIX}${sessionId}`;
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  const added = api.addPanel({
+    id,
+    component: id,
+    title: "Session Changes",
+    position: {
+      referencePanel: api.getPanel(sessionPanelId(sessionId))
+        ? sessionPanelId(sessionId)
+        : centerPanelId(api),
+      direction: "within",
+    },
+  });
+  added.api.setActive();
 }
 
 function focusQuickChatComposer(sessionId: string): void {
@@ -640,6 +676,12 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
     createQuickChatFromHeader = (rootSessionId, sourceSessionId) => {
       void createQuickChat(rootSessionId, sourceSessionId);
     };
+    const onOpenChanges = (event: Event) => {
+      const sessionId = (event as CustomEvent<{ sessionId?: string }>).detail
+        ?.sessionId;
+      if (sessionId) openChangesPanel(api, sessionId);
+    };
+    window.addEventListener(OPEN_SESSION_CHANGES_EVENT, onOpenChanges);
     const unregister = registerCommands([
       ...[filesPane, timelinePane, snapshotsPane, diffPane].map((p) => ({
         id: `view.${p.id}`,
@@ -662,6 +704,17 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
           return Boolean(active && active.purpose !== "quick_chat");
         },
         run: revealQuickChat,
+      },
+      {
+        id: "session.changes",
+        title: "Review Session Changes",
+        group: "Session",
+        shortcut: "mod+shift+g",
+        when: () => useSessions.getState().activeSessionId !== null,
+        run: () => {
+          const sessionId = useSessions.getState().activeSessionId;
+          if (sessionId) openChangesPanel(api, sessionId);
+        },
       },
       {
         id: "search.open",
@@ -701,6 +754,7 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       disposed = true;
       window.clearTimeout(saveTimer);
       unregister();
+      window.removeEventListener(OPEN_SESSION_CHANGES_EVENT, onOpenChanges);
       unsubUi();
       unsubSessions();
       unsubShell();
