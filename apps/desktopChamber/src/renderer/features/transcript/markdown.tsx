@@ -2,7 +2,7 @@
 // singleton), inline code → InlineCode, links route to the embedded browser,
 // no raw HTML (skipHtml). Prose rules from design.md §4/§6. Memoized so
 // settled blocks keep stable identity while the tail streams.
-import { memo } from "react";
+import { memo, type ReactNode, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cx } from "../../ui/index.ts";
@@ -98,14 +98,64 @@ export type MarkdownProps = {
   text: string;
   /** Muted rendering for thinking bodies (design.md §6): everything inherits muted. */
   muted?: boolean;
+  className?: string;
+  /** Return true when a file/document host handled the link internally. */
+  onLink?: (href: string) => boolean;
+  renderImage?: (input: {
+    src: string;
+    alt: string;
+    title?: string;
+  }) => ReactNode;
 };
 
-export const Markdown = memo(function Markdown({ text, muted }: MarkdownProps) {
+export const Markdown = memo(function Markdown({
+  text,
+  muted,
+  className,
+  onLink,
+  renderImage,
+}: MarkdownProps) {
+  const resolvedComponents = useMemo<Components>(
+    () => ({
+      ...components,
+      ...(onLink
+        ? {
+            a: ({ href, children }) => (
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-accent hover:underline"
+                onClick={(event) => {
+                  event.preventDefault();
+                  if (href && !onLink(href)) openTranscriptLink(href);
+                }}
+              >
+                {children}
+              </a>
+            ),
+          }
+        : {}),
+      ...(renderImage
+        ? {
+            img: ({ src, alt, title }) =>
+              src
+                ? renderImage({
+                    src,
+                    alt: alt ?? "",
+                    ...(title ? { title } : {}),
+                  })
+                : null,
+          }
+        : {}),
+    }),
+    [onLink, renderImage],
+  );
   return (
-    <div className={cx(PROSE, muted ? PROSE_MUTED : PROSE_COLOR)}>
+    <div className={cx(PROSE, muted ? PROSE_MUTED : PROSE_COLOR, className)}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
-        components={components}
+        components={resolvedComponents}
         skipHtml
       >
         {text}

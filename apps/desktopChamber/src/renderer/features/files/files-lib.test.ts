@@ -5,11 +5,14 @@ import {
   breadcrumbs,
   childPath,
   type DirState,
+  detectFileRenderer,
   fileRootForSession,
   flattenTree,
   isImagePath,
   looksBinary,
+  resolveWorkspaceLink,
   shikiLangForPath,
+  sniffRasterMediaType,
   sortEntries,
   workspaceRelative,
 } from "./files-lib.ts";
@@ -23,6 +26,58 @@ test("workspaceRelative strips the /workspace prefix", () => {
   assert.equal(workspaceRelative("/workspace/"), ".");
   assert.equal(workspaceRelative("/workspace/app"), "app");
   assert.equal(workspaceRelative("app/src"), "app/src");
+});
+
+test("detectFileRenderer separates rendered documents, raster images, and safe source", () => {
+  assert.deepEqual(
+    detectFileRenderer({
+      path: "docs/readme.md",
+      size: 12,
+      prefix: new TextEncoder().encode("# Hello"),
+    }),
+    { kind: "markdown" },
+  );
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+  assert.equal(sniffRasterMediaType(png), "image/png");
+  assert.deepEqual(
+    detectFileRenderer({ path: "shot.png", size: png.length, prefix: png }),
+    { kind: "image", mediaType: "image/png" },
+  );
+  assert.deepEqual(
+    detectFileRenderer({
+      path: "icon.svg",
+      size: 11,
+      prefix: new TextEncoder().encode("<svg></svg>"),
+    }),
+    { kind: "source", language: "xml" },
+  );
+});
+
+test("resolveWorkspaceLink stays inside the active worktree", () => {
+  assert.equal(
+    resolveWorkspaceLink(
+      "worktrees/a/docs/guide.md",
+      "../assets/shot.png#preview",
+      "worktrees/a",
+    ),
+    "worktrees/a/assets/shot.png",
+  );
+  assert.equal(
+    resolveWorkspaceLink(
+      "worktrees/a/docs/guide.md",
+      "../../../secret",
+      "worktrees/a",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveWorkspaceLink(
+      "worktrees/a/docs/guide.md",
+      "https://example.com/x.png",
+      "worktrees/a",
+    ),
+    null,
+  );
 });
 
 test("fileRootForSession: project root when present, else workspace", () => {

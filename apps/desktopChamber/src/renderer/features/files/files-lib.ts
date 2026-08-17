@@ -125,6 +125,8 @@ export function flattenTree(
 // ---- viewer guards ---------------------------------------------------------------
 
 export const MAX_PREVIEW_BYTES = 512 * 1024;
+export const MAX_RASTER_BYTES_DESKTOP = 25 * 1024 * 1024;
+export const MAX_RASTER_BYTES_MOBILE = 12 * 1024 * 1024;
 
 /** Heuristic: a NUL byte in the first 1 KiB means "not text". */
 export function looksBinary(bytes: Uint8Array): boolean {
@@ -147,6 +149,24 @@ const IMAGE_EXTS = new Set([
   "avif",
 ]);
 
+const RASTER_EXTS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "avif",
+]);
+
+const MARKDOWN_EXTS = new Set(["md", "markdown", "mdown", "mkd"]);
+
+export type FileRenderDecision =
+  | { kind: "source"; language: string }
+  | { kind: "markdown" }
+  | { kind: "image"; mediaType: string }
+  | { kind: "unsupported"; reason: string };
+
 export function extOf(path: string): string {
   const name = path.split("/").pop() ?? path;
   const dot = name.lastIndexOf(".");
@@ -155,6 +175,136 @@ export function extOf(path: string): string {
 
 export function isImagePath(path: string): boolean {
   return IMAGE_EXTS.has(extOf(path));
+}
+
+export function isRasterImagePath(path: string): boolean {
+  return RASTER_EXTS.has(extOf(path));
+}
+
+export function isMarkdownPath(path: string): boolean {
+  return MARKDOWN_EXTS.has(extOf(path));
+}
+
+function ascii(bytes: Uint8Array, start: number, length: number): string {
+  return String.fromCharCode(...bytes.slice(start, start + length));
+}
+
+export function sniffRasterMediaType(bytes: Uint8Array): string | null {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    ascii(bytes, 1, 3) === "PNG" &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  )
+    return "image/png";
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  )
+    return "image/jpeg";
+  if (bytes.length >= 6 && /^GIF8[79]a$/.test(ascii(bytes, 0, 6)))
+    return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    ascii(bytes, 0, 4) === "RIFF" &&
+    ascii(bytes, 8, 4) === "WEBP"
+  )
+    return "image/webp";
+  if (bytes.length >= 2 && ascii(bytes, 0, 2) === "BM") return "image/bmp";
+  if (
+    bytes.length >= 12 &&
+    ascii(bytes, 4, 4) === "ftyp" &&
+    ["avif", "avis"].includes(ascii(bytes, 8, 4))
+  )
+    return "image/avif";
+  return null;
+}
+
+export function detectFileRenderer(input: {
+  path: string;
+  size: number;
+  prefix: Uint8Array;
+  maxRasterBytes?: number;
+}): FileRenderDecision {
+  const extension = extOf(input.path);
+  if (MARKDOWN_EXTS.has(extension)) {
+    return input.size > MAX_PREVIEW_BYTES
+      ? {
+          kind: "unsupported",
+          reason: "Markdown preview is limited to 512 KB.",
+        }
+      : looksBinary(input.prefix)
+        ? {
+            kind: "unsupported",
+            reason: "This Markdown file contains binary data.",
+          }
+        : { kind: "markdown" };
+  }
+  if (RASTER_EXTS.has(extension)) {
+    if (input.size > (input.maxRasterBytes ?? MAX_RASTER_BYTES_DESKTOP)) {
+      return {
+        kind: "unsupported",
+        reason: "This image is too large to preview safely.",
+      };
+    }
+    const mediaType = sniffRasterMediaType(input.prefix);
+    return mediaType
+      ? { kind: "image", mediaType }
+      : {
+          kind: "unsupported",
+          reason: "The file contents do not match a supported image format.",
+        };
+  }
+  if (looksBinary(input.prefix)) {
+    return {
+      kind: "unsupported",
+      reason: "No preview is available for this binary format.",
+    };
+  }
+  return input.size > MAX_PREVIEW_BYTES
+    ? { kind: "unsupported", reason: "Source previews are limited to 512 KB." }
+    : { kind: "source", language: shikiLangForPath(input.path) };
+}
+
+export function resolveWorkspaceLink(
+  currentPath: string,
+  href: string,
+  root: string,
+): string | null {
+  const withoutFragment = href.split(/[?#]/, 1)[0] ?? "";
+  if (!withoutFragment || /^[a-z][a-z\d+.-]*:/i.test(withoutFragment))
+    return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(withoutFragment).replaceAll("\\", "/");
+  } catch {
+    return null;
+  }
+  const rootParts = root === "." ? [] : root.split("/").filter(Boolean);
+  const currentParts = currentPath.split("/").filter(Boolean);
+  if (
+    rootParts.some((part, index) => currentParts[index] !== part) ||
+    currentParts.length < rootParts.length
+  )
+    return null;
+  const parts = decoded.startsWith("/")
+    ? [...rootParts]
+    : currentParts.slice(0, -1);
+  for (const part of decoded.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length <= rootParts.length) return null;
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  return parts.join("/") || ".";
 }
 
 // shiki bundled-language ids (viewer highlighting)

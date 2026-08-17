@@ -1,8 +1,6 @@
-// Files pane: lazy, virtualized workspace tree over bridge.listFiles plus a
-// shiki-highlighted read-only viewer over bridge.readFile (binary/size
-// guards, breadcrumb bar, refresh). The daemon has no write route — no
-// save/edit affordance. Ported from apps/desktop features/files with the
-// IMPROVE-ON fixes (refresh button, virtualized tree).
+// Files pane: lazy, virtualized worktree plus safe read-only source, Markdown,
+// and raster-image previews over bridge.readFile. The daemon remains the only
+// filesystem authority; renderer modules only receive validated bytes.
 
 import type { GitWorktreeChanges } from "@agena/protocol";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -40,6 +38,7 @@ import {
   Panel,
   PanelBody,
   PanelHeader,
+  Segmented,
   Spinner,
 } from "../../ui/index.ts";
 import { selectedLineRange } from "../composer/source-reference-ui.tsx";
@@ -47,20 +46,30 @@ import { CodeView } from "./code-view.tsx";
 import {
   breadcrumbs,
   type DirState,
+  detectFileRenderer,
   fileRootForSession,
   flattenTree,
-  isImagePath,
-  looksBinary,
+  isMarkdownPath,
+  isRasterImagePath,
   MAX_PREVIEW_BYTES,
-  shikiLangForPath,
+  MAX_RASTER_BYTES_DESKTOP,
+  MAX_RASTER_BYTES_MOBILE,
 } from "./files-lib.ts";
+import { MarkdownFilePreview, RasterImagePreview } from "./preview.tsx";
 
 type ViewerState =
   | { kind: "idle" }
   | { kind: "loading"; path: string }
   | { kind: "error"; path: string; message: string }
-  | { kind: "binary"; path: string; size: number }
-  | { kind: "image"; path: string }
+  | { kind: "unsupported"; path: string; size: number; message: string }
+  | { kind: "markdown"; path: string; size: number; content: string }
+  | {
+      kind: "image";
+      path: string;
+      size: number;
+      bytes: Uint8Array;
+      mediaType: string;
+    }
   | { kind: "text"; path: string; size: number; content: string; lang: string };
 
 // ---- tree ------------------------------------------------------------------------
@@ -79,7 +88,7 @@ function TreeRows({
   expanded: ReadonlySet<string>;
   selectedPath: string | null;
   onToggleDir: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, size?: number) => void;
   mobile?: boolean;
 }) {
   const rows = useMemo(
@@ -177,7 +186,7 @@ function TreeRows({
               type="button"
               role="treeitem"
               aria-selected={selected}
-              onClick={() => onOpenFile(row.path)}
+              onClick={() => onOpenFile(row.path, row.size)}
               style={{ ...rowPos, ...indent }}
               className={cx(
                 "flex items-center gap-1 rounded-md pr-2 text-left transition-colors",
@@ -186,7 +195,7 @@ function TreeRows({
               )}
             >
               <span className="size-3.5 shrink-0" />
-              {isImagePath(row.path) ? (
+              {isRasterImagePath(row.path) ? (
                 <Image className="size-4 shrink-0 text-fg-muted" />
               ) : (
                 <File className="size-4 shrink-0 text-fg-muted" />
@@ -235,18 +244,77 @@ function Breadcrumb({ path }: { path: string }) {
   );
 }
 
+function SourcePreview({
+  content,
+  lang,
+  path,
+  sessionId,
+  worktree,
+  root,
+}: {
+  content: string;
+  lang: string;
+  path: string;
+  sessionId?: string;
+  worktree: GitWorktreeChanges | null;
+  root: string;
+}) {
+  const theme = useUi((state) => state.theme);
+  const relativePath =
+    root !== "." && path.startsWith(`${root}/`)
+      ? path.slice(root.length + 1)
+      : path;
+  return (
+    <CodeView
+      code={content}
+      lang={lang}
+      theme={resolveAppearance(theme.appearance)}
+      {...(sessionId
+        ? {
+            selection: {
+              sessionId,
+              makeReference: (snapshot, selection, selectionRoot) => {
+                const range = selectedLineRange(selection, selectionRoot);
+                if (!range) return null;
+                return {
+                  v: 1,
+                  id: crypto.randomUUID(),
+                  kind: "file",
+                  sessionId,
+                  ...(worktree?.worktreeId
+                    ? { worktreeId: worktree.worktreeId }
+                    : {}),
+                  path: relativePath,
+                  range,
+                  contentHash: textFingerprint(content),
+                  ...(worktree?.head ? { head: worktree.head } : {}),
+                  snapshot,
+                } satisfies FileReference;
+              },
+            },
+          }
+        : {})}
+    />
+  );
+}
+
 function Viewer({
   viewer,
   sessionId,
   worktree,
   root,
+  mobile,
+  markdownMode,
+  onOpenFile,
 }: {
   viewer: ViewerState;
   sessionId?: string;
   worktree: GitWorktreeChanges | null;
   root: string;
+  mobile: boolean;
+  markdownMode: "preview" | "source";
+  onOpenFile: (path: string) => void;
 }) {
-  const theme = useUi((s) => s.theme);
   switch (viewer.kind) {
     case "idle":
       return (
@@ -270,60 +338,53 @@ function Viewer({
           hint={viewer.message}
         />
       );
-    case "binary":
+    case "unsupported":
       return (
         <EmptyState
           icon={File}
-          title="Binary or too large to preview"
-          hint={`${formatBytes(viewer.size)} — text previews stop at ${formatBytes(MAX_PREVIEW_BYTES)}.`}
+          title="Preview unavailable"
+          hint={`${viewer.message} (${formatBytes(viewer.size)})`}
         />
       );
     case "image":
       return (
-        <EmptyState
-          icon={Image}
-          title="Image preview"
-          hint="Image blob fetch lands with a later milestone."
+        <RasterImagePreview
+          bytes={viewer.bytes}
+          mediaType={viewer.mediaType}
+          alt={viewer.path.split("/").pop() ?? "Image"}
+          mobile={mobile}
         />
       );
-    case "text": {
-      const relativePath =
-        root !== "." && viewer.path.startsWith(`${root}/`)
-          ? viewer.path.slice(root.length + 1)
-          : viewer.path;
+    case "markdown":
+      return markdownMode === "preview" ? (
+        <MarkdownFilePreview
+          content={viewer.content}
+          path={viewer.path}
+          root={root}
+          mobile={mobile}
+          onOpenFile={onOpenFile}
+        />
+      ) : (
+        <SourcePreview
+          content={viewer.content}
+          lang="markdown"
+          path={viewer.path}
+          {...(sessionId ? { sessionId } : {})}
+          worktree={worktree}
+          root={root}
+        />
+      );
+    case "text":
       return (
-        <CodeView
-          code={viewer.content}
+        <SourcePreview
+          content={viewer.content}
           lang={viewer.lang}
-          theme={resolveAppearance(theme.appearance)}
-          {...(sessionId
-            ? {
-                selection: {
-                  sessionId,
-                  makeReference: (snapshot, selection, selectionRoot) => {
-                    const range = selectedLineRange(selection, selectionRoot);
-                    if (!range) return null;
-                    return {
-                      v: 1,
-                      id: crypto.randomUUID(),
-                      kind: "file",
-                      sessionId,
-                      ...(worktree?.worktreeId
-                        ? { worktreeId: worktree.worktreeId }
-                        : {}),
-                      path: relativePath,
-                      range,
-                      contentHash: textFingerprint(viewer.content),
-                      ...(worktree?.head ? { head: worktree.head } : {}),
-                      snapshot,
-                    } satisfies FileReference;
-                  },
-                },
-              }
-            : {})}
+          path={viewer.path}
+          {...(sessionId ? { sessionId } : {})}
+          worktree={worktree}
+          root={root}
         />
       );
-    }
   }
 }
 
@@ -338,6 +399,9 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [viewer, setViewer] = useState<ViewerState>({ kind: "idle" });
+  const [markdownModes, setMarkdownModes] = useState<
+    Record<string, "preview" | "source">
+  >({});
   const [worktrees, setWorktrees] = useState<GitWorktreeChanges[]>([]);
   const [requestedFile, setRequestedFile] = useState<FileReference | null>(
     null,
@@ -426,34 +490,82 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
     [loadDir],
   );
 
-  const openFile = useCallback((path: string) => {
-    if (isImagePath(path)) {
-      readSeq.current++;
-      setViewer({ kind: "image", path });
-      return;
-    }
-    const request = ++readSeq.current;
-    setViewer({ kind: "loading", path });
-    (async () => getBridge().readFile(path))()
-      .then((bytes) => {
-        if (readSeq.current !== request) return; // stale response
-        if (bytes.byteLength > MAX_PREVIEW_BYTES || looksBinary(bytes)) {
-          setViewer({ kind: "binary", path, size: bytes.byteLength });
-          return;
-        }
+  const openFile = useCallback(
+    (path: string, sizeHint?: number) => {
+      const maxRasterBytes = mobile
+        ? MAX_RASTER_BYTES_MOBILE
+        : MAX_RASTER_BYTES_DESKTOP;
+      if (
+        sizeHint !== undefined &&
+        ((isRasterImagePath(path) && sizeHint > maxRasterBytes) ||
+          (!isRasterImagePath(path) && sizeHint > MAX_PREVIEW_BYTES))
+      ) {
         setViewer({
-          kind: "text",
+          kind: "unsupported",
           path,
-          size: bytes.byteLength,
-          content: new TextDecoder().decode(bytes),
-          lang: shikiLangForPath(path),
+          size: sizeHint,
+          message: isRasterImagePath(path)
+            ? "This image is too large to preview safely."
+            : isMarkdownPath(path)
+              ? "Markdown preview is limited to 512 KB."
+              : "Source previews are limited to 512 KB.",
         });
-      })
-      .catch((err: unknown) => {
-        if (readSeq.current !== request) return;
-        setViewer({ kind: "error", path, message: formatBridgeError(err) });
-      });
-  }, []);
+        return;
+      }
+      const request = ++readSeq.current;
+      setViewer({ kind: "loading", path });
+      (async () => getBridge().readFile(path))()
+        .then((bytes) => {
+          if (readSeq.current !== request) return;
+          const decision = detectFileRenderer({
+            path,
+            size: bytes.byteLength,
+            prefix: bytes.subarray(0, 1024),
+            maxRasterBytes,
+          });
+          switch (decision.kind) {
+            case "unsupported":
+              setViewer({
+                kind: "unsupported",
+                path,
+                size: bytes.byteLength,
+                message: decision.reason,
+              });
+              return;
+            case "image":
+              setViewer({
+                kind: "image",
+                path,
+                size: bytes.byteLength,
+                bytes,
+                mediaType: decision.mediaType,
+              });
+              return;
+            case "markdown":
+              setViewer({
+                kind: "markdown",
+                path,
+                size: bytes.byteLength,
+                content: new TextDecoder().decode(bytes),
+              });
+              return;
+            case "source":
+              setViewer({
+                kind: "text",
+                path,
+                size: bytes.byteLength,
+                content: new TextDecoder().decode(bytes),
+                lang: decision.language,
+              });
+          }
+        })
+        .catch((err: unknown) => {
+          if (readSeq.current !== request) return;
+          setViewer({ kind: "error", path, message: formatBridgeError(err) });
+        });
+    },
+    [mobile],
+  );
 
   useEffect(() => {
     if (!requestedFile || requestedFile.sessionId !== activeSessionId) return;
@@ -478,7 +590,7 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   }, [root, expanded, loadDir]);
 
   const copyContents = useCallback(() => {
-    if (viewer.kind !== "text") return;
+    if (viewer.kind !== "text" && viewer.kind !== "markdown") return;
     navigator.clipboard
       .writeText(viewer.content)
       .then(() => pushToast({ kind: "ok", title: "Copied file contents" }))
@@ -503,7 +615,24 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
 
   const headerActions = (
     <>
-      {viewer.kind === "text" ? (
+      {viewer.kind === "markdown" ? (
+        <Segmented
+          ariaLabel="Markdown view"
+          value={markdownModes[viewer.path] ?? "preview"}
+          onValueChange={(value) =>
+            setMarkdownModes((current) => ({
+              ...current,
+              [viewer.path]: value,
+            }))
+          }
+          options={[
+            { value: "preview", label: "Preview" },
+            { value: "source", label: "Source" },
+          ]}
+          {...(mobile ? { className: "h-9" } : {})}
+        />
+      ) : null}
+      {viewer.kind === "text" || viewer.kind === "markdown" ? (
         <>
           <span className="text-2xs tabular-nums text-fg-muted">
             {formatBytes(viewer.size)}
@@ -517,6 +646,11 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
             <Copy />
           </IconButton>
         </>
+      ) : null}
+      {viewer.kind === "image" ? (
+        <span className="text-2xs tabular-nums text-fg-muted">
+          {formatBytes(viewer.size)}
+        </span>
       ) : null}
       <IconButton
         label="Refresh tree"
@@ -579,6 +713,13 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
             {...(activeSessionId ? { sessionId: activeSessionId } : {})}
             worktree={worktree}
             root={root}
+            mobile={mobile}
+            markdownMode={
+              viewer.kind === "markdown"
+                ? (markdownModes[viewer.path] ?? "preview")
+                : "preview"
+            }
+            onOpenFile={openFile}
           />
         </div>
       </PanelBody>
