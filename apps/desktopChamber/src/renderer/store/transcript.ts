@@ -1,7 +1,7 @@
 // Pure transcript reducers (D-INV-5): durable events finalize, frames touch
 // in-flight state only, malformed known payloads become marker blocks, unknown
 // types become neutral markers and never crash (D-INV-6). Ported from
-// apps/desktop/src/renderer/store/transcript.ts (battle-tested). The zustand
+// Agena's legacy renderer (battle-tested). The zustand
 // container at the bottom is plumbing.
 import {
   type AgenaEvent,

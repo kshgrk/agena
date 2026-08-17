@@ -30,6 +30,8 @@ export type ChamberComposerProps = {
   onRemoveAttachment?: (id: string) => void;
   onAutocomplete?: (trigger: ChamberAutocomplete | null) => void;
   attachments?: readonly ChamberComposerAttachment[];
+  contextAttachments?: ReactNode;
+  hasContext?: boolean;
   placeholder?: string;
   disabled?: boolean;
   running?: boolean;

@@ -18,6 +18,7 @@ import {
   Copy,
   CornerDownRight,
   Cpu,
+  Download,
   type LucideIcon,
   Paperclip,
   ShieldAlert,
@@ -30,6 +31,7 @@ import {
 import { memo, type ReactNode, useEffect, useState } from "react";
 import { peekBridge } from "../../lib/bridge.ts";
 import { formatRelativeTime, formatTokens } from "../../lib/format.ts";
+import { parseReferenceText } from "../../store/source-reference.ts";
 import type {
   ApprovalBlock,
   AssistantBlock,
@@ -41,6 +43,7 @@ import type {
 } from "../../store/types.ts";
 import { Badge, cx } from "../../ui/index.ts";
 import { SubagentReceipt } from "../agents/task-group.tsx";
+import { SentReferences } from "../composer/source-reference-ui.tsx";
 import { Markdown } from "./markdown.tsx";
 import { UserMessageActions } from "./session-actions.tsx";
 import { ThinkingDisclosure } from "./thinking.tsx";
@@ -96,26 +99,94 @@ function TranscriptImage({
   );
 }
 
+function TranscriptFile({
+  block,
+}: {
+  block: Extract<ContentBlock, { type: "file" }>;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let objectUrl: string | null = null;
+    void peekBridge()
+      ?.readBlob(block.ref.blob)
+      .then((bytes) => {
+        if (disposed) return;
+        objectUrl = URL.createObjectURL(
+          new Blob(
+            [
+              bytes.buffer.slice(
+                bytes.byteOffset,
+                bytes.byteOffset + bytes.byteLength,
+              ) as ArrayBuffer,
+            ],
+            { type: block.ref.mimeType ?? "application/octet-stream" },
+          ),
+        );
+        setUrl(objectUrl);
+      });
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [block.ref.blob, block.ref.mimeType]);
+  const name = block.path ?? "attachment";
+  return (
+    <a
+      href={url ?? undefined}
+      download={name}
+      aria-disabled={!url}
+      className={cx(
+        "my-2 flex w-fit max-w-full items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-fg-secondary",
+        url ? "hover:bg-fg/5 hover:text-fg" : "pointer-events-none opacity-60",
+      )}
+    >
+      <Paperclip className="size-4 shrink-0" />
+      <span className="truncate">{name}</span>
+      <span className="shrink-0 text-xs text-fg-muted">
+        {formatFileSize(block.ref.sizeBytes)}
+      </span>
+      <Download className="size-3.5 shrink-0" aria-hidden="true" />
+    </a>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${Math.round(bytes / 1_000)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
 /** Text → markdown, thinking → disclosure, images → lazy previews, unknown → nothing. */
-export function ContentView({ content }: { content: readonly ContentBlock[] }) {
+export function ContentView({
+  content,
+  contentRole,
+}: {
+  content: readonly ContentBlock[];
+  contentRole?: "user" | "assistant";
+}) {
   return (
     <>
       {content.map((b, i) => {
         const key = `${b.type}-${i}`;
         switch (b.type) {
           case "text":
+            if (contentRole === "user") {
+              const parsed = parseReferenceText(b.text);
+              return (
+                <div key={key}>
+                  <SentReferences references={parsed.references} />
+                  {parsed.text ? <Markdown text={parsed.text} /> : null}
+                </div>
+              );
+            }
             return <Markdown key={key} text={b.text} />;
           case "thinking":
             return <ThinkingDisclosure key={key} text={b.text} />;
           case "image":
             return <TranscriptImage key={key} block={b} />;
           case "file":
-            return (
-              <Badge key={key} className="my-1">
-                <Paperclip className="size-3" />
-                {b.path ?? "file"}
-              </Badge>
-            );
+            return <TranscriptFile key={key} block={b} />;
           case "toolCall":
             return null; // tool calls render as their own ToolCard rows
           default:
@@ -194,7 +265,7 @@ function UserRow({
               : "Follow-up queued next"}
           </Badge>
         ) : null}
-        <ContentView content={block.content} />
+        <ContentView content={block.content} contentRole="user" />
       </div>
     </div>
   );
@@ -215,7 +286,7 @@ function AssistantRow({ block }: { block: AssistantBlock }) {
   return (
     <div className="group/turn relative">
       <HoverMeta at={block.at} copyText={textOf(block.content)} />
-      <ContentView content={block.content} />
+      <ContentView content={block.content} contentRole="assistant" />
       {block.status === "aborted" ? (
         <Badge tone="warn" className="mt-1.5">
           aborted —{" "}

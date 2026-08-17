@@ -333,6 +333,48 @@ test("bad or missing token ⇒ raw HTTP 401 upgrade rejection; /health stays ope
   });
 });
 
+test("generic attachments are validated, stored, and readable by BlobRef", async () => {
+  const daemon = await boot();
+  const base = `http://127.0.0.1:${daemon.port}`;
+  const uploaded = await fetch(
+    `${base}/v1/attachments?name=${encodeURIComponent("notes.md")}`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "text/markdown",
+      },
+      body: "# Notes\n",
+    },
+  );
+  expect(uploaded.status).toBe(200);
+  const body = (await uploaded.json()) as {
+    ref: { blob: string; sizeBytes: number; mimeType: string };
+  };
+  expect(body.ref).toMatchObject({
+    sizeBytes: 8,
+    mimeType: "text/markdown",
+  });
+  const digest = body.ref.blob.slice("sha256:".length);
+  const downloaded = await fetch(`${base}/v1/blobs/${digest}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(await downloaded.text()).toBe("# Notes\n");
+
+  const rejected = await fetch(
+    `${base}/v1/attachments?name=${encodeURIComponent("payload.exe")}`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/octet-stream",
+      },
+      body: "MZ-not-an-attachment",
+    },
+  );
+  expect(rejected.status).toBe(400);
+});
+
 test("Conductor pairing and browser WS tickets are short-lived one-use credentials", async () => {
   const daemon = await boot();
   const base = `http://127.0.0.1:${daemon.port}`;
@@ -523,6 +565,39 @@ test("GET /v1/sessions includes durable subagent hierarchy metadata", async () =
       startedAt: "2026-07-12T00:00:00.000Z",
     },
   });
+});
+
+test("POST /v1/sessions/:id/derived persists full side-chat access", async () => {
+  const adapter = new FakeRuntimeAdapter();
+  const daemon = await boot(adapter, {
+    stateDir: stateDir(),
+    storage: "sqlite",
+  });
+  const parent = await daemon.store.createSession({ workspaceId: "ws-1" });
+  const response = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/sessions/${parent.sessionId}/derived`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: "fork",
+        purpose: "quick_chat",
+        sideChatAccess: "full",
+      }),
+    },
+  );
+  expect(response.status).toBe(201);
+  const { sessionId } = (await response.json()) as { sessionId: string };
+  expect(await daemon.store.getSession(sessionId)).toMatchObject({
+    sideChatAccess: "full",
+  });
+  expect(adapter.createInputs[0]?.toolNames).toBeUndefined();
+  expect(adapter.createInputs[0]?.systemPromptAppendix).toContain(
+    "full-access side chat",
+  );
 });
 
 test("provider auth routes save and remove keys without returning them", async () => {

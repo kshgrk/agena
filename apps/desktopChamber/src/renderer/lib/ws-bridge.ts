@@ -3,7 +3,7 @@
 // This is the ONLY renderer module allowed to import @agena/client (D-INV-2's
 // browser-mode carve-out; see ARCHITECTURE.md invariants).
 //
-// Differences from the Electron host (apps/desktop/electron/bridge.mjs, whose
+// Differences from the Electron host (apps/desktopChamber/electron/bridge.mjs, whose
 // UiBatch composition is ported verbatim below):
 //   - auth: HTTP uses the bearer token; each browser WS gets a one-use,
 //     path-scoped ticket because browser WebSocket cannot set headers.
@@ -509,8 +509,8 @@ export function createWsBridge(
         mode,
       ),
     }),
-    createQuickChat: async (sourceSessionId) => ({
-      sessionId: await need().createQuickChat(sourceSessionId),
+    createQuickChat: async (sourceSessionId, sideChatAccess) => ({
+      sessionId: await need().createQuickChat(sourceSessionId, sideChatAccess),
     }),
     navigateSession: (sessionId, sourceMessageId) =>
       need().navigateSession(sessionId, sourceMessageId),
@@ -537,6 +537,8 @@ export function createWsBridge(
     listFiles: (o) => need().listFiles(o ?? {}),
     readFile: (path) => need().readFile(path),
     uploadImage: (bytes, mimeType) => need().uploadImage(bytes, mimeType),
+    uploadAttachment: (bytes, mimeType, name) =>
+      need().uploadAttachment(bytes, mimeType, name),
     readBlob: (hash) => need().readBlob(hash),
     listSnapshots: () => need().listSnapshots(),
     createSnapshot: (input) => need().createSnapshot(input ?? {}),

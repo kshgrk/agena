@@ -73,6 +73,7 @@ type SessionRow = {
   host_cwd_hint: string | null;
   origin: SessionOrigin;
   purpose: "quick_chat" | null;
+  side_chat_access: "read_only" | "full" | null;
   parent_session_id: string | null;
   parent_task_id: string | null;
   session_kind: "primary" | "subagent";
@@ -310,6 +311,7 @@ export class SqliteEventStore implements EventStore {
         source_message_id TEXT,
         derived_mode      TEXT CHECK (derived_mode IN ('fork','clone')),
         purpose           TEXT CHECK (purpose IN ('quick_chat')),
+        side_chat_access  TEXT CHECK (side_chat_access IN ('read_only','full')),
         session_kind      TEXT NOT NULL DEFAULT 'primary'
                           CHECK (session_kind IN ('primary','subagent'))
       ) STRICT;
@@ -682,6 +684,10 @@ export class SqliteEventStore implements EventStore {
     const sessionId = input.sessionId ?? ulid();
     const rootBranchId = ulid();
     const title = input.title ?? parent.title ?? undefined;
+    const sideChatAccess =
+      input.purpose === "quick_chat"
+        ? (input.sideChatAccess ?? "read_only")
+        : undefined;
     const derivedFrom = {
       parentSessionId: parent.id,
       ...(input.sourceMessageId
@@ -704,6 +710,7 @@ export class SqliteEventStore implements EventStore {
       status: "active",
       origin: parent.origin,
       ...(input.purpose ? { purpose: input.purpose } : {}),
+      ...(sideChatAccess ? { sideChatAccess } : {}),
       ...(parent.project_id ? { projectId: parent.project_id } : {}),
       ...(parent.project_root ? { projectRoot: parent.project_root } : {}),
       cwd: parent.cwd,
@@ -731,6 +738,7 @@ export class SqliteEventStore implements EventStore {
         ...(parent.host_cwd_hint ? { hostCwdHint: parent.host_cwd_hint } : {}),
         rootBranchId,
         ...(input.purpose ? { purpose: input.purpose } : {}),
+        ...(sideChatAccess ? { sideChatAccess } : {}),
         derivedFrom,
       },
       createdAt: now,
@@ -742,8 +750,8 @@ export class SqliteEventStore implements EventStore {
            (id, workspace_id, title, active_branch_id, last_seq, created_at,
             pi_session_path, updated_at, scope, project_id, project_root, cwd,
             host_cwd_hint, origin, status, is_control, parent_session_id, source_message_id,
-            derived_mode, purpose, session_kind)
-           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, 'primary')`,
+            derived_mode, purpose, side_chat_access, session_kind)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, 'primary')`,
         )
         .run(
           sessionId,
@@ -763,6 +771,7 @@ export class SqliteEventStore implements EventStore {
           input.sourceMessageId ?? null,
           input.mode,
           input.purpose ?? null,
+          sideChatAccess ?? null,
         );
       this.#db
         .prepare(
@@ -1879,6 +1888,10 @@ export class SqliteEventStore implements EventStore {
     );
     add("purpose", "purpose TEXT CHECK (purpose IN ('quick_chat'))");
     add(
+      "side_chat_access",
+      "side_chat_access TEXT CHECK (side_chat_access IN ('read_only','full'))",
+    );
+    add(
       "session_kind",
       "session_kind TEXT NOT NULL DEFAULT 'primary' CHECK (session_kind IN ('primary','subagent'))",
     );
@@ -1898,6 +1911,11 @@ export class SqliteEventStore implements EventStore {
       .run();
     this.#db
       .prepare("UPDATE sessions SET is_control = 1 WHERE scope = 'control'")
+      .run();
+    this.#db
+      .prepare(
+        "UPDATE sessions SET side_chat_access = 'read_only' WHERE purpose = 'quick_chat' AND side_chat_access IS NULL",
+      )
       .run();
     this.#db
       .prepare(
@@ -2285,6 +2303,9 @@ function sessionFromRow(row: SessionRow): SessionRecord {
     ...(row.host_cwd_hint !== null ? { hostCwdHint: row.host_cwd_hint } : {}),
     origin: row.origin,
     ...(row.purpose !== null ? { purpose: row.purpose } : {}),
+    ...(row.side_chat_access !== null
+      ? { sideChatAccess: row.side_chat_access }
+      : {}),
     sessionKind: row.session_kind,
     ...(row.parent_session_id !== null
       ? { parentSessionId: row.parent_session_id }

@@ -20,6 +20,7 @@ import type {
   ConnectedInfo,
   ThemePreference,
 } from "../../shared/bridge.ts";
+import type { SourceReference } from "./source-reference.ts";
 
 // ---- transcript blocks ------------------------------------------------------
 
@@ -243,8 +244,13 @@ export type UiSlice = {
   selected: { sessionId: string; seq: number } | null;
   /** Transcript scroll-to request; nonce forces re-trigger on same seq. */
   jump: { sessionId: string; seq: number; nonce: number } | null;
-  /** Cross-pane "insert into composer" request (e.g. terminal selection). */
-  composerInsert: { text: string; nonce: number } | null;
+  /** Cross-pane text/reference insertion; an optional target prevents split-pane fanout. */
+  composerInsert: {
+    text?: string;
+    references?: SourceReference[];
+    sessionId?: string;
+    nonce: number;
+  } | null;
   theme: ThemePreference;
   paletteOpen: boolean;
   settingsOpen: boolean;

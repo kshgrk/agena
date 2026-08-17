@@ -168,12 +168,20 @@ async function boot(): Promise<void> {
   const rootElement = document.getElementById("root");
   if (!rootElement) throw new Error("#root element missing");
   const root = createRoot(rootElement);
-  const connection = await readConnection();
-  if (!connection) {
-    const launch = await CapacitorApp.getLaunchUrl();
+  const launch = await CapacitorApp.getLaunchUrl();
+  if (launch?.url) {
     root.render(
       <StrictMode>
-        <PairingScreen {...(launch?.url ? { initialUrl: launch.url } : {})} />
+        <PairingScreen initialUrl={launch.url} />
+      </StrictMode>,
+    );
+    return;
+  }
+  const connection = await readConnection();
+  if (!connection) {
+    root.render(
+      <StrictMode>
+        <PairingScreen />
       </StrictMode>,
     );
     return;

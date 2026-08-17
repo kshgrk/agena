@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  fileBlockSchema,
   imageBlockSchema,
   modelRefSchema,
   textBlockSchema,
@@ -32,6 +33,22 @@ export type SubscribeCmd = z.infer<typeof subscribeCmdSchema>;
 const promptContentBlockSchema = z.discriminatedUnion("type", [
   textBlockSchema,
   imageBlockSchema,
+  fileBlockSchema.extend({
+    path: z
+      .string()
+      .min(1)
+      .max(255)
+      .refine(
+        (value) =>
+          !value.includes("/") &&
+          !value.includes("\\") &&
+          [...value].every((character) => {
+            const code = character.charCodeAt(0);
+            return code >= 0x20 && code !== 0x7f;
+          }),
+        "file path must be a safe display filename",
+      ),
+  }),
 ]);
 
 // Prompt content is intentionally narrow: text and images only. Other durable

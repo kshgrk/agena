@@ -1,4 +1,4 @@
-# OSS Licenses — apps/desktopNew/docs/oss/
+# OSS Licenses — apps/desktopChamber/docs/oss/
 
 All files under this directory are VERBATIM copies from third-party repositories.
 When you adapt one into desktopNew source, follow the attribution rules below.

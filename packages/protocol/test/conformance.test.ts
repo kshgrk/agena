@@ -52,6 +52,19 @@ it("keeps quick-chat cutoff selection server-owned", () => {
       sourceMessageId: "caller-cutoff",
     }),
   ).toThrow();
+  expect(
+    createDerivedSessionRequestSchema.parse({
+      mode: "fork",
+      purpose: "quick_chat",
+      sideChatAccess: "full",
+    }),
+  ).toMatchObject({ sideChatAccess: "full" });
+  expect(() =>
+    createDerivedSessionRequestSchema.parse({
+      mode: "clone",
+      sideChatAccess: "full",
+    }),
+  ).toThrow();
 });
 
 it("visible browser actions and results carry deterministic tab identity", () => {
@@ -247,7 +260,7 @@ describe("command payloads", () => {
         content: [{ type: "text", text: "hi" }],
       }).success,
     ).toBe(true);
-    // v1 prompt input accepts images but not general file blocks (§5.4).
+    // Prompt input accepts durable image and file BlobRefs (§5.4).
     expect(
       commandSchemas.prompt.payload.safeParse({
         sessionId: "s",
@@ -266,7 +279,31 @@ describe("command payloads", () => {
     expect(
       commandSchemas.prompt.payload.safeParse({
         sessionId: "s",
-        content: [{ type: "file", ref: {} }],
+        content: [
+          {
+            type: "file",
+            ref: {
+              blob: `sha256:${"1".repeat(64)}`,
+              sizeBytes: 12,
+              mimeType: "text/markdown",
+            },
+            path: "notes.md",
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      commandSchemas.prompt.payload.safeParse({
+        sessionId: "s",
+        content: [
+          {
+            type: "file",
+            ref: {
+              blob: `sha256:${"1".repeat(64)}`,
+              sizeBytes: 12,
+            },
+          },
+        ],
       }).success,
     ).toBe(false);
     expect(

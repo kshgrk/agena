@@ -3,6 +3,8 @@
 // guards, breadcrumb bar, refresh). The daemon has no write route — no
 // save/edit affordance. Ported from apps/desktop features/files with the
 // IMPROVE-ON fixes (refresh button, virtualized tree).
+
+import type { GitWorktreeChanges } from "@agena/protocol";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronLeft,
@@ -25,6 +27,13 @@ import {
   useUi,
 } from "../../store/index.ts";
 import {
+  clearPendingSourceReference,
+  type FileReference,
+  OPEN_SOURCE_REFERENCE_EVENT,
+  pendingSourceReference,
+  textFingerprint,
+} from "../../store/source-reference.ts";
+import {
   cx,
   EmptyState,
   IconButton,
@@ -33,6 +42,7 @@ import {
   PanelHeader,
   Spinner,
 } from "../../ui/index.ts";
+import { selectedLineRange } from "../composer/source-reference-ui.tsx";
 import { CodeView } from "./code-view.tsx";
 import {
   breadcrumbs,
@@ -83,8 +93,8 @@ function TreeRows({
     estimateSize: () => (mobile ? 44 : 28),
     overscan: 12,
     getItemKey: (index) => {
-      const row = rows[index]!;
-      return `${row.kind}:${row.path}`;
+      const row = rows[index];
+      return row ? `${row.kind}:${row.path}` : index;
     },
   });
   return (
@@ -94,7 +104,8 @@ function TreeRows({
         style={{ height: virtualizer.getTotalSize() }}
       >
         {virtualizer.getVirtualItems().map((item) => {
-          const row = rows[item.index]!;
+          const row = rows[item.index];
+          if (!row) return null;
           const indent = { paddingLeft: `${8 + row.depth * 12}px` };
           const rowPos = {
             position: "absolute" as const,
@@ -224,7 +235,17 @@ function Breadcrumb({ path }: { path: string }) {
   );
 }
 
-function Viewer({ viewer }: { viewer: ViewerState }) {
+function Viewer({
+  viewer,
+  sessionId,
+  worktree,
+  root,
+}: {
+  viewer: ViewerState;
+  sessionId?: string;
+  worktree: GitWorktreeChanges | null;
+  root: string;
+}) {
   const theme = useUi((s) => s.theme);
   switch (viewer.kind) {
     case "idle":
@@ -265,14 +286,44 @@ function Viewer({ viewer }: { viewer: ViewerState }) {
           hint="Image blob fetch lands with a later milestone."
         />
       );
-    case "text":
+    case "text": {
+      const relativePath =
+        root !== "." && viewer.path.startsWith(`${root}/`)
+          ? viewer.path.slice(root.length + 1)
+          : viewer.path;
       return (
         <CodeView
           code={viewer.content}
           lang={viewer.lang}
           theme={resolveAppearance(theme.appearance)}
+          {...(sessionId
+            ? {
+                selection: {
+                  sessionId,
+                  makeReference: (snapshot, selection, selectionRoot) => {
+                    const range = selectedLineRange(selection, selectionRoot);
+                    if (!range) return null;
+                    return {
+                      v: 1,
+                      id: crypto.randomUUID(),
+                      kind: "file",
+                      sessionId,
+                      ...(worktree?.worktreeId
+                        ? { worktreeId: worktree.worktreeId }
+                        : {}),
+                      path: relativePath,
+                      range,
+                      contentHash: textFingerprint(viewer.content),
+                      ...(worktree?.head ? { head: worktree.head } : {}),
+                      snapshot,
+                    } satisfies FileReference;
+                  },
+                },
+              }
+            : {})}
         />
       );
+    }
   }
 }
 
@@ -282,12 +333,23 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   const activeSession = useSessions((s) =>
     s.activeSessionId ? s.byId[s.activeSessionId] : undefined,
   );
-  const root = fileRootForSession(activeSession);
+  const activeSessionId = activeSession?.sessionId;
 
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [viewer, setViewer] = useState<ViewerState>({ kind: "idle" });
+  const [worktrees, setWorktrees] = useState<GitWorktreeChanges[]>([]);
+  const [requestedFile, setRequestedFile] = useState<FileReference | null>(
+    null,
+  );
   const readSeq = useRef(0);
+  const worktree =
+    worktrees.find((item) => item.worktreeId === requestedFile?.worktreeId) ??
+    worktrees.find((item) => item.available) ??
+    null;
+  const root = worktree
+    ? fileRootForSession({ scope: "project", projectRoot: worktree.root })
+    : fileRootForSession(activeSession);
 
   const loadDir = useCallback((path: string) => {
     setDirs((d) => ({ ...d, [path]: { status: "loading" } }));
@@ -312,6 +374,39 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
     readSeq.current++;
     loadDir(root);
   }, [root, loadDir]);
+
+  useEffect(() => {
+    setWorktrees([]);
+    if (!activeSessionId) return;
+    let live = true;
+    void getBridge()
+      .getSessionChanges(activeSessionId)
+      .then((summary) => {
+        if (live) setWorktrees(summary.worktrees);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const ref = (event as CustomEvent<unknown>).detail;
+      if (
+        ref &&
+        typeof ref === "object" &&
+        (ref as { kind?: unknown }).kind === "file"
+      ) {
+        setRequestedFile(ref as FileReference);
+      }
+    };
+    const pending = pendingSourceReference("file");
+    if (pending?.kind === "file") setRequestedFile(pending);
+    window.addEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+    return () =>
+      window.removeEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+  }, []);
 
   const toggleDir = useCallback(
     (path: string) => {
@@ -359,6 +454,22 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
         setViewer({ kind: "error", path, message: formatBridgeError(err) });
       });
   }, []);
+
+  useEffect(() => {
+    if (!requestedFile || requestedFile.sessionId !== activeSessionId) return;
+    if (
+      requestedFile.worktreeId &&
+      worktree?.worktreeId !== requestedFile.worktreeId
+    )
+      return;
+    const path =
+      requestedFile.worktreeId && root !== "."
+        ? `${root}/${requestedFile.path}`
+        : requestedFile.path;
+    openFile(path);
+    clearPendingSourceReference(requestedFile.id);
+    setRequestedFile(null);
+  }, [activeSessionId, openFile, requestedFile, root, worktree]);
 
   const refresh = useCallback(() => {
     setDirs({});
@@ -419,7 +530,7 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   );
 
   return (
-    <Panel>
+    <Panel className="relative" data-files-pane="true">
       {mobile ? (
         <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle px-1">
           {openPath ? (
@@ -463,7 +574,12 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
             mobile && !openPath && "hidden",
           )}
         >
-          <Viewer viewer={viewer} />
+          <Viewer
+            viewer={viewer}
+            {...(activeSessionId ? { sessionId: activeSessionId } : {})}
+            worktree={worktree}
+            root={root}
+          />
         </div>
       </PanelBody>
     </Panel>

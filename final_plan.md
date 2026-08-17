@@ -335,6 +335,7 @@ Consequences, all load-bearing:
 - **Project** — a stable scope inside one workspace, normally a repo or folder. A project has a daemon-owned `projectId`, a display name, a workspace-relative root, and optional host-path hints used only by local CLI profile resolution. Project identity is durable; host absolute paths are not product truth.
 - **Session cwd** — the workspace-relative directory where a session's runtime and PTYs start. It is stored on the session at creation and must stay inside the project root unless the session is explicitly global. A client may open from any host path, but commands execute from the durable session cwd.
 - **Branch** — a line of history within a session: a column on every event plus a `branches` row with `parent_branch_id` and `forked_from_seq`. Every session has a root branch (`forked_from_seq` NULL).
+- **Side chat** — a derived primary session grouped under a main session. It forks Pi history through the latest completed assistant message and then continues independently against the same live workspace. `read_only` side chats expose only `read`, `grep`, `find`, and `ls`; `full` side chats resolve the same tools and approval policy as a normal primary session. The access mode is immutable, persisted, visible in the UI, and included in the runtime system-prompt appendix. Existing or mode-less side chats default to `read_only`.
 - **Durable event** — an `AgenaEvent`: persisted, `seq`-numbered, versioned, provenance-attributed record of a semantic state change. Sufficient alone to rebuild correct UI state.
 - **Ephemeral frame** — an `AgenaFrame`: live, non-persisted delta carrying `afterSeq`. Droppable and coalescible; never required for correctness.
 - **Projection** — a derived read model (messages, tool_calls, FTS5) maintained inside the append transaction and rebuildable via `agena rebuild`. Dropped and rebuilt, never migrated.
@@ -411,8 +412,7 @@ agena/
 │       └── test/
 │           ├── integration/        # real WS + real SQLite (tmpdir) + FakeRuntime
 │           └── e2e/                # spawned daemon driven via @agena/client (P16)
-│   ├── desktopNew/                 # current Agena Electron renderer
-│   ├── desktopChamber/             # parallel OpenChamber-derived Electron renderer
+│   ├── desktopChamber/             # Agena Electron renderer
 │   └── conductor/                  # private iOS/Android phone client (Capacitor)
 │       ├── src/main.tsx            # secure pairing gate, then shared responsive renderer
 │       ├── capacitor.config.ts     # native shell; HTTPS/WSS cloud daemon only
@@ -504,9 +504,8 @@ Allowed edges — anything not listed is forbidden:
 | `@agena/storage-sqlite` | core, protocol | Implements core's `EventStore`. Drizzle + better-sqlite3. |
 | `@agena/client` | protocol | No core import — clients never see domain internals. |
 | `@agena/tui` | client, protocol | **Only** package importing `@earendil-works/pi-tui`. |
-| `@agena/desktop-new` | client, importer, protocol | Electron UI; never imports core, storage, or runtime-pi. |
-| `@agena/desktop-chamber` | client, importer, protocol | Parallel OpenChamber-derived Electron UI; never imports core, storage, or runtime-pi. |
-| `@agena/conductor` | client | Capacitor host reusing the responsive desktop-new renderer; native secure storage only. |
+| `@agena/desktop-chamber` | client, importer, protocol | Electron UI; never imports core, storage, or runtime-pi. |
+| `@agena/conductor` | client | Capacitor mobile client; native secure storage only. |
 | `apps/daemon` | core, protocol, runtime-pi, storage-sqlite | Composition root; Hono, node-pty live here. |
 | `apps/cli` | client, tui, protocol | Never imports core, storage, or runtime-pi. |
 
@@ -661,9 +660,9 @@ type UnsubscribeCmd = { sessionId: string };
 type PromptCmd     = { sessionId: string; content: ContentBlock[] };
 type SteerCmd      = { sessionId: string; content: ContentBlock[] };
 type FollowUpCmd   = { sessionId: string; content: ContentBlock[] };
-// v1 prompt input accepts text and image blocks (schema-enforced). Other block types are
-// rejected INVALID_PAYLOAD. Core concatenates text and resolves image BlobRefs into the
-// RuntimeSession port's runtime-neutral input (§8.2). Files/documents remain a later slice.
+// Prompt input accepts text, image, and file blocks (schema-enforced). Core concatenates
+// text, resolves BlobRefs before dispatch, and keeps provider-neutral file identity in
+// Agena. runtime-pi materializes files under durable Pi state for existing read/bash tools.
 type AbortCmd      = { sessionId: string; reason?: string };
 type SetModelCmd   = { sessionId: string; model: { provider: string; id: string } };
 type SetThinkingLevelCmd = { sessionId: string; level: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" };
@@ -1148,6 +1147,11 @@ CREATE TABLE sessions (
   runtime          TEXT NOT NULL DEFAULT 'pi',
   active_branch_id TEXT,                                  -- validated in code (circular FK avoided)
   pi_session_path  TEXT,                                  -- M6/import diagnostics: pointer to Pi/raw JSONL
+  parent_session_id TEXT REFERENCES sessions(id),          -- derived-session lineage
+  source_message_id TEXT,                                  -- optional fork cutoff provenance
+  derived_mode     TEXT CHECK (derived_mode IN ('fork','clone')),
+  purpose          TEXT CHECK (purpose IN ('quick_chat')),
+  side_chat_access TEXT CHECK (side_chat_access IN ('read_only','full')),
   last_seq         INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL
@@ -1484,7 +1488,7 @@ Approvals need no projection: pending = events scan for `approval.requested` wit
 
 ## 7.7 Blob spill (M7, 64 KiB inline cap)
 
-Blob spill is not an M2 storage prerequisite. The content-addressed write/read path and authenticated image upload are pulled forward as the first M7 slice for image prompts; general oversized payload spill and tool-result spill remain M7 work. No committed event may reference a missing blob.
+Blob spill is not an M2 storage prerequisite. The content-addressed write/read path and authenticated image/file uploads are pulled forward for prompt attachments; general oversized payload spill and tool-result spill remain M7 work. No committed event may reference a missing blob.
 
 - **Trigger:** a payload whose serialized JSON exceeds 64 KiB has its protocol-marked `spillable` string fields (tool result output, oversized content blocks) replaced with the §5.3 `BlobRef`.
 - **Write path (before the tx), race-safe:** compute sha256 → write to `blobs/sha256/<hh>/<hash>.<ulid>.tmp` (**unique tmp name** — two concurrent identical spills never share a tmp file) → fsync → atomic rename; **if the final path already exists, skip the rename** (content-addressed idempotency). The `blobs` metadata row is inserted in the referencing event's tx with `INSERT OR IGNORE` (second event referencing the same hash is a no-op). A committed event therefore never references a missing file.
@@ -1586,6 +1590,7 @@ export type RuntimeInput = {
   messageId: string;
   text: string;
   images: Array<{ data: Uint8Array; mimeType: string }>;
+  files?: Array<{ data: Uint8Array; blob: string; name: string; mimeType: string }>;
 };
 
 export interface RuntimeSession {
@@ -1925,6 +1930,7 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/sessions/:id/tool-calls/:toolCallId` | Lazy full tool-call detail | Returns projected args/result for an explicitly opened tool card; keeps large tool bodies out of initial transcript reads. |
 | GET | `/v1/sessions/:id/changes` | Session-attributed Git review summary | Observed commits plus current staged, unstaged, untracked, and conflicted files grouped by exact worktree; includes file/line totals for the transcript pill. |
 | GET | `/v1/sessions/:id/changes/diff` | Lazy file contents for one reviewed change | `?worktreeId=&source=commit\|staged\|unstaged\|untracked\|conflict&path=&commit=`; the daemon validates session attribution and workspace containment before returning old/new text or an unavailable/binary result. |
+| POST | `/v1/sessions/:id/derived` | Create derived session or side chat | `{sourceMessageId?, mode:'fork'\|'clone', purpose?:'quick_chat', sideChatAccess?:'read_only'\|'full', title?}`; quick-chat cutoff is daemon-selected and omitted access defaults to `read_only` |
 | POST | `/v1/sessions/:id/fork` | Create branch | `{fromSeq, name?}`; appends `branch.created` (+`branch.switched`) |
 | GET | `/v1/search` | Full-text search | `?q=&limit=` → FTS5 hits `{sessionId, messageId, snippet, rank, seq}` (P7) |
 | GET | `/v1/approvals` | Pending approvals | `?pending=1` → events-scan-derived list; backs `agena approvals` |
@@ -1950,6 +1956,7 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | DELETE | `/v1/ptys/:id` | Kill PTY | SIGHUP, SIGKILL after 5 s |
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
 | POST | `/v1/images` | Upload a prompt image | authenticated raw body, 3 MB cap; JPEG, PNG, GIF, WebP, or BMP; returns `{ref: BlobRef}` |
+| POST | `/v1/attachments` | Upload a prompt file | authenticated bounded raw body, 25 MB cap; PDF, DOCX, XLSX, UTF-8 text/source/Markdown/JSON/YAML/CSV/TSV; `?name=`; returns `{ref: BlobRef}` |
 | POST | `/v1/imports/session` | Import one converted session | Idempotent by `(machineId, harness, sourceSessionId)`; retained as the compatibility floor (§9.6) |
 | POST | `/v1/imports/sessions` | Import up to 32 converted sessions | Ordered batch; returns a result or error per source path (§9.6) |
 | GET | `/v1/imports` | Import ledger and capabilities | Optional `machineId`; advertises singular and batch support |

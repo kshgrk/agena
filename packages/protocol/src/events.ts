@@ -32,6 +32,9 @@ export type SessionOrigin = z.infer<typeof sessionOriginSchema>;
 // ---- M1 durable payloads, exactly per §5.5 (every payload is v: 1) ----
 // ponytail: the rest of the §5.5 catalog lands with the milestones that emit it (M2+)
 
+export const sideChatAccessSchema = z.enum(["read_only", "full"]);
+export type SideChatAccess = z.infer<typeof sideChatAccessSchema>;
+
 export const sessionCreatedSchema = z
   .object({
     workspaceId: z.string().min(1),
@@ -45,6 +48,7 @@ export const sessionCreatedSchema = z
     hostCwdHint: z.string().min(1).optional(),
     rootBranchId: z.string().min(1),
     purpose: z.literal("quick_chat").optional(),
+    sideChatAccess: sideChatAccessSchema.optional(),
     derivedFrom: z
       .object({
         parentSessionId: z.string().min(1),

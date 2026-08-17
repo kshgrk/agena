@@ -129,6 +129,10 @@ export class InMemoryEventStore implements EventStore {
       );
     }
     const now = new Date().toISOString();
+    const sideChatAccess =
+      input.purpose === "quick_chat"
+        ? (input.sideChatAccess ?? "read_only")
+        : undefined;
     const record: SessionRecord = {
       sessionId: input.sessionId ?? ulid(),
       workspaceId: parent.record.workspaceId,
@@ -145,6 +149,7 @@ export class InMemoryEventStore implements EventStore {
       status: "active",
       origin: parent.record.origin,
       ...(input.purpose ? { purpose: input.purpose } : {}),
+      ...(sideChatAccess ? { sideChatAccess } : {}),
       scope: parent.record.scope,
       ...(parent.record.projectId
         ? { projectId: parent.record.projectId }
@@ -187,6 +192,9 @@ export class InMemoryEventStore implements EventStore {
             ...(record.hostCwdHint ? { hostCwdHint: record.hostCwdHint } : {}),
             rootBranchId: record.rootBranchId,
             ...(record.purpose ? { purpose: record.purpose } : {}),
+            ...(record.sideChatAccess
+              ? { sideChatAccess: record.sideChatAccess }
+              : {}),
             derivedFrom: record.derivedFrom,
           },
         },

@@ -116,6 +116,7 @@ app.whenReady().then(() => {
     minHeight: 600,
     backgroundColor: "#0c0e13",
     title: "Agena Chamber",
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" } : {}),
     webPreferences: {
       preload,
       contextIsolation: true,

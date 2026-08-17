@@ -14,6 +14,7 @@ import type {
   SearchHit,
   SessionOrigin,
   SessionStatus,
+  SideChatAccess,
   SnapshotSummary,
   ToolCallDetail,
   UserMessageAnchor,
@@ -70,6 +71,7 @@ export interface CreateDerivedSessionInput {
   sourceMessageId?: string;
   mode: "fork" | "clone";
   purpose?: "quick_chat";
+  sideChatAccess?: SideChatAccess;
   runtimeSessionRef?: string;
   title?: string;
   source?: EventSource;
@@ -159,6 +161,7 @@ export interface SessionRecord {
   hostCwdHint?: string;
   origin: SessionOrigin;
   purpose?: "quick_chat";
+  sideChatAccess?: SideChatAccess;
   sessionKind?: "primary" | "subagent";
   parentSessionId?: string;
   parentTaskId?: string;

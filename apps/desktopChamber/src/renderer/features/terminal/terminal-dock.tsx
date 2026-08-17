@@ -12,6 +12,12 @@ import {
   useUi,
 } from "../../store/index.ts";
 import {
+  clearPendingSourceReference,
+  OPEN_SOURCE_REFERENCE_EVENT,
+  pendingSourceReference,
+  type TerminalReference,
+} from "../../store/source-reference.ts";
+import {
   Badge,
   Button,
   ContextMenu,
@@ -134,10 +140,24 @@ function DockTab({ tab, active }: { tab: TerminalTab; active: boolean }) {
           disabled={!tab.readSelection()}
           onSelect={() => {
             const sel = tab.readSelection();
-            if (sel) useUi.getState().requestComposerInsert(sel);
+            const sessionId =
+              tab.sessionId ?? useSessions.getState().activeSessionId;
+            if (sel && sessionId) {
+              useUi.getState().requestComposerReference(
+                {
+                  v: 1,
+                  id: crypto.randomUUID(),
+                  kind: "terminal",
+                  sessionId,
+                  terminalId: tab.id,
+                  snapshot: sel,
+                },
+                sessionId,
+              );
+            }
           }}
         >
-          Send selection to composer
+          Add selection to chat
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
@@ -154,6 +174,32 @@ function DockTab({ tab, active }: { tab: TerminalTab; active: boolean }) {
 export function TerminalDock() {
   const tabs = useTerminals((s) => s.tabs);
   const activeId = useTerminals((s) => s.activeId);
+
+  useEffect(() => {
+    const activate = (ref: TerminalReference) => {
+      if (
+        useTerminals.getState().tabs.some((tab) => tab.id === ref.terminalId)
+      ) {
+        useTerminals.getState().setActive(ref.terminalId);
+      }
+      clearPendingSourceReference(ref.id);
+    };
+    const pending = pendingSourceReference("terminal");
+    if (pending?.kind === "terminal") activate(pending);
+    const receive = (event: Event) => {
+      const ref = (event as CustomEvent<unknown>).detail;
+      if (
+        ref &&
+        typeof ref === "object" &&
+        (ref as { kind?: unknown }).kind === "terminal"
+      ) {
+        activate(ref as TerminalReference);
+      }
+    };
+    window.addEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+    return () =>
+      window.removeEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+  }, []);
 
   useEffect(
     () =>

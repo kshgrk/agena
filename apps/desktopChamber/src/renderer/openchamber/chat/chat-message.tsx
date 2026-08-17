@@ -70,6 +70,7 @@ export function UserMessage({
                     content: message.content,
                     role: "user",
                     streaming: false,
+                    message,
                   })}
                 </div>
                 {overflowing && !expanded ? (
@@ -118,6 +119,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           content: message.content,
           role: "assistant",
           streaming: false,
+          message,
         })}
         {message.status === "failed" ? (
           <div className="mt-2 text-sm text-[var(--status-error)]">

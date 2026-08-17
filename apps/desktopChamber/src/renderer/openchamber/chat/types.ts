@@ -81,6 +81,7 @@ export type ChatContentRenderer = (input: {
   content: readonly ContentBlock[];
   role: "user" | "assistant";
   streaming: boolean;
+  message?: ChamberMessage;
 }) => ReactNode;
 
 export type ActivityRenderer = (input: {

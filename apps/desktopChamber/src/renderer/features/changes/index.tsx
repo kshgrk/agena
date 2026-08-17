@@ -30,7 +30,17 @@ import {
   useTranscripts,
   useUi,
 } from "../../store/index.ts";
+import {
+  clearPendingSourceReference,
+  type DiffReference,
+  OPEN_SOURCE_REFERENCE_EVENT,
+  pendingSourceReference,
+} from "../../store/source-reference.ts";
 import { cx, EmptyState, RelativeTime } from "../../ui/index.ts";
+import {
+  SelectionActions,
+  selectedDiffRanges,
+} from "../composer/source-reference-ui.tsx";
 import { diffLangForPath } from "../diff/diff-store.ts";
 import { buildUnifiedHunks, composeGitDiff } from "../diff/unified-diff.ts";
 
@@ -237,9 +247,13 @@ export function SessionChangesPill({ sessionId }: { sessionId: string }) {
 
 function ChangeDiff({
   value,
+  sessionId,
+  group,
   loading = false,
 }: {
   value: SessionChangeDiffResponse | null;
+  sessionId: string;
+  group: Group | null;
   loading?: boolean;
 }) {
   const theme = useUi((state) => state.theme);
@@ -287,7 +301,7 @@ function ChangeDiff({
     );
   if (!data?.hunks.length)
     return <EmptyState icon={FileDiff} title="No text changes" />;
-  return (
+  const view = (
     <DiffView
       key={`${value.path}:${value.oldText.length}:${value.newText.length}`}
       data={data}
@@ -296,6 +310,28 @@ function ChangeDiff({
       diffViewHighlight
       diffViewFontSize={13}
     />
+  );
+  return group ? (
+    <SelectionActions
+      sessionId={sessionId}
+      makeReference={(snapshot, selection, root) => ({
+        v: 1,
+        id: crypto.randomUUID(),
+        kind: "diff",
+        sessionId,
+        worktreeId: group.worktree.worktreeId,
+        path: value.path,
+        ...selectedDiffRanges(selection, root),
+        changeGroupId: group.id,
+        source: group.source,
+        ...(group.commit ? { commit: group.commit } : {}),
+        snapshot,
+      })}
+    >
+      {view}
+    </SelectionActions>
+  ) : (
+    view
   );
 }
 
@@ -701,6 +737,41 @@ export function SessionChangesWorkspace({
     if (next) selectItem(next.group, next.file);
   };
 
+  useEffect(() => {
+    const apply = (ref: DiffReference) => {
+      if (ref.sessionId !== sessionId || !ref.changeGroupId) return;
+      setGroupId(ref.changeGroupId);
+      setFilePath(ref.path);
+      if (mobile) setMobileStep("diff");
+    };
+    const pending = pendingSourceReference("diff", sessionId);
+    if (pending?.kind === "diff") apply(pending);
+    const receive = (event: Event) => {
+      const ref = (event as CustomEvent<unknown>).detail;
+      if (
+        ref &&
+        typeof ref === "object" &&
+        (ref as { kind?: unknown }).kind === "diff"
+      ) {
+        apply(ref as DiffReference);
+      }
+    };
+    window.addEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+    return () =>
+      window.removeEventListener(OPEN_SOURCE_REFERENCE_EVENT, receive);
+  }, [mobile, sessionId]);
+
+  useEffect(() => {
+    const pending = pendingSourceReference("diff", sessionId);
+    if (
+      pending?.kind === "diff" &&
+      pending.changeGroupId &&
+      groups.some((item) => item.id === pending.changeGroupId)
+    ) {
+      clearPendingSourceReference(pending.id);
+    }
+  }, [groups, sessionId]);
+
   if (error && !summary)
     return (
       <EmptyState icon={FileDiff} title="Changes unavailable" hint={error} />
@@ -765,7 +836,12 @@ export function SessionChangesWorkspace({
           ) : null}
           {mobileStep === "diff" ? (
             <div className="h-full overflow-auto bg-inset">
-              <ChangeDiff value={diff} loading={diffLoading} />
+              <ChangeDiff
+                value={diff}
+                sessionId={sessionId}
+                group={group}
+                loading={diffLoading}
+              />
             </div>
           ) : null}
         </div>
@@ -844,7 +920,12 @@ export function SessionChangesWorkspace({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          <ChangeDiff value={diff} loading={diffLoading} />
+          <ChangeDiff
+            value={diff}
+            sessionId={sessionId}
+            group={group}
+            loading={diffLoading}
+          />
         </div>
       </section>
     </div>

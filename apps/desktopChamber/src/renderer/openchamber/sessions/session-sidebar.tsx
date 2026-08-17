@@ -107,8 +107,8 @@ export function OpenChamberSessionSidebar({
   const filteredRecent = filterSessionTree(recent, query);
   const filteredGlobal = filterSessionTree(globalSessions, query);
   return (
-    <div className="flex h-full min-h-0 flex-col bg-sidebar text-foreground">
-      <header className="flex h-12 shrink-0 items-center gap-1 px-2.5">
+    <div className="chamber-session-sidebar flex h-full min-h-0 flex-col bg-sidebar text-foreground">
+      <header className="chamber-session-header flex h-12 shrink-0 items-center gap-1 px-2.5">
         {searching ? (
           <div className="flex min-w-0 flex-1 items-center rounded-lg bg-interactive-hover px-2">
             <Search className="size-3.5 shrink-0 text-muted-foreground" />

@@ -13,8 +13,6 @@ export const EDGES = {
   "@agena/importer": ["@agena/protocol"],
   "@agena/client": ["@agena/protocol"],
   "@agena/tui": ["@agena/client", "@agena/protocol"],
-  "@agena/desktop": ["@agena/client", "@agena/importer", "@agena/protocol"],
-  "@agena/desktop-new": ["@agena/client", "@agena/importer", "@agena/protocol"],
   "@agena/desktop-chamber": [
     "@agena/client",
     "@agena/importer",
@@ -40,7 +38,7 @@ export const RESTRICTED = [
   [/^@earendil-works\/pi-tui(\/|$)/, "packages/tui"],
   [/^(drizzle|better-sqlite3)/, "packages/storage-sqlite"],
   [/^node-pty(\/|$)/, "apps/daemon"],
-  [/^electron(\/|$)/, "apps/desktop"],
+  [/^electron(\/|$)/, "apps/desktopChamber"],
 ];
 
 const IMPORT_RE = /(?:from\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g;

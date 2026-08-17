@@ -1,7 +1,7 @@
 # OSS Mining Contract — desktopNew
 
 This doc is the builder's guide to the verbatim OSS copies under
-`apps/desktopNew/docs/oss/`. Read `docs/oss/LICENSES.md` first — it lists
+`apps/desktopChamber/docs/oss/`. Read `docs/oss/LICENSES.md` first — it lists
 provenance (repo, commit, license) and the attribution header you MUST add to
 any desktopNew file adapted from these copies.
 

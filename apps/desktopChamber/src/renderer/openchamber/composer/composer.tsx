@@ -1,7 +1,8 @@
 import {
   ArrowUp,
-  ImagePlus,
+  FileText,
   LoaderCircle,
+  Paperclip,
   Plus,
   Square,
   X,
@@ -33,6 +34,8 @@ export const ChamberComposer = forwardRef<
     onRemoveAttachment,
     onAutocomplete,
     attachments = [],
+    contextAttachments,
+    hasContext = false,
     placeholder = "Prompt the agent…",
     disabled = false,
     running = false,
@@ -54,7 +57,7 @@ export const ChamberComposer = forwardRef<
   const canSend =
     !disabled &&
     !uploading &&
-    (value.trim().length > 0 || attachments.length > 0);
+    (value.trim().length > 0 || attachments.length > 0 || hasContext);
   useImperativeHandle(
     forwardedRef,
     () => ({ focus: () => editorRef.current?.focus() }),
@@ -99,9 +102,10 @@ export const ChamberComposer = forwardRef<
             onClick={expandMobile}
             aria-label="Open message composer"
           >
-            <ImagePlus aria-hidden="true" />
+            <Paperclip aria-hidden="true" />
             <span className={value.trim() ? "" : "is-placeholder"}>
-              {value.trim() || placeholder}
+              {value.trim() ||
+                (hasContext ? "Referenced context" : placeholder)}
             </span>
           </button>
           {running ? (
@@ -146,10 +150,12 @@ export const ChamberComposer = forwardRef<
         className="chamber-composer-file-input"
         type="file"
         multiple
-        accept="image/*"
+        accept="image/*,.pdf,.md,.txt,.csv,.tsv,.xlsx,.docx,.json,.yaml,.yml"
         onChange={attach}
         tabIndex={-1}
       />
+
+      {contextAttachments}
 
       {attachments.length > 0 ? (
         <div className="chamber-composer-attachments">
@@ -158,7 +164,7 @@ export const ChamberComposer = forwardRef<
               {attachment.previewUrl ? (
                 <img src={attachment.previewUrl} alt="" />
               ) : (
-                <ImagePlus aria-hidden="true" />
+                <FileText aria-hidden="true" />
               )}
               <span>{attachment.name}</span>
               <button
@@ -193,7 +199,7 @@ export const ChamberComposer = forwardRef<
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={disabled || uploading}
-            aria-label="Attach image"
+            aria-label="Attach files"
           >
             {uploading ? (
               <LoaderCircle className="is-spinning" aria-hidden="true" />
@@ -235,9 +241,7 @@ export const ChamberComposer = forwardRef<
       </div>
 
       {dragging ? (
-        <div className="chamber-composer-drop-target">
-          Drop images to attach
-        </div>
+        <div className="chamber-composer-drop-target">Drop files to attach</div>
       ) : null}
     </fieldset>
   );

@@ -553,7 +553,7 @@ export function createBridgeHost({
           sessionId: await need().forkSession(args[0], args[1], args[2]),
         };
       case "createQuickChat":
-        return { sessionId: await need().createQuickChat(args[0]) };
+        return { sessionId: await need().createQuickChat(args[0], args[1]) };
       case "navigateSession":
         return need().navigateSession(args[0], args[1]);
       case "createProject":
@@ -586,6 +586,8 @@ export function createBridgeHost({
         return need().readFile(args[0]);
       case "uploadImage":
         return need().uploadImage(args[0], args[1]);
+      case "uploadAttachment":
+        return need().uploadAttachment(args[0], args[1], args[2]);
       case "readBlob":
         return need().readBlob(args[0]);
       case "openWorkspaceFile": {

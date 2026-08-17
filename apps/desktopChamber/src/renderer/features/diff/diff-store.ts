@@ -1,6 +1,7 @@
 // Diff feature state + the cross-feature API. Other features open diffs
 // through `openDiff(...)` / the `diff.open` command — never by importing the
 // DiffPane component (ARCHITECTURE cross-feature rules).
+import { highlighter } from "@git-diff-view/react";
 import { create } from "zustand";
 import { registerCommands, runCommand } from "../../store/commands.ts";
 import { useSessions } from "../../store/sessions.ts";
@@ -17,6 +18,8 @@ import {
   composeGitDiff,
   hunkStats,
 } from "./unified-diff.ts";
+
+highlighter.setMaxLineToIgnoreSyntax(Number.MAX_SAFE_INTEGER);
 
 /** The contract other features call (features/diff/diff-store.ts openDiff). */
 export type OpenDiffInput = {

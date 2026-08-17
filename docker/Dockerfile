@@ -17,8 +17,11 @@ RUN apt-get update \
       git \
       less \
       make \
+      poppler-utils \
       procps \
       python3 \
+      python3-docx \
+      python3-openpyxl \
       ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable

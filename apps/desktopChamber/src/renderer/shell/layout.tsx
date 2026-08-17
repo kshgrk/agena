@@ -7,6 +7,7 @@
 // 2025 Bohdan Triapitsyn. See THIRD_PARTY_NOTICES.md.
 import "dockview/dist/styles/dockview.css";
 import "./dockview.css";
+import type { SideChatAccess } from "@agena/protocol";
 import {
   createDockview,
   type DockviewApi,
@@ -34,6 +35,7 @@ import { pane as inspectorPane } from "../features/inspector/index.ts";
 import { pane as searchPane } from "../features/search/index.ts";
 import {
   sideChatsForRoot,
+  sideChatTabTitle,
   sideChatTitle,
 } from "../features/sessions/side-chats.ts";
 import { pane as snapshotsPane } from "../features/snapshots/index.ts";
@@ -52,7 +54,18 @@ import {
   useSessions,
   useUi,
 } from "../store/index.ts";
-import { EmptyState } from "../ui/index.ts";
+import {
+  OPEN_SOURCE_REFERENCE_EVENT,
+  type SourceReference,
+} from "../store/source-reference.ts";
+import {
+  Button,
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogTitle,
+  EmptyState,
+} from "../ui/index.ts";
 import {
   buildSavedLayout,
   OPEN_SEARCH_EVENT,
@@ -116,22 +129,20 @@ function workbenchPrefix(group: {
   toggle.setAttribute("aria-label", "Show sessions sidebar");
   toggle.title = "Show sessions sidebar";
 
-  const brand = document.createElement("span");
-  brand.className = "chamber-workbench-brand";
-  brand.textContent = "Agena Conductor";
-  element.append(toggle, brand);
+  element.append(toggle);
 
   let dispose = () => {};
   return {
     element,
     init({ containerApi }) {
       const refresh = () => {
-        element.hidden = !group.panels.some(
-          (panel) =>
-            panelSessionId(panel.id) !== null ||
-            panel.id === EMPTY_SESSION_PANEL,
-        );
-        toggle.hidden = !useShellUi.getState().sidebarCollapsed;
+        element.hidden =
+          !useShellUi.getState().sidebarCollapsed ||
+          !group.panels.some(
+            (panel) =>
+              panelSessionId(panel.id) !== null ||
+              panel.id === EMPTY_SESSION_PANEL,
+          );
       };
       const showSidebar = () =>
         useShellUi.getState().setSidebarCollapsed(false);
@@ -339,7 +350,7 @@ function openQuickChatPanel(
   const added = api.addPanel({
     id,
     component: id,
-    title: sideChatTitle(byId, childSessionId),
+    title: sideChatTabTitle(byId, childSessionId),
     ...(sibling
       ? {
           position: { referencePanel: sibling.id, direction: "within" },
@@ -477,6 +488,22 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
   const [portals, setPortals] = useState<ReadonlyMap<string, HTMLElement>>(
     new Map(),
   );
+  const [quickChatRequest, setQuickChatRequest] = useState<{
+    rootSessionId: string;
+    sourceSessionId: string;
+  } | null>(null);
+  const createQuickChatRef = useRef<
+    | ((
+        request: { rootSessionId: string; sourceSessionId: string },
+        access: SideChatAccess,
+      ) => void)
+    | null
+  >(null);
+  const chooseQuickChatAccess = (sideChatAccess: SideChatAccess) => {
+    if (!quickChatRequest) return;
+    createQuickChatRef.current?.(quickChatRequest, sideChatAccess);
+    setQuickChatRequest(null);
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -598,7 +625,10 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         if (!sessionId && !quickChatId) continue;
         const title = sessionId
           ? sessionTabTitle(sessionId)
-          : sideChatTitle(useSessions.getState().byId, quickChatId as string);
+          : sideChatTabTitle(
+              useSessions.getState().byId,
+              quickChatId as string,
+            );
         if (panel.title !== title) panel.api.setTitle(title);
       }
     });
@@ -631,15 +661,25 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       );
     };
     const creatingQuickChats = new Set<string>();
+    const requestQuickChat = (
+      rootSessionId: string,
+      sourceSessionId: string,
+    ) => {
+      setQuickChatRequest({ rootSessionId, sourceSessionId });
+    };
     const createQuickChat = async (
       rootSessionId: string,
       sourceSessionId: string,
+      sideChatAccess: SideChatAccess,
     ) => {
       if (creatingQuickChats.has(sourceSessionId)) return;
       creatingQuickChats.add(sourceSessionId);
       try {
         const bridge = getBridge();
-        const child = await bridge.createQuickChat(sourceSessionId);
+        const child = await bridge.createQuickChat(
+          sourceSessionId,
+          sideChatAccess,
+        );
         await ensureSubscribed(child.sessionId, 0);
         useSessions.getState().setAll(
           await bridge.listSessionSummaries({
@@ -671,10 +711,17 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
         }
         return;
       }
-      await createQuickChat(rootSessionId, rootSessionId);
+      requestQuickChat(rootSessionId, rootSessionId);
     };
     createQuickChatFromHeader = (rootSessionId, sourceSessionId) => {
-      void createQuickChat(rootSessionId, sourceSessionId);
+      requestQuickChat(rootSessionId, sourceSessionId);
+    };
+    createQuickChatRef.current = (request, sideChatAccess) => {
+      void createQuickChat(
+        request.rootSessionId,
+        request.sourceSessionId,
+        sideChatAccess,
+      );
     };
     const onOpenChanges = (event: Event) => {
       const sessionId = (event as CustomEvent<{ sessionId?: string }>).detail
@@ -682,6 +729,18 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       if (sessionId) openChangesPanel(api, sessionId);
     };
     window.addEventListener(OPEN_SESSION_CHANGES_EVENT, onOpenChanges);
+    const onOpenSource = (event: Event) => {
+      const ref = (event as CustomEvent<SourceReference>).detail;
+      if (!ref) return;
+      if (ref.kind === "file") addRightPane(api, "files");
+      else if (ref.kind === "diff") {
+        if (ref.changeGroupId) openChangesPanel(api, ref.sessionId);
+        else addRightPane(api, "diff");
+      } else if (ref.kind === "terminal") {
+        useUi.getState().setTerminalOpen(true);
+      }
+    };
+    window.addEventListener(OPEN_SOURCE_REFERENCE_EVENT, onOpenSource);
     const unregister = registerCommands([
       ...[filesPane, timelinePane, snapshotsPane, diffPane].map((p) => ({
         id: `view.${p.id}`,
@@ -752,9 +811,11 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
 
     return () => {
       disposed = true;
+      createQuickChatRef.current = null;
       window.clearTimeout(saveTimer);
       unregister();
       window.removeEventListener(OPEN_SESSION_CHANGES_EVENT, onOpenChanges);
+      window.removeEventListener(OPEN_SOURCE_REFERENCE_EVENT, onOpenSource);
       unsubUi();
       unsubSessions();
       unsubShell();
@@ -776,6 +837,50 @@ export function DockLayout({ saved }: { saved: SavedLayout | null }) {
       {[...portals.entries()].map(([id, element]) =>
         createPortal(panelNode(id), element, id),
       )}
+      <Dialog
+        open={quickChatRequest !== null}
+        onOpenChange={(open) => {
+          if (!open) setQuickChatRequest(null);
+        }}
+        size="sm"
+      >
+        <DialogTitle>Create side chat</DialogTitle>
+        <DialogDescription>
+          Choose the tools this side chat can use. Its conversation history is
+          inherited only through the latest completed assistant message.
+        </DialogDescription>
+        <div className="mt-4 grid gap-2">
+          <Button
+            className="h-auto items-start justify-start px-3 py-2 text-left"
+            onClick={() => chooseQuickChatAccess("read_only")}
+          >
+            <span>
+              <span className="block">Read only · Recommended</span>
+              <span className="mt-0.5 block text-xs font-normal text-fg-muted">
+                Inspect conversation and files without running commands or
+                making changes.
+              </span>
+            </span>
+          </Button>
+          <Button
+            className="h-auto items-start justify-start px-3 py-2 text-left"
+            onClick={() => chooseQuickChatAccess("full")}
+          >
+            <span>
+              <span className="block">Full access</span>
+              <span className="mt-0.5 block text-xs font-normal text-fg-muted">
+                Same tools and approvals as main. Both chats can modify the same
+                workspace and run processes concurrently.
+              </span>
+            </span>
+          </Button>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setQuickChatRequest(null)}>
+            Cancel
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </>
   );
 }

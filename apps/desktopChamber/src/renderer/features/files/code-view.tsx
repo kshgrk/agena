@@ -18,6 +18,10 @@ import { createHighlighter } from "shiki";
 // cannot instantiate — the JS regex engine highlights without WebAssembly.
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import { cx } from "../../ui/index.ts";
+import {
+  SelectionActions,
+  type SelectionActionsProps,
+} from "../composer/source-reference-ui.tsx";
 
 type Tokenized = { tokens: ThemedToken[][] };
 
@@ -124,16 +128,17 @@ const CodeLines = memo(function CodeLines({
       )}
     >
       {tokenized.tokens.map((line, lineIdx) => (
-        // eslint-disable-next-line react/no-array-index-key -- lines are positional
         <span
+          // biome-ignore lint/suspicious/noArrayIndexKey: syntax-highlighted lines are positional and replaced as one token set.
           key={lineIdx}
+          data-source-line={lineIdx + 1}
           className={showLineNumbers ? LINE_NUMBER_CLS : "block"}
         >
           {line.length === 0
             ? "\n"
             : line.map((token, tokenIdx) => (
                 <span
-                  // eslint-disable-next-line react/no-array-index-key
+                  // biome-ignore lint/suspicious/noArrayIndexKey: Shiki tokens have no stable identity beyond their position.
                   key={tokenIdx}
                   style={{
                     color: token.color,
@@ -161,6 +166,7 @@ export type CodeViewProps = {
   theme: "dark" | "light";
   showLineNumbers?: boolean;
   className?: string;
+  selection?: Pick<SelectionActionsProps, "sessionId" | "makeReference">;
 };
 
 /** Shiki-highlighted read-only code body on a transparent background. */
@@ -170,6 +176,7 @@ export function CodeView({
   theme,
   showLineNumbers = true,
   className,
+  selection,
 }: CodeViewProps) {
   const plain = useMemo(() => rawTokens(code), [code]);
   const [highlighted, setHighlighted] = useState<Tokenized | null>(null);
@@ -188,12 +195,17 @@ export function CodeView({
       });
   }, [code, lang, theme]);
 
-  return (
+  const body = (
     <pre className={cx("m-0 overflow-x-auto p-3 text-fg", className)}>
       <CodeLines
         tokenized={highlighted ?? plain}
         showLineNumbers={showLineNumbers}
       />
     </pre>
+  );
+  return selection ? (
+    <SelectionActions {...selection}>{body}</SelectionActions>
+  ) : (
+    body
   );
 }

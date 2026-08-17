@@ -75,6 +75,7 @@ import {
   type ThinkingLevel,
   type ToolCallDetail,
   type UserMessageAnchor,
+  uploadAttachmentResponseSchema,
   uploadImageResponseSchema,
   VISIBLE_BROWSER_CAPABILITY,
   type VisibleBrowserAction,
@@ -454,10 +455,14 @@ export class AgenaClient {
   }
 
   /** Create or reopenable read-only context through the last completed turn. */
-  async createQuickChat(sourceSessionId: string): Promise<string> {
+  async createQuickChat(
+    sourceSessionId: string,
+    sideChatAccess: "read_only" | "full" = "read_only",
+  ): Promise<string> {
     const request: CreateDerivedSessionRequest = {
       mode: "fork",
       purpose: "quick_chat",
+      sideChatAccess,
       title: "Quick Chat",
     };
     const body = await this.fetchJson(
@@ -613,6 +618,22 @@ export class AgenaClient {
     ) as ArrayBuffer;
     return uploadImageResponseSchema.parse(
       await this.fetchBody("POST", "/v1/images", body, mimeType),
+    ).ref;
+  }
+
+  async uploadAttachment(bytes: Uint8Array, mimeType: string, name: string) {
+    const body = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const query = new URLSearchParams({ name });
+    return uploadAttachmentResponseSchema.parse(
+      await this.fetchBody(
+        "POST",
+        `/v1/attachments?${query}`,
+        body,
+        mimeType || "application/octet-stream",
+      ),
     ).ref;
   }
 

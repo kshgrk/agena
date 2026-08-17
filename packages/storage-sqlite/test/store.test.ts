@@ -622,6 +622,7 @@ test("persists an empty quick chat with its runtime reference", async () => {
 
   expect(child).toMatchObject({
     purpose: "quick_chat",
+    sideChatAccess: "read_only",
     runtimeSessionRef: "pi:quick-chat",
     parentSessionId: parent.sessionId,
     derivedFrom: { parentSessionId: parent.sessionId, mode: "fork" },
@@ -631,7 +632,28 @@ test("persists an empty quick chat with its runtime reference", async () => {
   const reopened = new SqliteEventStore(path);
   expect(await reopened.getSession(child.sessionId)).toMatchObject({
     purpose: "quick_chat",
+    sideChatAccess: "read_only",
     runtimeSessionRef: "pi:quick-chat",
+  });
+  reopened.close();
+});
+
+test("persists full side-chat access", async () => {
+  const path = dbPath();
+  const store = new SqliteEventStore(path);
+  const parent = await store.createSession({ workspaceId: "ws-1" });
+  const child = await store.createDerivedSession({
+    parentSessionId: parent.sessionId,
+    mode: "fork",
+    purpose: "quick_chat",
+    sideChatAccess: "full",
+  });
+  store.close();
+
+  const reopened = new SqliteEventStore(path);
+  expect(await reopened.getSession(child.sessionId)).toMatchObject({
+    purpose: "quick_chat",
+    sideChatAccess: "full",
   });
   reopened.close();
 });

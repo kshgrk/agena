@@ -1,6 +1,6 @@
 # Contract: MCP import, Skill import, Session import (commit e4338e1)
 
-Audience: builders of the new renderer (`apps/desktopNew`). You will NOT read the
+Audience: builders of the renderer (`apps/desktopChamber`). You will NOT read the
 old sources — this document is the complete reference for these three features.
 
 Architecture in one paragraph: the **renderer never talks to the daemon**. It
@@ -433,7 +433,7 @@ Every session result is independent: `{ sourcePath, status: "ok"|"skipped"|"erro
 
 ## 6. Bridge surface (renderer ⇄ main), types verbatim
 
-From `apps/desktop/src/shared/bridge.ts` — reuse these shapes exactly:
+From `apps/desktopChamber/src/shared/bridge.ts` — reuse these shapes exactly:
 
 ```ts
 export type ImportPlan = {

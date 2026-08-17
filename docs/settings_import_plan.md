@@ -82,7 +82,7 @@ change their formats (they do), only the app updates.
 │ IPC: one new case in electron/bridge.mjs call()   │   │   • seed events (projection free) │
 └───────────────────────────────────────────────────┘   │ imports ledger table (NEW)        │
         ▲ typed bridge (no new plumbing —                └──────────────────────────────────┘
-          generic invoke channel, apps/desktop/src/renderer/lib/bridge.ts:93-112)
+          generic invoke channel, apps/desktopChamber/src/renderer/lib/bridge.ts:93-112)
 ```
 
 ### Why these placements
@@ -101,7 +101,7 @@ change their formats (they do), only the app updates.
 
 ## 4. Scanner + differential refresh (Electron main)
 
-New module `apps/desktop/electron/importer/scan.mjs`.
+New module `apps/desktopChamber/electron/importer/scan.mjs`.
 
 Sources (all under `os.homedir()`):
 
@@ -246,13 +246,13 @@ The result panel lists per-session ok/skip(empty)/error.
 ## 9. Wiring (all the plumbing, exhaustively)
 
 Desktop:
-- `apps/desktop/src/shared/bridge.ts` — extend `AgenaBridge`:
+- `apps/desktopChamber/src/shared/bridge.ts` — extend `AgenaBridge`:
   `importScan(refresh?: boolean)`, `importRun(plan)`, `importStatus()` (ledger fetch),
   progress via the existing `onBatch`-style listener or a dedicated `onImportProgress`.
-- `apps/desktop/electron/bridge.mjs` — new `case`s in the `call()` switch (`:339-431`)
+- `apps/desktopChamber/electron/bridge.mjs` — new `case`s in the `call()` switch (`:339-431`)
   delegating to `electron/importer/{scan,run}.mjs`. This is the only required IPC edit —
   preload/main/renderer proxies are generic (`lib/bridge.ts:93-112`).
-- `apps/desktop/src/renderer/mock/bridge.ts` — mock impls (fixture scan data) so
+- `apps/desktopChamber/src/renderer/mock/bridge.ts` — mock impls (fixture scan data) so
   `AGENA_MOCK=1` and browser dev keep working.
 - Renderer: `features/settings/settings-modal.tsx` (radix `ui/modal.tsx` pattern),
   `useUi` boolean + `settings.toggle` command (⌘,) registered in

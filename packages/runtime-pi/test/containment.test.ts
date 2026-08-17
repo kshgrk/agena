@@ -84,3 +84,19 @@ it("M1-R2: contained loader loads no filesystem extensions", async () => {
       .sort(),
   ).toEqual(["later-skill", "test-skill"]);
 });
+
+it("appends session-specific system context", async () => {
+  const { cwd, agentDir } = plantExtensions();
+  const contained = containedResourceLoader(
+    cwd,
+    agentDir,
+    undefined,
+    [],
+    undefined,
+    "You are an Agena side chat.",
+  );
+  await contained.reload();
+  expect(contained.getAppendSystemPrompt()).toEqual([
+    "You are an Agena side chat.",
+  ]);
+});

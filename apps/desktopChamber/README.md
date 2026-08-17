@@ -1,12 +1,9 @@
 # Agena Chamber
 
-Agena Chamber is a parallel Electron renderer for Agena. It source-adapts
+Agena Chamber is the Electron renderer for Agena. It source-adapts
 OpenChamber's visual language while keeping Agena's daemon, protocol, durable
 events, Pi runtime, projects, sessions, subagents, approvals, terminal,
 snapshots, browser, Fast Mode, and usage reporting.
-
-The existing `apps/desktop` and `apps/desktopNew` applications are independent
-and are not imported or modified by this app.
 
 ## Development
 
@@ -14,8 +11,7 @@ and are not imported or modified by this app.
 pnpm --filter @agena/desktop-chamber app
 ```
 
-The renderer uses port `5230` by default so it can run beside the other Agena
-clients. A browser-only mock is available with:
+The renderer uses port `5230` by default. A browser-only mock is available with:
 
 ```sh
 pnpm --filter @agena/desktop-chamber dev

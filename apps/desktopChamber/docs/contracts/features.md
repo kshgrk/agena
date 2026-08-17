@@ -1,6 +1,6 @@
 # Renderer Feature Contract (parity spec for the desktopNew rewrite)
 
-Source of truth: `apps/desktop/src/renderer/` as of 2026-07-11. Builders implement from THIS
+Source baseline: the legacy Agena renderer as of 2026-07-11. Builders implement from THIS
 document only. Type shapes are copied verbatim from the original sources. Anything marked
 **IMPROVE-ON** is a known rough edge you may fix in the rewrite; everything else is binding.
 

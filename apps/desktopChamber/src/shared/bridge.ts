@@ -313,7 +313,10 @@ export type AgenaBridge = {
     sourceMessageId: string | undefined,
     mode: SessionForkMode,
   ): Promise<ForkSessionResult>;
-  createQuickChat(sourceSessionId: string): Promise<ForkSessionResult>;
+  createQuickChat(
+    sourceSessionId: string,
+    sideChatAccess: "read_only" | "full",
+  ): Promise<ForkSessionResult>;
   navigateSession(sessionId: string, sourceMessageId: string): Promise<string>;
   createProject(name: string): Promise<OpenedProject>;
   /** Full teardown: db rows, workspace files, pi sessions, snapshots. */
@@ -352,6 +355,11 @@ export type AgenaBridge = {
   listFiles(opts?: { path?: string }): Promise<FileEntry[]>;
   readFile(path: string): Promise<Uint8Array>;
   uploadImage(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  uploadAttachment(
+    bytes: Uint8Array,
+    mimeType: string,
+    name: string,
+  ): Promise<BlobRef>;
   readBlob(hash: string): Promise<Uint8Array>;
   /** Open a daemon-validated workspace file through the host OS. */
   openWorkspaceFile(path: string): Promise<void>;

@@ -125,6 +125,26 @@ test("image prompts reject missing blobs before creating a user event", async ()
   expect((await store.readEvents(session.sessionId, 0)).events).toHaveLength(1);
 });
 
+test("file prompts retain the durable BlobRef and dispatch successfully", async () => {
+  const store = new InMemoryEventStore();
+  const orch = new SessionOrchestrator(store, new FakeRuntimeAdapter({}));
+  const session = await orch.createSession({ workspaceId: "ws-1" });
+  const ref = await store.putBlob(
+    new TextEncoder().encode("# Notes\n"),
+    "text/markdown",
+  );
+  const done = runCompleted(store);
+  await orch.handlePrompt(session.sessionId, [
+    { type: "file", ref, path: "notes.md" },
+  ]);
+  await done;
+
+  const { events } = await store.readEvents(session.sessionId, 0);
+  expect(events[1]?.payload).toMatchObject({
+    content: [{ type: "file", ref, path: "notes.md" }],
+  });
+});
+
 test("prompt while a turn is in flight fails SESSION_BUSY; idle again after completion", async () => {
   const store = new InMemoryEventStore();
   const orch = new SessionOrchestrator(
@@ -246,6 +266,7 @@ test("quick chat inherits the latest completed assistant and stays read-only", a
   expect(child).toMatchObject({
     title: "Quick Chat 1",
     purpose: "quick_chat",
+    sideChatAccess: "read_only",
     parentSessionId: parent.sessionId,
     runtimeSessionRef: `fake:${child.sessionId}`,
     derivedFrom: {
@@ -264,9 +285,38 @@ test("quick chat inherits the latest completed assistant and stays read-only", a
     runtimeEntryId: "pi-assistant-entry",
     position: "at",
     toolNames: ["read", "grep", "find", "ls"],
+    systemPromptAppendix: expect.stringContaining("read-only side chat"),
   });
   expect(adapter.forkInputs).toHaveLength(2);
   await secondDone;
+});
+
+test("full side chat gets ordinary primary-session tools and explicit context", async () => {
+  const store = new InMemoryEventStore();
+  const adapter = new FakeRuntimeAdapter();
+  const orch = new SessionOrchestrator(store, adapter);
+  const parent = await orch.createSession({ workspaceId: "ws-1" });
+
+  const child = await orch.createQuickChat(parent.sessionId, "full");
+
+  expect(child).toMatchObject({
+    purpose: "quick_chat",
+    sideChatAccess: "full",
+  });
+  expect(adapter.createInputs[0]).toMatchObject({
+    sessionId: child.sessionId,
+    systemPromptAppendix: expect.stringContaining("full-access side chat"),
+  });
+  expect(adapter.createInputs[0]?.toolNames).toBeUndefined();
+
+  const reopenedAdapter = new FakeRuntimeAdapter();
+  const reopened = new SessionOrchestrator(store, reopenedAdapter);
+  await reopened.handleRuntimeInfo(child.sessionId);
+  expect(reopenedAdapter.createInputs[0]).toMatchObject({
+    runtimeSessionRef: `fake:${child.sessionId}`,
+    systemPromptAppendix: expect.stringContaining("full-access side chat"),
+  });
+  expect(reopenedAdapter.createInputs[0]?.toolNames).toBeUndefined();
 });
 
 test("quick chat is empty when the parent has no completed turn", async () => {

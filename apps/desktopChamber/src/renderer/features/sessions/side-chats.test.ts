@@ -5,6 +5,7 @@ import type { SessionSummary } from "@agena/protocol";
 import {
   sideChatRootSessionId,
   sideChatsForRoot,
+  sideChatTabTitle,
   sideChatTitle,
 } from "./side-chats.ts";
 
@@ -37,6 +38,7 @@ test("groups nested side chats under their main session", () => {
       sessionId: "q2",
       title: "Quick Chat 2",
       purpose: "quick_chat",
+      sideChatAccess: "full",
       parentSessionId: "q1",
       createdAt: "2026-08-14T00:00:02Z",
     }),
@@ -45,6 +47,7 @@ test("groups nested side chats under their main session", () => {
       purpose: "quick_chat",
       parentSessionId: "main",
       status: "archived",
+      createdAt: "2026-08-14T00:00:03Z",
     }),
   ];
   const byId = Object.fromEntries(
@@ -54,6 +57,8 @@ test("groups nested side chats under their main session", () => {
   assert.equal(sideChatRootSessionId(byId, "q2"), "main");
   assert.equal(sideChatTitle(byId, "q1"), "Quick Chat 1");
   assert.equal(sideChatTitle(byId, "q2"), "Quick Chat 2");
+  assert.equal(sideChatTabTitle(byId, "q1"), "Quick Chat 1 · Read only");
+  assert.equal(sideChatTabTitle(byId, "q2"), "Quick Chat 2 · Full access");
   assert.deepEqual(
     sideChatsForRoot(byId, "main").map((item) => item.sessionId),
     ["q1", "q2"],

@@ -57,15 +57,14 @@ safety restore, dark/light themes.
 One protocol, three invariant-bearing rules: clients speak only the versioned Agena
 protocol (never runtime internals), durable events get a per-session monotonic `seq`
 assigned in the append transaction, and exactly one daemon writes a workspace. The full
-design lives in [`final_plan.md`](./final_plan.md) (daemon) and
-[`docs/desktop_plan.md`](./docs/desktop_plan.md) (desktop app).
+design lives in [`final_plan.md`](./final_plan.md).
 
 ### Repo layout
 
 | Path | What |
 |---|---|
 | `apps/daemon` | The daemon: HTTP + WebSocket gateway, sessions, PTYs (Node, runs in the container) |
-| `apps/desktop` | Electron desktop app (Vite + React renderer, bridge in main) |
+| `apps/desktopChamber` | Agena Chamber desktop app (Electron + Vite + React) |
 | `apps/cli` | Terminal TUI client |
 | `packages/protocol` | **The wire contract** — Zod schemas for every event, frame, command, route |
 | `packages/core` | Domain logic + the `RuntimeAdapter`/`EventStore` ports |
@@ -208,7 +207,7 @@ Builds are unsigned for now: first launch on another Mac needs right-click → O
 | `CF_R2_S3`, `CF_ACCESS_KEY_ID`, `CF_SECRET_ACCESS_KEY` | Modal deploy | R2 S3 endpoint + credentials for Litestream |
 | `AGENA_MODAL_TOKEN` | Modal deploy, desktop, packaging | Bearer token for the cloud daemon |
 | `AGENA_RELEASE_URL` | packaging | Daemon URL baked into packaged builds |
-| `AGENA_DEV_PORT` | desktop dev | Renderer port for a parallel instance (default `5199`) |
+| `AGENA_DEV_PORT` | desktop dev | Chamber renderer port (default `5230`) |
 | `AGENA_MOCK=1` | desktop | Force the fixture mock even inside Electron |
 
 ## Development
@@ -230,8 +229,7 @@ model calls.
 crash discipline, shell attach, project scoping, approvals + turn controls) along with
 most of M5 (files, search, snapshots). Upcoming: preview URLs for workspace dev servers,
 Claude/Codex history import, `.agena/` extensibility execution, an embedded browser pane
-with agent browser-use. The milestone ledgers live in `final_plan.md` §14 and
-`docs/desktop_plan.md` §13.
+with agent browser-use. The milestone ledger lives in `final_plan.md` §14.
 
 ## Security notes
 

@@ -7,6 +7,7 @@ import {
   useSessions,
   useUi,
 } from "../../store/index.ts";
+import { parseReferenceText } from "../../store/source-reference.ts";
 import type { UserBlock } from "../../store/types.ts";
 import { Button, IconButton } from "../../ui/index.ts";
 
@@ -27,7 +28,7 @@ async function openDerivedSession(
     useSessions.getState().setAll(summaries);
     useSessions.getState().setActive(child.sessionId);
     if (draft !== undefined) {
-      useUi.getState().requestComposerInsert(draft);
+      restoreComposerDraft(draft, child.sessionId);
     }
   } catch (error) {
     pushToast({
@@ -41,6 +42,13 @@ async function openDerivedSession(
   }
 }
 
+function restoreComposerDraft(value: string, sessionId: string): void {
+  const parsed = parseReferenceText(value);
+  useUi
+    .getState()
+    .requestComposerContent(parsed.text, parsed.references, sessionId);
+}
+
 async function editInSession(
   sessionId: string,
   sourceMessageId: string,
@@ -50,7 +58,7 @@ async function editInSession(
       sessionId,
       sourceMessageId,
     );
-    useUi.getState().requestComposerInsert(editorText);
+    restoreComposerDraft(editorText, sessionId);
   } catch (error) {
     pushToast({
       kind: "err",

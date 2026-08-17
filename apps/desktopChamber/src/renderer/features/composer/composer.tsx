@@ -29,6 +29,12 @@ import {
   useUi,
 } from "../../store/index.ts";
 import {
+  MAX_SOURCE_REFERENCES,
+  parseReferenceText,
+  type SourceReference,
+  serializeReferenceText,
+} from "../../store/source-reference.ts";
+import {
   Badge,
   cx,
   Menu,
@@ -42,13 +48,30 @@ import {
 } from "../../ui/index.ts";
 import { ModelPicker } from "./model-picker.tsx";
 import { errText, performSend } from "./send.ts";
+import { ComposerReferences } from "./source-reference-ui.tsx";
 
 // ---- drafts (module store, hydrated once, debounce-persisted) ------------------
 
+type ComposerDraft = { text: string; references: SourceReference[] };
+
 type ComposerDraftsStore = {
-  drafts: Readonly<Record<string, string>>;
+  drafts: Readonly<Record<string, ComposerDraft>>;
   setDraft: (sessionId: string, text: string) => void;
+  addReference: (sessionId: string, reference: SourceReference) => void;
+  removeReference: (sessionId: string, id: string) => void;
+  setReferenceNote: (sessionId: string, id: string, note: string) => void;
 };
+
+const EMPTY_DRAFT: ComposerDraft = { text: "", references: [] };
+
+function referenceWithNote(
+  reference: SourceReference,
+  note: string,
+): SourceReference {
+  if (note) return { ...reference, note };
+  const { note: _note, ...withoutNote } = reference;
+  return withoutNote;
+}
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -58,18 +81,83 @@ function scheduleSave(): void {
     saveTimer = null;
     // full-record write (savePersisted replaces whole top-level records)
     const drafts = Object.fromEntries(
-      Object.entries(useComposerDrafts.getState().drafts).filter(
-        ([, v]) => v !== "",
-      ),
+      Object.entries(useComposerDrafts.getState().drafts)
+        .filter(([, draft]) => draft.text !== "" || draft.references.length > 0)
+        .map(([sessionId, draft]) => [
+          sessionId,
+          serializeReferenceText(draft.text, draft.references),
+        ]),
     );
     savePersistedPatch({ drafts });
   }, 500);
 }
 
-export const useComposerDrafts = create<ComposerDraftsStore>((set) => ({
+export const useComposerDrafts = create<ComposerDraftsStore>((set, get) => ({
   drafts: {},
   setDraft: (sessionId, text) => {
-    set((s) => ({ drafts: { ...s.drafts, [sessionId]: text } }));
+    set((s) => ({
+      drafts: {
+        ...s.drafts,
+        [sessionId]: { ...(s.drafts[sessionId] ?? EMPTY_DRAFT), text },
+      },
+    }));
+    scheduleSave();
+  },
+  addReference: (sessionId, reference) => {
+    if (
+      (get().drafts[sessionId]?.references.length ?? 0) >= MAX_SOURCE_REFERENCES
+    ) {
+      pushToast({
+        kind: "warn",
+        title: "Reference limit reached",
+        detail: `Remove one before adding another (maximum ${MAX_SOURCE_REFERENCES}).`,
+      });
+      return;
+    }
+    set((s) => {
+      const draft = s.drafts[sessionId] ?? EMPTY_DRAFT;
+      return {
+        drafts: {
+          ...s.drafts,
+          [sessionId]: {
+            ...draft,
+            references: [...draft.references, reference],
+          },
+        },
+      };
+    });
+    scheduleSave();
+  },
+  removeReference: (sessionId, id) => {
+    set((s) => {
+      const draft = s.drafts[sessionId] ?? EMPTY_DRAFT;
+      return {
+        drafts: {
+          ...s.drafts,
+          [sessionId]: {
+            ...draft,
+            references: draft.references.filter((ref) => ref.id !== id),
+          },
+        },
+      };
+    });
+    scheduleSave();
+  },
+  setReferenceNote: (sessionId, id, note) => {
+    set((s) => {
+      const draft = s.drafts[sessionId] ?? EMPTY_DRAFT;
+      return {
+        drafts: {
+          ...s.drafts,
+          [sessionId]: {
+            ...draft,
+            references: draft.references.map((ref) =>
+              ref.id === id ? referenceWithNote(ref, note) : ref,
+            ),
+          },
+        },
+      };
+    });
     scheduleSave();
   },
 }));
@@ -86,7 +174,15 @@ function hydrateDrafts(): void {
     .then((p) => {
       // in-session typing wins over persisted values
       useComposerDrafts.setState((s) => ({
-        drafts: { ...p.drafts, ...s.drafts },
+        drafts: {
+          ...Object.fromEntries(
+            Object.entries(p.drafts).map(([sessionId, value]) => [
+              sessionId,
+              parseReferenceText(value),
+            ]),
+          ),
+          ...s.drafts,
+        },
       }));
     })
     .catch(() => {});
@@ -133,11 +229,12 @@ const chipCls =
   "text-fg-secondary transition-colors duration-100 hover:bg-fg/6 hover:text-fg " +
   "[&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg-muted";
 
-type DraftImage = {
+type DraftAttachment = {
   id: string;
   name: string;
   ref: BlobRef;
-  previewUrl: string;
+  kind: "image" | "file";
+  previewUrl?: string;
 };
 
 async function uploadableImage(
@@ -179,8 +276,13 @@ export function Composer({
   sessionId: string;
   mobile?: boolean;
 }) {
-  const value = useComposerDrafts((s) => s.drafts[sessionId] ?? "");
+  const draft = useComposerDrafts((s) => s.drafts[sessionId] ?? EMPTY_DRAFT);
+  const value = draft.text;
+  const references = draft.references;
   const setDraft = useComposerDrafts((s) => s.setDraft);
+  const addReference = useComposerDrafts((s) => s.addReference);
+  const removeReference = useComposerDrafts((s) => s.removeReference);
+  const setReferenceNote = useComposerDrafts((s) => s.setReferenceNote);
   const active = useTranscripts((s) => isActive(s.bySession[sessionId]));
   const steerCount = useTranscripts(
     (s) => s.bySession[sessionId]?.queue.steerCount ?? 0,
@@ -197,7 +299,7 @@ export function Composer({
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [images, setImages] = useState<DraftImage[]>([]);
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
   const composerRef = useRef<ChamberComposerHandle | null>(null);
   const lastInsertNonce = useRef(useUi.getState().composerInsert?.nonce ?? 0);
   const wasActive = useRef(active);
@@ -228,12 +330,16 @@ export function Composer({
   useEffect(() => {
     if (!insert || insert.nonce === lastInsertNonce.current) return;
     lastInsertNonce.current = insert.nonce;
+    if (insert.sessionId && insert.sessionId !== sessionId) return;
     if (insert.text) {
-      const cur = useComposerDrafts.getState().drafts[sessionId] ?? "";
+      const cur = useComposerDrafts.getState().drafts[sessionId]?.text ?? "";
       setDraft(sessionId, cur ? `${cur}${insert.text}` : insert.text);
     }
+    for (const reference of insert.references ?? []) {
+      addReference(sessionId, reference);
+    }
     composerRef.current?.focus();
-  }, [insert, sessionId, setDraft]);
+  }, [insert, sessionId, setDraft, addReference]);
 
   // turn ended elsewhere → drop the abort confirm strip
   useEffect(() => {
@@ -269,10 +375,11 @@ export function Composer({
   }, [sessionId]);
 
   async function doSend(): Promise<void> {
-    const text = value.trim();
+    const userText = value.trim();
+    const text = serializeReferenceText(userText, references);
     const bridge = peekBridge();
     if (
-      (!text && images.length === 0) ||
+      (!userText && references.length === 0 && attachments.length === 0) ||
       !connected ||
       sending ||
       uploading ||
@@ -281,11 +388,19 @@ export function Composer({
       return;
     const content: ContentBlock[] = [
       ...(text ? [{ type: "text" as const, text }] : []),
-      ...images.map((image) => ({
-        type: "image" as const,
-        ref: image.ref,
-        alt: image.name,
-      })),
+      ...attachments.map((attachment) =>
+        attachment.kind === "image"
+          ? {
+              type: "image" as const,
+              ref: attachment.ref,
+              alt: attachment.name,
+            }
+          : {
+              type: "file" as const,
+              ref: attachment.ref,
+              path: attachment.name,
+            },
+      ),
     ];
     setSending(true);
     try {
@@ -298,9 +413,17 @@ export function Composer({
         { active, queueMode, text, content },
       );
       if (out.notice) pushToast({ kind: "info", title: out.notice });
-      setDraft(sessionId, "");
-      for (const image of images) URL.revokeObjectURL(image.previewUrl);
-      setImages([]);
+      useComposerDrafts.setState((state) => ({
+        drafts: {
+          ...state.drafts,
+          [sessionId]: EMPTY_DRAFT,
+        },
+      }));
+      scheduleSave();
+      for (const attachment of attachments) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      setAttachments([]);
     } catch (e) {
       pushToast({ kind: "err", title: "Send failed", detail: errText(e) });
     } finally {
@@ -309,32 +432,62 @@ export function Composer({
     }
   }
 
-  async function addImageFiles(files: File[]): Promise<void> {
+  async function addAttachmentFiles(files: File[]): Promise<void> {
     if (files.length === 0) return;
     const bridge = peekBridge();
     if (!bridge) return;
+    if (attachments.length + files.length > 10) {
+      pushToast({
+        kind: "warn",
+        title: "Attachment limit reached",
+        detail: "A message can contain up to 10 attachments.",
+      });
+      return;
+    }
     setUploading(true);
     try {
-      const added = await Promise.all(
-        files.map(async (file) => {
+      for (const file of files) {
+        if (
+          file.type.startsWith("image/") ||
+          /\.(?:bmp|gif|jpe?g|png|webp)$/i.test(file.name)
+        ) {
           const prepared = await uploadableImage(file);
           const ref = await bridge.uploadImage(
             prepared.bytes,
             prepared.mimeType,
           );
-          return {
+          setAttachments((current) => [
+            ...current,
+            {
+              id: crypto.randomUUID(),
+              name: file.name || "image",
+              ref,
+              kind: "image",
+              previewUrl: URL.createObjectURL(file),
+            },
+          ]);
+          continue;
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const ref = await bridge.uploadAttachment(
+          bytes,
+          file.type || "application/octet-stream",
+          file.name,
+        );
+        setAttachments((current) => [
+          ...current,
+          {
             id: crypto.randomUUID(),
-            name: file.name || "image",
+            name: file.name,
             ref,
-            previewUrl: URL.createObjectURL(file),
-          };
-        }),
-      );
-      setImages((current) => [...current, ...added]);
+            kind: "file",
+          },
+        ]);
+      }
     } catch (error) {
       pushToast({
         kind: "err",
-        title: "Image upload failed",
+        title: "Attachment upload failed",
         detail: errText(error),
       });
     } finally {
@@ -342,11 +495,11 @@ export function Composer({
     }
   }
 
-  function removeImage(id: string): void {
-    setImages((current) => {
-      const removed = current.find((image) => image.id === id);
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
-      return current.filter((image) => image.id !== id);
+  function removeAttachment(id: string): void {
+    setAttachments((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((attachment) => attachment.id !== id);
     });
   }
 
@@ -606,14 +759,28 @@ export function Composer({
         onChange={(text) => setDraft(sessionId, text)}
         onSubmit={() => void doSend()}
         onAbort={onStop}
-        onAttachFiles={(files) => void addImageFiles([...files])}
-        onRemoveAttachment={removeImage}
-        attachments={images.map((image) => ({
-          id: image.id,
-          name: image.name,
-          mimeType: image.ref.mimeType ?? "image/*",
-          previewUrl: image.previewUrl,
+        onAttachFiles={(files) => void addAttachmentFiles([...files])}
+        onRemoveAttachment={removeAttachment}
+        attachments={attachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          mimeType:
+            attachment.ref.mimeType ??
+            (attachment.kind === "image"
+              ? "image/*"
+              : "application/octet-stream"),
+          ...(attachment.previewUrl
+            ? { previewUrl: attachment.previewUrl }
+            : {}),
         }))}
+        contextAttachments={
+          <ComposerReferences
+            references={references}
+            onRemove={(id) => removeReference(sessionId, id)}
+            onNoteChange={(id, note) => setReferenceNote(sessionId, id, note)}
+          />
+        }
+        hasContext={references.length > 0}
         disabled={!connected || sending}
         running={active}
         uploading={uploading}

@@ -92,6 +92,7 @@ import {
   sessionChangeDiffQuerySchema,
   setPluginEnabledRequestSchema,
   updateSessionStatusRequestSchema,
+  uploadAttachmentQuerySchema,
   WS_PATH,
 } from "@agena/protocol";
 import { SqliteEventStore } from "@agena/storage-sqlite";
@@ -129,6 +130,127 @@ function sniffImageMime(bytes: Uint8Array): string | null {
   if (ascii(0, "RIFF") && ascii(8, "WEBP")) return "image/webp";
   if (ascii(0, "BM")) return "image/bmp";
   return null;
+}
+
+const ATTACHMENT_MAX_BYTES = 25_000_000;
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "c",
+  "cc",
+  "cpp",
+  "css",
+  "csv",
+  "go",
+  "h",
+  "html",
+  "java",
+  "js",
+  "json",
+  "jsx",
+  "md",
+  "py",
+  "rb",
+  "rs",
+  "sh",
+  "sql",
+  "toml",
+  "ts",
+  "tsv",
+  "tsx",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
+async function readBodyLimited(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  const declaredLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function sniffAttachmentMime(
+  bytes: Uint8Array,
+  name: string,
+  declaredMime: string | undefined,
+): string | null {
+  const image = sniffImageMime(bytes);
+  if (image) return image;
+  const lowerName = name.toLowerCase();
+  const extension = lowerName.includes(".")
+    ? (lowerName.split(".").at(-1) ?? "")
+    : "";
+  const mime = declaredMime?.split(";", 1)[0]?.trim().toLowerCase();
+  const ascii = (start: number, value: string) =>
+    [...value].every(
+      (character, index) => bytes[start + index] === character.charCodeAt(0),
+    );
+  if (ascii(0, "%PDF-")) return "application/pdf";
+  const zip =
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04;
+  if (zip) {
+    const archive = Buffer.from(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength,
+    );
+    if (
+      extension === "docx" &&
+      archive.includes(Buffer.from("word/document.xml"))
+    ) {
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+    if (
+      extension === "xlsx" &&
+      archive.includes(Buffer.from("xl/workbook.xml"))
+    ) {
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    }
+    return null;
+  }
+  const textLike =
+    TEXT_ATTACHMENT_EXTENSIONS.has(extension) ||
+    mime?.startsWith("text/") ||
+    mime === "application/json" ||
+    mime === "application/yaml" ||
+    mime === "application/x-yaml";
+  if (!textLike || bytes.includes(0)) return null;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  if (extension === "csv") return "text/csv";
+  if (extension === "tsv") return "text/tab-separated-values";
+  if (extension === "md") return "text/markdown";
+  if (extension === "json") return "application/json";
+  if (extension === "yaml" || extension === "yml") return "application/yaml";
+  return mime?.startsWith("text/") ? mime : "text/plain";
 }
 
 export interface Daemon {
@@ -642,8 +764,8 @@ export async function startDaemon(
     }),
   );
   app.post("/v1/images", async (c) => {
-    const bytes = new Uint8Array(await c.req.arrayBuffer());
-    if (bytes.byteLength === 0 || bytes.byteLength > 3_000_000) {
+    const bytes = await readBodyLimited(c.req.raw, 3_000_000);
+    if (!bytes || bytes.byteLength === 0) {
       return c.json(
         {
           code: "PAYLOAD_TOO_LARGE",
@@ -667,6 +789,54 @@ export async function startDaemon(
     return c.json({
       ref: await store.putBlob(bytes, mimeType),
     });
+  });
+  app.post("/v1/attachments", async (c) => {
+    const parsed = uploadAttachmentQuerySchema.safeParse(c.req.query());
+    if (
+      !parsed.success ||
+      basename(parsed.data.name) !== parsed.data.name ||
+      [...parsed.data.name].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 0x20 || code === 0x7f;
+      })
+    ) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message: "attachment name is invalid",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    const bytes = await readBodyLimited(c.req.raw, ATTACHMENT_MAX_BYTES);
+    if (!bytes || bytes.byteLength === 0) {
+      return c.json(
+        {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "attachment must be between 1 byte and 25 MB",
+          retryable: false,
+        },
+        413,
+      );
+    }
+    const mimeType = sniffAttachmentMime(
+      bytes,
+      parsed.data.name,
+      c.req.header("content-type"),
+    );
+    if (!mimeType) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message:
+            "supported attachments are images, PDF, DOCX, XLSX, Markdown, text, source, JSON, YAML, CSV, and TSV files",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    return c.json({ ref: await store.putBlob(bytes, mimeType) });
   });
   app.get("/v1/blobs/:hash", async (c) => {
     const stored = await store.readBlob(`sha256:${c.req.param("hash")}`);
@@ -1258,7 +1428,10 @@ export async function startDaemon(
     try {
       const session =
         parsed.data.purpose === "quick_chat"
-          ? await orchestrator.createQuickChat(c.req.param("id"))
+          ? await orchestrator.createQuickChat(
+              c.req.param("id"),
+              parsed.data.sideChatAccess ?? "read_only",
+            )
           : await orchestrator.forkSession({
               parentSessionId: c.req.param("id"),
               mode: parsed.data.mode,

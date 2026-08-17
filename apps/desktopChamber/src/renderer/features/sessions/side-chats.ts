@@ -38,6 +38,14 @@ export function sideChatTitle(
   return `Quick Chat ${Math.max(1, index + 1)}`;
 }
 
+export function sideChatTabTitle(
+  byId: Readonly<Record<string, SessionSummary>>,
+  sessionId: string,
+): string {
+  const access = byId[sessionId]?.sideChatAccess ?? "read_only";
+  return `${sideChatTitle(byId, sessionId)} · ${access === "full" ? "Full access" : "Read only"}`;
+}
+
 function allSideChatsForRoot(
   byId: Readonly<Record<string, SessionSummary>>,
   rootSessionId: string,

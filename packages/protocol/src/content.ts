@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// §5.3 content model. Prompt input remains text-only in commands; durable
-// runtime/tool payloads can carry the wider block set.
+// §5.3 content model. Commands admit the user-input subset (text/image/file);
+// durable runtime/tool payloads can carry the wider block set.
 export const blobRefSchema = z.object({
   blob: z.string().regex(/^sha256:[0-9a-f]+$/),
   sizeBytes: z.number().int().nonnegative(),

@@ -1,18 +1,19 @@
 // Dock pane chrome per design.md §5: panels sit on bg-surface, one 1px
 // subtle divider, 32px header.
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { cx } from "./cx.ts";
 
 /** Pane wrapper: flex column, full height, scroll-safe. */
 export function Panel({
   className,
   children,
-}: {
-  className?: string;
-  children: ReactNode;
-}) {
+  ...props
+}: ComponentProps<"div"> & { children: ReactNode }) {
   return (
-    <div className={cx("flex h-full min-h-0 flex-col bg-surface", className)}>
+    <div
+      className={cx("flex h-full min-h-0 flex-col bg-surface", className)}
+      {...props}
+    >
       {children}
     </div>
   );

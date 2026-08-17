@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { EMPTY_PERSISTED, type PersistedState } from "../../shared/bridge.ts";
 import { useSessions } from "./sessions.ts";
+import type { SourceReference } from "./source-reference.ts";
 import {
   DEFAULT_THEME,
   normalizeThemePreference,
@@ -16,7 +17,16 @@ import type { Toast, ToastKind, TranscriptState, UiSlice } from "./types.ts";
 export type UiStore = UiSlice & {
   setSelected: (selected: { sessionId: string; seq: number } | null) => void;
   requestJump: (sessionId: string, seq: number) => void;
-  requestComposerInsert: (text: string) => void;
+  requestComposerInsert: (text: string, sessionId?: string) => void;
+  requestComposerReference: (
+    reference: SourceReference,
+    sessionId: string,
+  ) => void;
+  requestComposerContent: (
+    text: string,
+    references: SourceReference[],
+    sessionId: string,
+  ) => void;
   /** Applies the resolved theme to the document and persists (fire-and-forget). */
   setTheme: (theme: UiSlice["theme"]) => void;
   togglePalette: () => void;
@@ -73,8 +83,20 @@ export const useUi = create<UiStore>((set, get) => ({
   setSelected: (selected) => set({ selected }),
   requestJump: (sessionId, seq) =>
     set({ jump: { sessionId, seq, nonce: ++nonce } }),
-  requestComposerInsert: (text) =>
-    set({ composerInsert: { text, nonce: ++nonce } }),
+  requestComposerInsert: (text, sessionId) =>
+    set({
+      composerInsert: {
+        text,
+        ...(sessionId ? { sessionId } : {}),
+        nonce: ++nonce,
+      },
+    }),
+  requestComposerReference: (reference, sessionId) =>
+    set({
+      composerInsert: { references: [reference], sessionId, nonce: ++nonce },
+    }),
+  requestComposerContent: (text, references, sessionId) =>
+    set({ composerInsert: { text, references, sessionId, nonce: ++nonce } }),
   setTheme: (theme) => {
     const normalized = normalizeThemePreference(theme);
     applyThemeToDocument(normalized);

@@ -16,6 +16,7 @@ import type {
   FastModeState,
   InFlightSnapshot,
   ModelRef,
+  SideChatAccess,
   ThinkingLevel,
 } from "@agena/protocol";
 import { ulid } from "ulid";
@@ -30,6 +31,7 @@ import type {
 } from "../events/store.ts";
 import { pendingApprovalsFromEvents } from "../events/store.ts";
 import type {
+  CreateRuntimeSessionInput,
   RuntimeAdapter,
   RuntimeEvent,
   RuntimeSession,
@@ -37,6 +39,13 @@ import type {
   VisibleBrowserController,
 } from "../runtime/types.ts";
 import { fallbackSessionTitle } from "./title.ts";
+
+const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
+const SIDE_CHAT_PROMPTS: Record<SideChatAccess, string> = {
+  read_only:
+    "You are an Agena read-only side chat associated with a main conversation. You inherited your source conversation only through its latest completed assistant message when this side chat was created. The source conversation continues independently, so you cannot see later or in-progress activity. You share its live workspace but may only inspect it using read, grep, find, and ls. You cannot execute commands or modify files.",
+  full: "You are an Agena full-access side chat associated with a main conversation. You inherited your source conversation only through its latest completed assistant message when this side chat was created. The source conversation continues independently, so you cannot see later or in-progress activity. You share the same live workspace and have the same available tools and approval policy as a normal main chat. Your changes and processes can affect the main chat's workspace.",
+};
 
 export class OrchestratorError extends Error {
   readonly code: ErrorCode;
@@ -111,26 +120,33 @@ export class SessionOrchestrator {
     return this.#store.createSession(input); // store appends session.created (§7.4)
   }
 
-  async createQuickChat(parentSessionId: string): Promise<SessionRecord> {
+  async createQuickChat(
+    parentSessionId: string,
+    sideChatAccess: SideChatAccess = "read_only",
+  ): Promise<SessionRecord> {
     const parent = await this.#state(parentSessionId);
-    const inFlight = this.#quickChatCreations.get(parentSessionId);
+    const creationKey = `${parentSessionId}:${sideChatAccess}`;
+    const inFlight = this.#quickChatCreations.get(creationKey);
     if (inFlight) return inFlight;
     const creation = this.#quickChatCreationQueue.then(() =>
-      this.#createQuickChat(parent),
+      this.#createQuickChat(parent, sideChatAccess),
     );
     this.#quickChatCreationQueue = creation.then(
       () => undefined,
       () => undefined,
     );
-    this.#quickChatCreations.set(parentSessionId, creation);
+    this.#quickChatCreations.set(creationKey, creation);
     try {
       return await creation;
     } finally {
-      this.#quickChatCreations.delete(parentSessionId);
+      this.#quickChatCreations.delete(creationKey);
     }
   }
 
-  async #createQuickChat(parent: SessionState): Promise<SessionRecord> {
+  async #createQuickChat(
+    parent: SessionState,
+    sideChatAccess: SideChatAccess,
+  ): Promise<SessionRecord> {
     const parentSessionId = parent.record.sessionId;
     const sessions = await this.#store.listSessions({
       allProjects: true,
@@ -171,7 +187,11 @@ export class SessionOrchestrator {
       sessionId,
       workspaceDir: this.#workspaceDir,
       cwd: resolve(this.#workspaceDir, parent.record.cwd),
-      toolNames: ["read", "grep", "find", "ls"],
+      ...this.#runtimeCapabilities({
+        sessionKind: "primary",
+        purpose: "quick_chat",
+        sideChatAccess,
+      }),
     };
     const runtime = cutoff
       ? await this.#adapter.createForkSession({
@@ -187,6 +207,7 @@ export class SessionOrchestrator {
         parentSessionId,
         mode: "fork",
         purpose: "quick_chat",
+        sideChatAccess,
         runtimeSessionRef: runtime.runtimeSessionRef,
         ...(cutoff ? { sourceMessageId: cutoff.messageId } : {}),
         title: `Quick Chat ${number}`,
@@ -243,9 +264,7 @@ export class SessionOrchestrator {
         sourceRuntimeSessionRef: parentRuntime.runtimeSessionRef,
         ...(runtimeEntryId ? { runtimeEntryId } : {}),
         position: input.mode === "fork" ? "before" : "at",
-        ...(this.#visibleBrowser
-          ? { visibleBrowser: this.#visibleBrowser }
-          : {}),
+        ...this.#runtimeCapabilities(child),
       });
       const runtimeRefs = runtimeSessionRefs(this.#store);
       return runtimeRefs
@@ -596,14 +615,7 @@ export class SessionOrchestrator {
       ...(s.record.runtimeSessionRef
         ? { runtimeSessionRef: s.record.runtimeSessionRef }
         : {}),
-      ...(this.#visibleBrowser ? { visibleBrowser: this.#visibleBrowser } : {}),
-      ...(s.record.sessionKind !== "subagent" && this.#subagents
-        ? { subagents: this.#subagents }
-        : {}),
-      ...(s.record.sessionKind === "subagent" ||
-      s.record.purpose === "quick_chat"
-        ? { toolNames: ["read", "grep", "find", "ls"] }
-        : {}),
+      ...this.#runtimeCapabilities(s.record),
     });
     const runtimeRefs = runtimeSessionRefs(this.#store);
     if (
@@ -617,6 +629,29 @@ export class SessionOrchestrator {
     }
     void this.#pump(s, s.runtime);
     return s.runtime;
+  }
+
+  #runtimeCapabilities(
+    session: Pick<SessionRecord, "sessionKind" | "purpose" | "sideChatAccess">,
+  ): Partial<CreateRuntimeSessionInput> {
+    const sideChatAccess =
+      session.purpose === "quick_chat"
+        ? (session.sideChatAccess ?? "read_only")
+        : undefined;
+    const readOnly =
+      session.sessionKind === "subagent" || sideChatAccess === "read_only";
+    return {
+      ...(!readOnly && this.#visibleBrowser
+        ? { visibleBrowser: this.#visibleBrowser }
+        : {}),
+      ...(!readOnly && session.sessionKind !== "subagent" && this.#subagents
+        ? { subagents: this.#subagents }
+        : {}),
+      ...(readOnly ? { toolNames: READ_ONLY_TOOLS } : {}),
+      ...(sideChatAccess
+        ? { systemPromptAppendix: SIDE_CHAT_PROMPTS[sideChatAccess] }
+        : {}),
+    };
   }
 
   async #pump(s: SessionState, runtime: RuntimeSession): Promise<void> {
@@ -916,6 +951,28 @@ export class SessionOrchestrator {
           };
         }),
     );
+    const files = await Promise.all(
+      content
+        .filter((block) => block.type === "file")
+        .map(async (block) => {
+          const stored = await this.#store.readBlob(block.ref.blob);
+          if (!stored) {
+            throw new OrchestratorError(
+              "INVALID_PAYLOAD",
+              `attachment blob is unavailable: ${block.ref.blob}`,
+            );
+          }
+          return {
+            data: stored.bytes,
+            blob: block.ref.blob,
+            name: block.path ?? "attachment",
+            mimeType:
+              stored.mimeType ??
+              block.ref.mimeType ??
+              "application/octet-stream",
+          };
+        }),
+    );
     if (trigger === "prompt") s.busy = true;
     try {
       const messageId = ulid();
@@ -955,7 +1012,12 @@ export class SessionOrchestrator {
         )?.seq ?? appended.lastSeq;
       try {
         const runtime = await this.#runtime(s);
-        const input = { messageId, text: textContent(content), images };
+        const input = {
+          messageId,
+          text: textContent(content),
+          images,
+          ...(files.length > 0 ? { files } : {}),
+        };
         if (trigger === "prompt") await runtime.prompt(input);
         else if (trigger === "steer") await runtime.steer(input);
         else await runtime.followUp(input);

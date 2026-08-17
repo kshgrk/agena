@@ -19,6 +19,10 @@ import { MobileSessions } from "../features/sessions/mobile-sessions.tsx";
 import { MobileTerminal } from "../features/terminal/mobile-terminal.tsx";
 import { AgenaChamberChat } from "../openchamber/adapters/agena-chat.tsx";
 import { useConnection, useSessions, useUi } from "../store/index.ts";
+import {
+  OPEN_SOURCE_REFERENCE_EVENT,
+  type SourceReference,
+} from "../store/source-reference.ts";
 import { cx } from "../ui/index.ts";
 import { isMobileHost, isSoftwareKeyboardVisible } from "./mobile-logic.ts";
 
@@ -91,6 +95,7 @@ function useSoftwareKeyboard(): boolean {
       screen.orientation?.removeEventListener("change", reset);
     };
   }, []);
+
   return visible;
 }
 
@@ -148,6 +153,25 @@ export function MobileShell() {
   const [workView, setWorkView] = useState<WorkView>("files");
   const previousSession = useRef(activeSessionId);
   const keyboardVisible = useSoftwareKeyboard();
+
+  useEffect(() => {
+    const openSource = (event: Event) => {
+      const ref = (event as CustomEvent<SourceReference>).detail;
+      if (!ref) return;
+      if (ref.kind === "terminal") {
+        setView("terminal");
+        return;
+      }
+      if (ref.kind === "file") setWorkView("files");
+      else if (ref.kind === "diff") {
+        setWorkView(ref.changeGroupId ? "changes" : "diff");
+      }
+      setView("work");
+    };
+    window.addEventListener(OPEN_SOURCE_REFERENCE_EVENT, openSource);
+    return () =>
+      window.removeEventListener(OPEN_SOURCE_REFERENCE_EVENT, openSource);
+  }, []);
 
   useEffect(() => {
     if (

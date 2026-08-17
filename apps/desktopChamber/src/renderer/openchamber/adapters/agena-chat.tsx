@@ -1,5 +1,6 @@
 import type { UserMessageAnchor } from "@agena/protocol";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SelectionActions } from "../../features/composer/source-reference-ui.tsx";
 import { BlockView, ContentView } from "../../features/transcript/blocks.tsx";
 import { visibleCodexSubagentBlocks } from "../../features/transcript/codex-subagent.ts";
 import { UserMessageActions } from "../../features/transcript/session-actions.tsx";
@@ -10,6 +11,7 @@ import {
   useSessions,
   useTranscripts,
 } from "../../store/index.ts";
+import { parseReferenceText } from "../../store/source-reference.ts";
 import type { UserBlock } from "../../store/types.ts";
 import {
   ChamberChatSurface,
@@ -90,7 +92,9 @@ export function AgenaChamberChat({
     );
     for (const block of users.values()) {
       const text = block.content
-        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .flatMap((part) =>
+          part.type === "text" ? [parseReferenceText(part.text).text] : [],
+        )
         .join(" ")
         .trim();
       indexed.set(block.messageId, {
@@ -151,7 +155,31 @@ export function AgenaChamberChat({
       timeline={timeline}
       working={Boolean(transcript?.inFlight)}
       mobile={mobile}
-      renderContent={({ content }) => <ContentView content={content} />}
+      renderContent={({ content, role, streaming, message }) => {
+        const body = <ContentView content={content} contentRole={role} />;
+        return !streaming && message ? (
+          <SelectionActions
+            sessionId={sessionId}
+            makeReference={(snapshot) => ({
+              v: 1,
+              id: crypto.randomUUID(),
+              kind: "transcript",
+              sessionId,
+              ...(transcript?.branchId
+                ? { branchId: transcript.branchId }
+                : {}),
+              eventSeq: message.sourceSeq,
+              messageId: message.id,
+              role: message.role,
+              snapshot,
+            })}
+          >
+            {body}
+          </SelectionActions>
+        ) : (
+          body
+        );
+      }}
       renderActivity={({ activity, expanded, toggleExpanded }) => (
         <div className="transcript-column px-4">
           {activity.block.kind === "tool" &&

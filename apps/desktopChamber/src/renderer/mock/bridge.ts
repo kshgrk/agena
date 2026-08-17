@@ -711,12 +711,13 @@ export function createMockBridge(): AgenaBridge {
       return { sessionId };
     },
 
-    async createQuickChat(sourceSessionId) {
+    async createQuickChat(sourceSessionId, sideChatAccess) {
       const child = await this.forkSession(sourceSessionId, undefined, "clone");
       const summary = world.sessions.get(child.sessionId)?.summary;
       if (summary) {
         summary.title = "Quick Chat";
         summary.purpose = "quick_chat";
+        summary.sideChatAccess = sideChatAccess;
       }
       return child;
     },
@@ -1220,6 +1221,9 @@ export function createMockBridge(): AgenaBridge {
       const blob = `sha256:${digest}`;
       imageBlobs.set(blob, bytes.slice());
       return { blob, sizeBytes: bytes.byteLength, mimeType };
+    },
+    async uploadAttachment(bytes, mimeType) {
+      return this.uploadImage(bytes, mimeType);
     },
     async readBlob(hash: string) {
       const bytes = imageBlobs.get(hash);

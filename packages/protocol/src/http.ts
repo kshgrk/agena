@@ -8,6 +8,12 @@ import {
 
 export const uploadImageResponseSchema = z.object({ ref: blobRefSchema });
 export type UploadImageResponse = z.infer<typeof uploadImageResponseSchema>;
+export const uploadAttachmentQuerySchema = z.object({
+  name: z.string().min(1).max(255),
+});
+export type UploadAttachmentQuery = z.infer<typeof uploadAttachmentQuerySchema>;
+export const uploadAttachmentResponseSchema = uploadImageResponseSchema;
+export type UploadAttachmentResponse = UploadImageResponse;
 
 import { approvalResponseSchema } from "./commands.ts";
 import {
@@ -15,6 +21,7 @@ import {
   approvalRequestedSchema,
   eventSourceSchema,
   sessionOriginSchema,
+  sideChatAccessSchema,
 } from "./events.ts";
 
 export const importSkillRequestSchema = z.object({
@@ -382,6 +389,7 @@ export const createDerivedSessionRequestSchema = z
     sourceMessageId: z.string().min(1).optional(),
     mode: z.enum(["fork", "clone"]),
     purpose: z.literal("quick_chat").optional(),
+    sideChatAccess: sideChatAccessSchema.optional(),
     title: z.string().min(1).max(160).optional(),
   })
   .superRefine((value, ctx) => {
@@ -397,6 +405,13 @@ export const createDerivedSessionRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ["sourceMessageId"],
         message: "quick chat cutoff is selected by the daemon",
+      });
+    }
+    if (value.purpose !== "quick_chat" && value.sideChatAccess) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sideChatAccess"],
+        message: "sideChatAccess is only valid for quick chats",
       });
     }
     if (
@@ -634,6 +649,7 @@ export const sessionSummarySchema = z.object({
   hostCwdHint: z.string().min(1).optional(),
   origin: sessionOriginSchema.optional(),
   purpose: z.literal("quick_chat").optional(),
+  sideChatAccess: sideChatAccessSchema.optional(),
   sessionKind: z.enum(["primary", "subagent"]).optional(),
   parentSessionId: z.string().min(1).optional(),
   parentTaskId: z.string().min(1).optional(),

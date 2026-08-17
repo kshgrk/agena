@@ -4,10 +4,10 @@ This is the complete renderer↔host contract for the desktopNew renderer. The
 builders of desktopNew do NOT read the original sources — this doc is the
 contract. Source of truth files (do not edit them, mirror them):
 
-- `apps/desktop/src/shared/bridge.ts` — the `AgenaBridge` type (renderer↔main contract)
-- `apps/desktop/src/renderer/lib/bridge.ts` — preload adapter (already copied to desktopNew)
+- `apps/desktopChamber/src/shared/bridge.ts` — the `AgenaBridge` type (renderer↔main contract)
+- `apps/desktopChamber/src/renderer/lib/bridge.ts` — preload adapter
 - `packages/client/src/client.ts` — `AgenaClient` SDK (lives in Electron main ONLY)
-- `apps/desktop/electron/bridge.mjs` — the real host implementation
+- `apps/desktopChamber/electron/bridge.mjs` — the real host implementation
 
 Layering rule (D-INV-2): renderer code depends on the `AgenaBridge` type and
 `@agena/protocol` types ONLY. `@agena/client` and the daemon token live in the

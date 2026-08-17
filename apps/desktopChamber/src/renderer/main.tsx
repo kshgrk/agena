@@ -9,6 +9,12 @@ async function boot(): Promise<void> {
   // Bridge first: Electron preload if present, otherwise the mock installs.
   // Everything downstream (store actions, App effects) can call getBridge().
   await ensureBridge();
+  if (
+    navigator.platform.startsWith("Mac") &&
+    navigator.userAgent.includes("Electron")
+  ) {
+    document.documentElement.dataset.integratedTitlebar = "true";
+  }
 
   const rootEl = document.getElementById("root");
   if (!rootEl) throw new Error("#root element missing from index.html");

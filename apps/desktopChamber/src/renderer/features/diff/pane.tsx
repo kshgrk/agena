@@ -20,6 +20,10 @@ import {
   Segmented,
 } from "../../ui/index.ts";
 import {
+  SelectionActions,
+  selectedDiffRanges,
+} from "../composer/source-reference-ui.tsx";
+import {
   bindDiffPaneHost,
   type DiffEntry,
   type DiffMode,
@@ -72,7 +76,15 @@ function DiffStats({ adds, dels }: { adds: number; dels: number }) {
   );
 }
 
-function DiffBody({ entry, mode }: { entry: DiffEntry; mode: DiffMode }) {
+function DiffBody({
+  entry,
+  mode,
+  sessionId,
+}: {
+  entry: DiffEntry;
+  mode: DiffMode;
+  sessionId?: string;
+}) {
   const theme = useUi((s) => s.theme);
   const data = useMemo(
     () => ({
@@ -99,7 +111,7 @@ function DiffBody({ entry, mode }: { entry: DiffEntry; mode: DiffMode }) {
       />
     );
   }
-  return (
+  const view = (
     <DiffView
       key={`${entry.path}:${entry.nonce}`}
       data={data}
@@ -110,6 +122,24 @@ function DiffBody({ entry, mode }: { entry: DiffEntry; mode: DiffMode }) {
       diffViewHighlight
       diffViewFontSize={13}
     />
+  );
+  return sessionId ? (
+    <SelectionActions
+      sessionId={sessionId}
+      makeReference={(snapshot, selection, root) => ({
+        v: 1,
+        id: crypto.randomUUID(),
+        kind: "diff",
+        sessionId,
+        path: entry.path.replace(/^\/?workspace\//, "").replace(/^\//, ""),
+        ...selectedDiffRanges(selection, root),
+        snapshot,
+      })}
+    >
+      {view}
+    </SelectionActions>
+  ) : (
+    view
   );
 }
 
@@ -198,6 +228,7 @@ function EditsList({ mobile = false }: { mobile?: boolean }) {
 }
 
 export function DiffPane({ mobile = false }: { mobile?: boolean }) {
+  const activeSessionId = useSessions((s) => s.activeSessionId);
   const entry = useDiff((s) => s.entry);
   const mode = useDiff((s) => s.mode);
   const setMode = useDiff((s) => s.setMode);
@@ -207,6 +238,7 @@ export function DiffPane({ mobile = false }: { mobile?: boolean }) {
       ref={bindDiffPaneHost}
       className="h-full min-h-0"
       data-mobile={mobile || undefined}
+      data-diff-pane="true"
     >
       <Panel>
         {!mobile || entry ? (
@@ -255,7 +287,11 @@ export function DiffPane({ mobile = false }: { mobile?: boolean }) {
         ) : null}
         <PanelBody className={entry ? "bg-inset" : ""}>
           {entry ? (
-            <DiffBody entry={entry} mode={mobile ? "unified" : mode} />
+            <DiffBody
+              entry={entry}
+              mode={mobile ? "unified" : mode}
+              {...(activeSessionId ? { sessionId: activeSessionId } : {})}
+            />
           ) : (
             <EditsList mobile={mobile} />
           )}

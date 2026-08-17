@@ -1,12 +1,11 @@
-# Agena Desktop (v2) — Architecture & Build Contract
+# Agena Chamber — Architecture & Build Contract
 
-This is the coordination contract for building `apps/desktopNew`. Every builder agent MUST follow
-it exactly. The old app at `apps/desktop` is READ-ONLY reference material — never modify it, but
-read it freely: porting and improving its logic is encouraged (it is our code).
+This is the coordination contract for building `apps/desktopChamber`. Every builder agent MUST
+follow it exactly.
 
 ## What this app is
 
-A brand-new renderer for the Agena harness with full feature parity with `apps/desktop` PLUS:
+The desktop renderer for the Agena harness, including:
 - MCP import/management and Skill import/management UIs (see `docs/contracts/mcp-skills.md`)
 - A first-class diff viewer
 - A direct browser WebSocket bridge (`WsBridge`) so the app runs without Electron
@@ -91,9 +90,9 @@ Three host modes, selected in `src/renderer/lib/bridge.ts`:
 
 ## Testing & verification
 
-- `pnpm -C apps/desktopNew typecheck` must pass.
-- `pnpm -C apps/desktopNew build` must pass.
-- `pnpm -C apps/desktopNew dev` renders the app against the mock bridge with zero console errors:
+- `pnpm -C apps/desktopChamber typecheck` must pass.
+- `pnpm -C apps/desktopChamber build` must pass.
+- `pnpm -C apps/desktopChamber dev` renders the app against the mock bridge with zero console errors:
   the mock world must show a streaming session, tool calls, an approval, terminal, files.
 - Store/ingest tests pass via the `test` script.
 

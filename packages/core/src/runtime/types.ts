@@ -25,6 +25,12 @@ export type RuntimeInput = {
   messageId: string;
   text: string;
   images: Array<{ data: Uint8Array; mimeType: string }>;
+  files?: Array<{
+    data: Uint8Array;
+    blob: string;
+    name: string;
+    mimeType: string;
+  }>;
 };
 
 export interface RuntimeAdapter {
@@ -47,6 +53,7 @@ export interface CreateRuntimeSessionInput {
   model?: ModelRef;
   visibleBrowser?: VisibleBrowserController;
   subagents?: SubagentController;
+  systemPromptAppendix?: string;
   /** Explicit runtime tool allowlist. Omitted for ordinary primary sessions. */
   toolNames?: string[];
 }
