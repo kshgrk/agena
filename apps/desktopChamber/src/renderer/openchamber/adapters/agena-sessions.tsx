@@ -106,10 +106,11 @@ export function AgenaSessionSidebar({
           : createGlobalSessionInput();
         if (!input) throw new Error("Project metadata is incomplete");
         const id = await getBridge().createSession(input);
-        await ensureSubscribed(id, 0);
-        await refreshSessions();
         useSessions.getState().setActive(id);
         useUi.getState().requestComposerInsert("");
+        void Promise.all([ensureSubscribed(id, 0), refreshSessions()]).catch(
+          (error: unknown) => report("Could not finish opening session", error),
+        );
       } catch (error) {
         report("Could not create session", error);
       }

@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import type {
   AgenaEvent,
+  BlobRef,
   SessionStatus,
   SnapshotSummary,
 } from "@agena/protocol";
@@ -40,6 +41,7 @@ export class InMemoryEventStore implements EventStore {
   #snapshots = new Map<string, SnapshotSummary>();
   #listeners = new Set<CommitListener>();
   #blobs = new Map<string, { bytes: Uint8Array; mimeType: string }>();
+  #mediaCache = new Map<string, BlobRef>();
 
   async putBlob(bytes: Uint8Array, mimeType: string) {
     const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -50,6 +52,14 @@ export class InMemoryEventStore implements EventStore {
   async readBlob(hash: string) {
     const blob = this.#blobs.get(hash);
     return blob ? { bytes: blob.bytes.slice(), mimeType: blob.mimeType } : null;
+  }
+
+  async getCachedMedia(key: string) {
+    return this.#mediaCache.get(key) ?? null;
+  }
+
+  async cacheMedia(key: string, ref: BlobRef) {
+    this.#mediaCache.set(key, ref);
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {

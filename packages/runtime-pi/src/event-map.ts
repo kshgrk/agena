@@ -6,7 +6,11 @@
 // M2–M4 RuntimeEvent variants that carry them; here they are log-and-drop
 // per the plan's unknown-event stance.
 import { randomUUID } from "node:crypto";
-import type { AssistantStopReason, RuntimeEvent } from "@agena/core";
+import type {
+  AssistantStopReason,
+  RuntimeContentBlock,
+  RuntimeEvent,
+} from "@agena/core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 export interface MapperState {
@@ -224,7 +228,7 @@ export function mapPiEvent(
             toolCallId: ev.toolCallId,
             error: {
               code: "tool_error",
-              message: stringifyToolResult(ev.result),
+              message: toolResultText(ev.result) || "Tool failed",
             },
             partialOutput: toolResultBlocks(ev.result),
             durationMs,
@@ -310,13 +314,74 @@ function normalizeTitle(title: string | undefined): string {
     .slice(0, 60);
 }
 
-function toolResultBlocks(result: unknown): { type: "text"; text: string }[] {
-  return [{ type: "text", text: stringifyToolResult(result) }];
+function toolResultBlocks(result: unknown): RuntimeContentBlock[] {
+  const content =
+    result && typeof result === "object" && "content" in result
+      ? (result as { content?: unknown }).content
+      : undefined;
+  if (!Array.isArray(content)) {
+    return [{ type: "text", text: stringifyToolResult(result) }];
+  }
+  const blocks = content.slice(0, 64).flatMap((item): RuntimeContentBlock[] => {
+    if (!item || typeof item !== "object") return [];
+    const block = item as Record<string, unknown>;
+    if (block.type === "text" && typeof block.text === "string") {
+      return [{ type: "text", text: block.text }];
+    }
+    if (
+      block.type === "image" &&
+      typeof block.data === "string" &&
+      typeof block.mimeType === "string"
+    ) {
+      return [
+        {
+          type: "image",
+          data: block.data,
+          mimeType: block.mimeType,
+        },
+      ];
+    }
+    return [];
+  });
+  if (content.length > 64) {
+    blocks.push({ type: "text", text: "[Additional tool output omitted]" });
+  }
+  return blocks.length > 0
+    ? blocks
+    : [{ type: "text", text: stringifyToolResult(result) }];
 }
 
 function stringifyToolResult(result: unknown): string {
   if (typeof result === "string") return result;
-  return JSON.stringify(result, null, 2) ?? "";
+  return (
+    JSON.stringify(
+      result,
+      (key, value) =>
+        key === "data" && typeof value === "string" && value.length > 256
+          ? `[binary data omitted: ${value.length} characters]`
+          : value,
+      2,
+    ) ?? ""
+  ).slice(0, 50_000);
+}
+
+function toolResultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  const content =
+    result && typeof result === "object" && "content" in result
+      ? (result as { content?: unknown }).content
+      : undefined;
+  if (!Array.isArray(content)) return stringifyToolResult(result);
+  return content
+    .flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const block = item as Record<string, unknown>;
+      if (block.type === "text" && typeof block.text === "string") {
+        return [block.text];
+      }
+      return block.type === "image" ? ["[image]"] : [];
+    })
+    .join("\n");
 }
 
 function toolOutputDelta(
@@ -324,7 +389,7 @@ function toolOutputDelta(
   toolCallId: string,
   partialResult: unknown,
 ): RuntimeEvent[] {
-  const next = stringifyToolResult(partialResult);
+  const next = toolResultText(partialResult);
   const prev = state.toolOutputs.get(toolCallId) ?? "";
   if (next === prev) return [];
   state.toolOutputs.set(toolCallId, next);

@@ -2,12 +2,21 @@ import { z } from "zod";
 import {
   blobRefSchema,
   contentBlockSchema,
+  imageBlockSchema,
   modelRefSchema,
   usageTotalsSchema,
 } from "./content.ts";
 
 export const uploadImageResponseSchema = z.object({ ref: blobRefSchema });
 export type UploadImageResponse = z.infer<typeof uploadImageResponseSchema>;
+export const materializeImageRequestSchema = z.object({
+  url: z.string().url().max(4096),
+});
+export type MaterializeImageRequest = z.infer<
+  typeof materializeImageRequestSchema
+>;
+export const materializeImageResponseSchema = uploadImageResponseSchema;
+export type MaterializeImageResponse = UploadImageResponse;
 export const uploadAttachmentQuerySchema = z.object({
   name: z.string().min(1).max(255),
 });
@@ -551,6 +560,7 @@ export const compactTranscriptEntrySchema = z.discriminatedUnion("kind", [
     abortReason: z.string().optional(),
     deniedReason: z.string().optional(),
     approvalId: z.string().min(1).optional(),
+    media: z.array(imageBlockSchema).max(32).optional(),
     hasDetails: z.boolean(),
   }),
   compactTranscriptBaseSchema.extend({

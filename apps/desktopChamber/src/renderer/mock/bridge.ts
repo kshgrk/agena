@@ -71,7 +71,11 @@ import {
   listDir,
   readFixtureFile,
 } from "./fixtures/files.ts";
-import { buildFixtureSessions, PROJECT } from "./fixtures/sessions.ts";
+import {
+  buildFixtureSessions,
+  MOCK_MEDIA_REFS,
+  PROJECT,
+} from "./fixtures/sessions.ts";
 import {
   CLIENT_ID,
   MODELS,
@@ -198,6 +202,14 @@ function eventText(
 
 export function createMockBridge(): AgenaBridge {
   const imageBlobs = new Map<string, Uint8Array>();
+  for (const [index, ref] of MOCK_MEDIA_REFS.entries()) {
+    imageBlobs.set(
+      ref.blob,
+      new TextEncoder().encode(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420"><rect width="640" height="420" fill="${ref.color}"/><rect x="40" y="44" width="560" height="332" rx="16" fill="#111b18"/><text x="72" y="110" fill="#eef4ef" font-family="sans-serif" font-size="28">Harness ${index + 1}</text><path d="M72 150h300M72 190h440M72 230h380M72 270h470" stroke="#91a69a" stroke-width="12" stroke-linecap="round"/></svg>`,
+      ),
+    );
+  }
   const world = new World();
   const { seeds, ids } = buildFixtureSessions();
   for (const seed of seeds) world.addSession(seed);
@@ -981,6 +993,21 @@ export function createMockBridge(): AgenaBridge {
               ...(typeof terminalPayload?.durationMs === "number"
                 ? { durationMs: terminalPayload.durationMs }
                 : {}),
+              ...(terminal?.type.endsWith(".completed") &&
+              Array.isArray(terminalPayload?.result)
+                ? {
+                    media: terminalPayload.result.filter(
+                      (
+                        block,
+                      ): block is Extract<ContentBlock, { type: "image" }> =>
+                        Boolean(
+                          block &&
+                            typeof block === "object" &&
+                            (block as { type?: unknown }).type === "image",
+                        ),
+                    ),
+                  }
+                : {}),
               hasDetails: true,
             });
           }
@@ -1221,6 +1248,9 @@ export function createMockBridge(): AgenaBridge {
       const blob = `sha256:${digest}`;
       imageBlobs.set(blob, bytes.slice());
       return { blob, sizeBytes: bytes.byteLength, mimeType };
+    },
+    async materializeImageUrl() {
+      throw new Error("mock remote images are unavailable");
     },
     async uploadAttachment(bytes, mimeType) {
       return this.uploadImage(bytes, mimeType);

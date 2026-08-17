@@ -273,6 +273,64 @@ it("maps rewritten Pi tool updates as reset deltas", () => {
   ] satisfies RuntimeEvent[]);
 });
 
+it("preserves finalized Pi image blocks without leaking base64 into deltas", () => {
+  const state = createMapperState(
+    () => "id",
+    () => 1_000,
+  );
+  state.toolStartedAt.set("t1", 500);
+  const result = {
+    content: [
+      { type: "text" as const, text: "Three screens" },
+      {
+        type: "image" as const,
+        data: "aW1hZ2UtYnl0ZXM=",
+        mimeType: "image/png",
+      },
+    ],
+    details: {},
+  };
+
+  expect(
+    mapPiEvent(state, {
+      type: "tool_execution_update",
+      toolCallId: "t1",
+      toolName: "mcp",
+      args: {},
+      partialResult: result,
+    }),
+  ).toEqual([
+    {
+      type: "tool-output-delta",
+      toolCallId: "t1",
+      delta: "Three screens\n[image]",
+    },
+  ] satisfies RuntimeEvent[]);
+  expect(
+    mapPiEvent(state, {
+      type: "tool_execution_end",
+      toolCallId: "t1",
+      toolName: "mcp",
+      result,
+      isError: false,
+    }),
+  ).toEqual([
+    {
+      type: "tool-call-completed",
+      toolCallId: "t1",
+      result: [
+        { type: "text", text: "Three screens" },
+        {
+          type: "image",
+          data: "aW1hZ2UtYnl0ZXM=",
+          mimeType: "image/png",
+        },
+      ],
+      durationMs: 500,
+    },
+  ] satisfies RuntimeEvent[]);
+});
+
 it("normalizes Pi stop reasons to protocol stop reasons", () => {
   const cases = [
     ["stop", "end_turn"],

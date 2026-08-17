@@ -355,6 +355,7 @@ export type AgenaBridge = {
   listFiles(opts?: { path?: string }): Promise<FileEntry[]>;
   readFile(path: string): Promise<Uint8Array>;
   uploadImage(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  materializeImageUrl(url: string): Promise<BlobRef>;
   uploadAttachment(
     bytes: Uint8Array,
     mimeType: string,

@@ -375,6 +375,51 @@ test("generic attachments are validated, stored, and readable by BlobRef", async
   expect(rejected.status).toBe(400);
 });
 
+test("remote image materialization rejects private-network targets", async () => {
+  const daemon = await boot();
+  const response = await fetch(
+    `http://127.0.0.1:${daemon.port}/v1/images/materialize`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ url: "https://127.0.0.1/private.png" }),
+    },
+  );
+  expect(response.status).toBe(400);
+  await expect(response.json()).resolves.toMatchObject({
+    code: "INVALID_PAYLOAD",
+    message: expect.stringContaining("non-public"),
+  });
+});
+
+test("image uploads accept safe SVG and reject executable SVG", async () => {
+  const daemon = await boot();
+  const url = `http://127.0.0.1:${daemon.port}/v1/images`;
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "image/svg+xml",
+  };
+  const accepted = await fetch(url, {
+    method: "POST",
+    headers,
+    body: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>',
+  });
+  expect(accepted.status).toBe(200);
+  await expect(accepted.json()).resolves.toMatchObject({
+    ref: { mimeType: "image/svg+xml" },
+  });
+
+  const rejected = await fetch(url, {
+    method: "POST",
+    headers,
+    body: '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+  });
+  expect(rejected.status).toBe(400);
+});
+
 test("Conductor pairing and browser WS tickets are short-lived one-use credentials", async () => {
   const daemon = await boot();
   const base = `http://127.0.0.1:${daemon.port}`;

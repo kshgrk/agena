@@ -1240,6 +1240,13 @@ CREATE TABLE blobs (
   created_at TEXT NOT NULL
 ) STRICT;
 
+-- Rebuildable private acquisition cache: key is SHA-256(url), never the signed URL.
+CREATE TABLE media_cache (
+  key        TEXT PRIMARY KEY,
+  blob_hash  TEXT NOT NULL REFERENCES blobs(hash),
+  created_at TEXT NOT NULL
+) STRICT;
+
 -- M6: import ledger. Local source bytes remain on the user's machine.
 CREATE TABLE imports (
   id                TEXT PRIMARY KEY,
@@ -1593,6 +1600,12 @@ export type RuntimeInput = {
   files?: Array<{ data: Uint8Array; blob: string; name: string; mimeType: string }>;
 };
 
+// Runtime-native output is transient. Pi/MCP inline image bytes never cross the
+// wire: core validates/materializes them through EventStore.putBlob() before append.
+type RuntimeContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export interface RuntimeSession {
   readonly sessionId: string;
   readonly runtimeSessionRef: string;             // persisted into sessions.pi_session_path
@@ -1677,8 +1690,8 @@ export type RuntimeEvent =
   | { type: 'tool-call-started';   toolCallId: string; messageId: string; runId: string; turnId: string;
       name: string; args: unknown; runtimeToolCallId: string }
   | { type: 'tool-output-delta';   toolCallId: string; delta: string; reset?: boolean }   // suffix-diffed
-  | { type: 'tool-call-completed'; toolCallId: string; result: ContentBlock[]; durationMs: number }
-  | { type: 'tool-call-failed';    toolCallId: string; error: RuntimeErrorInfo; partialOutput?: string; durationMs: number }
+  | { type: 'tool-call-completed'; toolCallId: string; result: RuntimeContentBlock[]; durationMs: number }
+  | { type: 'tool-call-failed';    toolCallId: string; error: RuntimeErrorInfo; partialOutput?: RuntimeContentBlock[]; durationMs: number }
   | { type: 'tool-call-aborted';   toolCallId: string; partialOutput: string; reason: 'user'|'shutdown'|'runtime-error' }
   | { type: 'tool-call-denied';    toolCallId: string; approvalId: string }
   | { type: 'approval-requested'; approvalId: string; kind: ApprovalKind; title?: string; message: string;
@@ -1778,6 +1791,12 @@ Classification is fixed per variant. Durable rows are appended by core with `sou
 | `extension_error` | `extension-failed` | `runtime.extension.failed` | — |
 | `extension_ui_request` (`confirm`/`select`/`input`/`editor`) | `approval-requested` | `approval.requested` (P14) | — |
 | `extension_ui_request` (`notify`) | `notice` | — | `session.notice` |
+
+`tool_execution_end.result.content` is preserved structurally. Text remains text;
+Pi/MCP `{type:"image",data,mimeType}` blocks remain runtime-only until core performs
+strict base64/format/size validation, stores the bytes through `EventStore.putBlob()`,
+and appends the existing protocol `{type:"image",ref:BlobRef}` block. Tool-output
+deltas and error strings contain text/`[image]` markers only, never inline base64.
 | `extension_ui_request` (`setStatus`) | `status-updated` | — | `session.status.updated {state:"custom"}` |
 | `extension_ui_request` (`setWidget`) | `widget-updated` | — | `session.widget.updated` |
 | `extension_ui_request` (`setTitle`) | `title-changed` | `session.title.changed` | — |
@@ -1926,7 +1945,7 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/sessions/:id` | Read one | Includes `lastSeq`, `status`, `activeBranchId`, `source`, `scope`, `projectId`, `cwd` |
 | PATCH | `/v1/sessions/:id` | Rename/archive | Appends `session.title.changed` / `session.status.changed` |
 | GET | `/v1/sessions/:id/events` | **Cold read with fromSeq** | `?fromSeq=0&limit=500&branchId=` → `{events, nextFromSeq}`; `limit` max 2000; branch reads follow INV-11; identical `AgenaEvent` shape to WS replay |
-| GET | `/v1/sessions/:id/transcript` | Compact turn-based cold read for renderers | `?limitTurns=10&beforeMessageId=` or `?aroundMessageId=` → complete active-path user turns, lightweight tool summaries, and an `upToSeq` subscribe cursor; durable events remain unchanged. |
+| GET | `/v1/sessions/:id/transcript` | Compact turn-based cold read for renderers | `?limitTurns=10&beforeMessageId=` or `?aroundMessageId=` → complete active-path user turns, lightweight tool summaries (including image BlobRefs but not heavyweight text results), and an `upToSeq` subscribe cursor; durable events remain unchanged. |
 | GET | `/v1/sessions/:id/tool-calls/:toolCallId` | Lazy full tool-call detail | Returns projected args/result for an explicitly opened tool card; keeps large tool bodies out of initial transcript reads. |
 | GET | `/v1/sessions/:id/changes` | Session-attributed Git review summary | Observed commits plus current staged, unstaged, untracked, and conflicted files grouped by exact worktree; includes file/line totals for the transcript pill. |
 | GET | `/v1/sessions/:id/changes/diff` | Lazy file contents for one reviewed change | `?worktreeId=&source=commit\|staged\|unstaged\|untracked\|conflict&path=&commit=`; the daemon validates session attribution and workspace containment before returning old/new text or an unavailable/binary result. |
@@ -1955,7 +1974,8 @@ All routes Zod-validated, return the `AgenaError` envelope on failure, and requi
 | GET | `/v1/ptys` | List live PTYs | |
 | DELETE | `/v1/ptys/:id` | Kill PTY | SIGHUP, SIGKILL after 5 s |
 | GET | `/v1/blobs/:hash` | Fetch spilled blob | streamed; backed by `EventStore.readBlob` |
-| POST | `/v1/images` | Upload a prompt image | authenticated raw body, 3 MB cap; JPEG, PNG, GIF, WebP, or BMP; returns `{ref: BlobRef}` |
+| POST | `/v1/images` | Upload a prompt image | authenticated raw body, 3 MB cap; validated JPEG, PNG, GIF, WebP, BMP, AVIF, or safe SVG; returns `{ref: BlobRef}` |
+| POST | `/v1/images/materialize` | Safely acquire a Markdown image URL | authenticated `{url}`; credential-free HTTPS only, public DNS/IP pinned per request and revalidated across redirects, 3 MB/8 s caps, format/MIME/SVG validation, returns `{ref: BlobRef}`; the renderer never loads arbitrary remote images directly |
 | POST | `/v1/attachments` | Upload a prompt file | authenticated bounded raw body, 25 MB cap; PDF, DOCX, XLSX, UTF-8 text/source/Markdown/JSON/YAML/CSV/TSV; `?name=`; returns `{ref: BlobRef}` |
 | POST | `/v1/imports/session` | Import one converted session | Idempotent by `(machineId, harness, sourceSessionId)`; retained as the compatibility floor (§9.6) |
 | POST | `/v1/imports/sessions` | Import up to 32 converted sessions | Ordered batch; returns a result or error per source path (§9.6) |
@@ -2457,7 +2477,7 @@ Hard client-side rules: gap (`seq > lastSeq + 1`) → silent resubscribe from `l
 
 **Frame throttling:** per `(sessionId, frameType, targetId)` the SDK coalesces deltas and notifies consumers at most once per 40 ms tick — the second (and last) throttling tier (§6.4).
 
-**Blobs:** payloads may carry the §5.3 `BlobRef`; the client renders `preview` and lazily fetches `GET /v1/blobs/:hash`. Inline blocks > 1 MB are rendered as error blocks (protocol violation), never buffered.
+**Blobs:** payloads may carry the §5.3 `BlobRef`; the client renders `preview` and lazily fetches `GET /v1/blobs/:hash`. Tool-result galleries aggregate image BlobRefs at the existing tool-group boundary, deduplicate by content hash, and remain visible while tool details are collapsed. Inline blocks > 1 MB are rendered as error blocks (protocol violation), never buffered.
 
 **Local state** (`~/.config/agena/`, §10.4): `config.json` (profiles), `credentials.json` (0600), `state/<profile>/cursors.json`, `history`, `logs/`. `cursors.json` maps `sessionId → { branchId, seq, updatedAt }` — **branch-keyed** (a branch mismatch on resume invalidates the cursor rather than replaying against the wrong lineage), debounced 500 ms, LRU 200. Cursors are an optimization: on corruption/loss, replay from `fromSeq: 0` is safe. A cursor for a session the daemon no longer knows (`SESSION_NOT_FOUND`) is pruned and the picker opens (volume-loss case).
 

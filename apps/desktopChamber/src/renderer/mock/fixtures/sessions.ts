@@ -66,6 +66,27 @@ class Log {
 }
 
 type ToolSpec = { id: string; name: string; args: unknown };
+
+export const MOCK_MEDIA_REFS = [
+  {
+    blob: `sha256:${"a".repeat(64)}`,
+    sizeBytes: 180,
+    mimeType: "image/svg+xml",
+    color: "#355c4b",
+  },
+  {
+    blob: `sha256:${"b".repeat(64)}`,
+    sizeBytes: 180,
+    mimeType: "image/svg+xml",
+    color: "#9b6b43",
+  },
+  {
+    blob: `sha256:${"c".repeat(64)}`,
+    sizeBytes: 180,
+    mimeType: "image/svg+xml",
+    color: "#465b78",
+  },
+] as const;
 type TurnIds = { runId: string; turnId: string; userMessageId: string };
 
 /** started → completed pair for one assistant segment; returns messageId. */
@@ -126,7 +147,7 @@ function toolRun(
   ids: TurnIds,
   messageId: string,
   tool: ToolSpec,
-  output: string,
+  output: string | ContentBlock[],
   durationMs: number,
 ): void {
   l.ev(
@@ -146,7 +167,8 @@ function toolRun(
     "tool.call.completed",
     {
       toolCallId: tool.id,
-      result: [{ type: "text", text: output }],
+      result:
+        typeof output === "string" ? [{ type: "text", text: output }] : output,
       durationMs,
     },
     src,
@@ -480,7 +502,21 @@ src/auth/session.test.ts:21:      refreshSession(s.id, s.refreshToken, clock),`,
     ids,
     m,
     t4,
-    "Applied 2 hunks to src/auth/session.ts (+18 −5). refreshSession now delegates to doRefresh behind refreshLocks.",
+    [
+      {
+        type: "text",
+        text: "Applied 2 hunks to src/auth/session.ts (+18 −5). refreshSession now delegates to doRefresh behind refreshLocks.",
+      },
+      ...MOCK_MEDIA_REFS.map((ref, index) => ({
+        type: "image" as const,
+        ref: {
+          blob: ref.blob,
+          sizeBytes: ref.sizeBytes,
+          mimeType: ref.mimeType,
+        },
+        alt: `Coding harness design ${index + 1}`,
+      })),
+    ],
     190,
   );
 

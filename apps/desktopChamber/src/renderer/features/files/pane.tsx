@@ -5,13 +5,18 @@
 import type { GitWorktreeChanges } from "@agena/protocol";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  Activity,
   ChevronLeft,
   ChevronRight,
   Copy,
+  Eye,
   File,
+  FilePenLine,
   Folder,
   FolderOpen,
+  FolderSearch,
   Image,
+  ListTree,
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -19,9 +24,11 @@ import { getBridge } from "../../lib/bridge.ts";
 import { formatBridgeError } from "../../lib/errors.ts";
 import { formatBytes } from "../../lib/format.ts";
 import {
+  ensureSubscribed,
   pushToast,
   resolveAppearance,
   useSessions,
+  useTranscripts,
   useUi,
 } from "../../store/index.ts";
 import {
@@ -42,6 +49,12 @@ import {
   Spinner,
 } from "../../ui/index.ts";
 import { selectedLineRange } from "../composer/source-reference-ui.tsx";
+import {
+  type FileActivity,
+  familySessionIds,
+  latestActivityByPath,
+  projectFamilyFileActivities,
+} from "./activity.ts";
 import { CodeView } from "./code-view.tsx";
 import {
   breadcrumbs,
@@ -79,6 +92,7 @@ function TreeRows({
   dirs,
   expanded,
   selectedPath,
+  activityByPath,
   onToggleDir,
   onOpenFile,
   mobile = false,
@@ -87,6 +101,7 @@ function TreeRows({
   dirs: Readonly<Record<string, DirState>>;
   expanded: ReadonlySet<string>;
   selectedPath: string | null;
+  activityByPath: Readonly<Record<string, FileActivity>>;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string, size?: number) => void;
   mobile?: boolean;
@@ -149,6 +164,7 @@ function TreeRows({
             );
           }
           if (row.kind === "dir") {
+            const activity = activityByPath[row.path];
             return (
               <button
                 key={item.key}
@@ -160,6 +176,8 @@ function TreeRows({
                 className={cx(
                   "flex items-center gap-1 rounded-md pr-2 text-left transition-colors hover:bg-raised/60",
                   mobile && "active:bg-raised",
+                  activity?.status === "running" &&
+                    "bg-info/10 ring-1 ring-info/30",
                 )}
               >
                 <ChevronRight
@@ -176,10 +194,12 @@ function TreeRows({
                 <span className="truncate text-sm text-fg-secondary">
                   {row.name}
                 </span>
+                {activity ? <ActivityMark activity={activity} /> : null}
               </button>
             );
           }
           const selected = row.path === selectedPath;
+          const activity = activityByPath[row.path];
           return (
             <button
               key={item.key}
@@ -192,6 +212,10 @@ function TreeRows({
                 "flex items-center gap-1 rounded-md pr-2 text-left transition-colors",
                 mobile && "active:bg-raised",
                 selected ? "bg-raised" : "hover:bg-raised/60",
+                activity?.status === "running" &&
+                  (activity.operation === "write"
+                    ? "bg-warning/10 ring-1 ring-warning/30"
+                    : "bg-info/10 ring-1 ring-info/30"),
               )}
             >
               <span className="size-3.5 shrink-0" />
@@ -208,11 +232,131 @@ function TreeRows({
               >
                 {row.name}
               </span>
+              {activity ? <ActivityMark activity={activity} /> : null}
             </button>
           );
         })}
       </div>
     </div>
+  );
+}
+
+function ActivityIcon({ activity }: { activity: FileActivity }) {
+  const className = "size-3 shrink-0";
+  switch (activity.operation) {
+    case "read":
+      return <Eye className={className} />;
+    case "write":
+      return <FilePenLine className={className} />;
+    case "search":
+      return <FolderSearch className={className} />;
+    case "list":
+      return <ListTree className={className} />;
+  }
+}
+
+function activityLabel(activity: FileActivity): string {
+  const access = activity.access
+    ? `, ${activity.access === "full" ? "full access" : "read only"}`
+    : "";
+  return `${activity.actor}${access}: ${activity.operation} ${activity.path}; ${activity.status}; declared by ${activity.toolName}`;
+}
+
+function ActivityMark({ activity }: { activity: FileActivity }) {
+  return (
+    <span
+      key={`${activity.sessionId}:${activity.seq}:${activity.status}`}
+      title={activityLabel(activity)}
+      className={cx(
+        "ml-auto flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-2xs font-medium",
+        activity.operation === "write"
+          ? "bg-warning/15 text-warning"
+          : "bg-info/15 text-info",
+        activity.status === "running" && "motion-safe:animate-pulse",
+        ["failed", "aborted", "denied"].includes(activity.status) &&
+          "bg-danger/15 text-danger",
+      )}
+    >
+      <ActivityIcon activity={activity} />
+      <span className="max-w-16 truncate">{activity.actor}</span>
+    </span>
+  );
+}
+
+function ActivityFeed({
+  activities,
+  onOpenFile,
+}: {
+  activities: readonly FileActivity[];
+  onOpenFile: (path: string) => void;
+}) {
+  const recent = activities.slice(-8).reverse();
+  return (
+    <section
+      className="max-h-48 shrink-0 border-t border-border-subtle bg-surface"
+      aria-label="Agent file activity"
+    >
+      <div className="flex h-8 items-center gap-2 px-2 text-2xs font-medium uppercase tracking-wide text-fg-muted">
+        <Activity className="size-3.5" />
+        Live activity
+        <span className="ml-auto tabular-nums">{activities.length}</span>
+      </div>
+      {recent.length === 0 ? (
+        <p className="px-2 pb-2 text-xs text-fg-faint">
+          Reads and writes will appear here.
+        </p>
+      ) : (
+        <div className="max-h-40 overflow-y-auto px-1 pb-1">
+          {recent.map((activity) => {
+            const canOpen =
+              activity.operation === "read" || activity.operation === "write";
+            return (
+              <button
+                key={`${activity.sessionId}:${activity.toolCallId}`}
+                type="button"
+                disabled={!canOpen}
+                onClick={() => canOpen && onOpenFile(activity.path)}
+                title={activityLabel(activity)}
+                aria-label={activityLabel(activity)}
+                className={cx(
+                  "flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-xs",
+                  canOpen ? "hover:bg-raised/60" : "cursor-default",
+                )}
+              >
+                <span
+                  className={cx(
+                    "flex size-5 shrink-0 items-center justify-center rounded",
+                    activity.operation === "write"
+                      ? "bg-warning/15 text-warning"
+                      : "bg-info/15 text-info",
+                    ["failed", "aborted", "denied"].includes(activity.status) &&
+                      "bg-danger/15 text-danger",
+                  )}
+                >
+                  <ActivityIcon activity={activity} />
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-fg-secondary">
+                  {activity.path}
+                </span>
+                <span className="max-w-20 truncate text-fg-muted">
+                  {activity.actor}
+                </span>
+                <span
+                  className={cx(
+                    "size-1.5 shrink-0 rounded-full",
+                    activity.status === "running"
+                      ? "bg-info motion-safe:animate-pulse"
+                      : activity.status === "completed"
+                        ? "bg-success"
+                        : "bg-danger",
+                  )}
+                />
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -391,10 +535,25 @@ function Viewer({
 // ---- the pane ------------------------------------------------------------------------
 
 export function FilesPane({ mobile = false }: { mobile?: boolean }) {
-  const activeSession = useSessions((s) =>
-    s.activeSessionId ? s.byId[s.activeSessionId] : undefined,
+  const activeSessionId = useSessions((s) => s.activeSessionId);
+  const sessions = useSessions((s) => s.byId);
+  const transcripts = useTranscripts((s) => s.bySession);
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  const relatedSessionIds = useMemo(
+    () => (activeSessionId ? familySessionIds(sessions, activeSessionId) : []),
+    [activeSessionId, sessions],
   );
-  const activeSessionId = activeSession?.sessionId;
+  const activities = useMemo(
+    () =>
+      activeSessionId
+        ? projectFamilyFileActivities(sessions, transcripts, activeSessionId)
+        : [],
+    [activeSessionId, sessions, transcripts],
+  );
+  const activityByPath = useMemo(
+    () => latestActivityByPath(activities.slice(-50)),
+    [activities],
+  );
 
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -414,6 +573,12 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
   const root = worktree
     ? fileRootForSession({ scope: "project", projectRoot: worktree.root })
     : fileRootForSession(activeSession);
+
+  useEffect(() => {
+    for (const sessionId of relatedSessionIds) {
+      void ensureSubscribed(sessionId).catch(() => {});
+    }
+  }, [relatedSessionIds]);
 
   const loadDir = useCallback((path: string) => {
     setDirs((d) => ({ ...d, [path]: { status: "loading" } }));
@@ -688,19 +853,23 @@ export function FilesPane({ mobile = false }: { mobile?: boolean }) {
       <PanelBody scroll={false} className="flex">
         <div
           className={cx(
-            "border-r border-border-subtle",
+            "flex min-h-0 flex-col border-r border-border-subtle",
             mobile ? (openPath ? "hidden" : "w-full") : "w-60 shrink-0",
           )}
         >
-          <TreeRows
-            root={root}
-            dirs={dirs}
-            expanded={expanded}
-            selectedPath={openPath}
-            onToggleDir={toggleDir}
-            onOpenFile={openFile}
-            mobile={mobile}
-          />
+          <div className="min-h-0 flex-1">
+            <TreeRows
+              root={root}
+              dirs={dirs}
+              expanded={expanded}
+              selectedPath={openPath}
+              activityByPath={activityByPath}
+              onToggleDir={toggleDir}
+              onOpenFile={openFile}
+              mobile={mobile}
+            />
+          </div>
+          <ActivityFeed activities={activities} onOpenFile={openFile} />
         </div>
         <div
           className={cx(

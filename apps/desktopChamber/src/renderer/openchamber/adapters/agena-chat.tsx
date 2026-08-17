@@ -69,6 +69,20 @@ export function AgenaChamberChat({
     () => completeTurnBlocks(blocks, canLoadEarlier),
     [blocks, canLoadEarlier],
   );
+  useEffect(() => {
+    for (const block of visibleBlocks) {
+      if (
+        block.kind === "tool" &&
+        block.detailsState === "summary" &&
+        !block.result?.some((part) => part.type === "image") &&
+        toolMayReturnLegacyMedia(block.name, block.args)
+      ) {
+        void useTranscripts
+          .getState()
+          .loadToolDetails(sessionId, block.toolCallId);
+      }
+    }
+  }, [sessionId, visibleBlocks]);
   const timeline = useMemo(
     () =>
       projectTurns(
@@ -229,5 +243,21 @@ export function AgenaChamberChat({
       animateUserMessageId={animateUserMessageId}
       animateActivityIds={animateActivityIds}
     />
+  );
+}
+
+function toolMayReturnLegacyMedia(name: string, args: unknown): boolean {
+  const text =
+    typeof args === "string"
+      ? args
+      : (() => {
+          try {
+            return JSON.stringify(args);
+          } catch {
+            return "";
+          }
+        })();
+  return /(?:image|screenshot|screen_image|photo|thumbnail)/i.test(
+    `${name} ${text}`,
   );
 }

@@ -33,6 +33,7 @@ export const imageBlockSchema = z.object({
   ref: blobRefSchema,
   alt: z.string().optional(),
 });
+export type ImageBlock = z.infer<typeof imageBlockSchema>;
 
 export const fileBlockSchema = z.object({
   type: z.literal("file"),

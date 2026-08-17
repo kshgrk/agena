@@ -36,6 +36,7 @@ import {
   type ListSessionsQuery,
   type McpSummary,
   type ModelRef,
+  materializeImageResponseSchema,
   type NavigateSessionRequest,
   type NavigateSessionResponse,
   type PendingApprovalSummary,
@@ -618,6 +619,12 @@ export class AgenaClient {
     ) as ArrayBuffer;
     return uploadImageResponseSchema.parse(
       await this.fetchBody("POST", "/v1/images", body, mimeType),
+    ).ref;
+  }
+
+  async materializeImageUrl(url: string) {
+    return materializeImageResponseSchema.parse(
+      await this.fetchJson("POST", "/v1/images/materialize", { url }),
     ).ref;
   }
 

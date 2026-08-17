@@ -21,6 +21,15 @@ export type RuntimeId = "pi" | "fake";
 export type RunTrigger = "prompt" | "steer" | "followUp";
 export type AssistantStopReason = "end_turn" | "tool_use" | "max_tokens";
 
+/** Transient runtime output. Core materializes inline images before persistence. */
+export type RuntimeContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      data: string;
+      mimeType: string;
+    };
+
 export type RuntimeInput = {
   messageId: string;
   text: string;
@@ -188,14 +197,14 @@ export type RuntimeEvent =
   | {
       type: "tool-call-completed";
       toolCallId: string;
-      result: ContentBlock[];
+      result: RuntimeContentBlock[];
       durationMs: number;
     }
   | {
       type: "tool-call-failed";
       toolCallId: string;
       error: { code: string; message: string };
-      partialOutput?: ContentBlock[];
+      partialOutput?: RuntimeContentBlock[];
       durationMs?: number;
     }
   | {

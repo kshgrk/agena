@@ -723,6 +723,16 @@ describe("applyEvent + applyFrame", () => {
                 argsPreview: "pnpm test",
                 status: "completed",
                 durationMs: 25,
+                media: [
+                  {
+                    type: "image",
+                    ref: {
+                      blob: `sha256:${"a".repeat(64)}`,
+                      sizeBytes: 42,
+                      mimeType: "image/png",
+                    },
+                  },
+                ],
                 hasDetails: true,
               },
             ],
@@ -738,7 +748,16 @@ describe("applyEvent + applyFrame", () => {
       kind: "tool",
       args: "pnpm test",
       detailsState: "summary",
-      result: undefined,
+      result: [
+        {
+          type: "image",
+          ref: {
+            blob: `sha256:${"a".repeat(64)}`,
+            sizeBytes: 42,
+            mimeType: "image/png",
+          },
+        },
+      ],
     });
   });
 

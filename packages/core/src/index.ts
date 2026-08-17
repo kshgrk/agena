@@ -4,6 +4,7 @@
 export * from "./agents/orchestrator.ts";
 export * from "./events/store.ts";
 export { InMemoryEventStore } from "./memory-store.ts";
+export * from "./runtime/media.ts";
 export * from "./runtime/types.ts";
 export * from "./sessions/orchestrator.ts";
 export * from "./sessions/title.ts";

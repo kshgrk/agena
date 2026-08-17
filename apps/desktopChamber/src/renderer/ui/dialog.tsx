@@ -19,12 +19,16 @@ export type DialogProps = ComponentProps<typeof RadixDialog.Root> & {
   className?: string;
   /** Include a <DialogTitle> for accessibility. */
   children: ReactNode;
+  onOpenAutoFocus?: ComponentProps<
+    typeof RadixDialog.Content
+  >["onOpenAutoFocus"];
 };
 
 export function Dialog({
   size = "md",
   bottomSheet = false,
   className,
+  onOpenAutoFocus,
   children,
   ...root
 }: DialogProps) {
@@ -33,6 +37,7 @@ export function Dialog({
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="fixed inset-0 z-40 bg-canvas/60 animate-fade-in" />
         <RadixDialog.Content
+          onOpenAutoFocus={onOpenAutoFocus}
           className={cx(
             "fixed left-1/2 z-50 w-[calc(100vw-32px)] -translate-x-1/2",
             bottomSheet ? "bottom-0" : "top-1/2 -translate-y-1/2",

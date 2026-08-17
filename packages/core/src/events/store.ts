@@ -242,6 +242,8 @@ export class StoreError extends Error {
 
 export interface EventStore {
   putBlob(bytes: Uint8Array, mimeType: string): Promise<BlobRef>;
+  getCachedMedia(key: string): Promise<BlobRef | null>;
+  cacheMedia(key: string, ref: BlobRef): Promise<void>;
   readBlob(
     hash: string,
   ): Promise<{ bytes: Uint8Array; mimeType?: string } | null>;

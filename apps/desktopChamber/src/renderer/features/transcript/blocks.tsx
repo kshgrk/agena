@@ -45,59 +45,13 @@ import { Badge, cx } from "../../ui/index.ts";
 import { SubagentReceipt } from "../agents/task-group.tsx";
 import { SentReferences } from "../composer/source-reference-ui.tsx";
 import { Markdown } from "./markdown.tsx";
+import { mediaFromContent, mediaFromMarkdownImage } from "./media.ts";
+import { MediaGallery } from "./media-gallery.tsx";
 import { UserMessageActions } from "./session-actions.tsx";
 import { ThinkingDisclosure } from "./thinking.tsx";
 import { ToolCard, textOf } from "./tool-card.tsx";
 
 // ---- shared -----------------------------------------------------------------
-
-function TranscriptImage({
-  block,
-}: {
-  block: Extract<ContentBlock, { type: "image" }>;
-}) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    let disposed = false;
-    let objectUrl: string | null = null;
-    void peekBridge()
-      ?.readBlob(block.ref.blob)
-      .then((bytes) => {
-        if (disposed) return;
-        objectUrl = URL.createObjectURL(
-          new Blob(
-            [
-              bytes.buffer.slice(
-                bytes.byteOffset,
-                bytes.byteOffset + bytes.byteLength,
-              ) as ArrayBuffer,
-            ],
-            { type: block.ref.mimeType ?? "application/octet-stream" },
-          ),
-        );
-        setUrl(objectUrl);
-      });
-    return () => {
-      disposed = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [block.ref.blob, block.ref.mimeType]);
-  return url ? (
-    <a href={url} target="_blank" rel="noreferrer" className="my-2 block w-fit">
-      <img
-        src={url}
-        alt={block.alt ?? "Attached image"}
-        loading="lazy"
-        className="max-h-[28rem] max-w-full rounded-xl border border-border object-contain"
-      />
-    </a>
-  ) : (
-    <Badge className="my-1">
-      <Paperclip className="size-3" />
-      Loading image…
-    </Badge>
-  );
-}
 
 function TranscriptFile({
   block,
@@ -165,36 +119,67 @@ export function ContentView({
   content: readonly ContentBlock[];
   contentRole?: "user" | "assistant";
 }) {
-  return (
-    <>
-      {content.map((b, i) => {
-        const key = `${b.type}-${i}`;
-        switch (b.type) {
-          case "text":
-            if (contentRole === "user") {
-              const parsed = parseReferenceText(b.text);
-              return (
-                <div key={key}>
-                  <SentReferences references={parsed.references} />
-                  {parsed.text ? <Markdown text={parsed.text} /> : null}
-                </div>
-              );
-            }
-            return <Markdown key={key} text={b.text} />;
-          case "thinking":
-            return <ThinkingDisclosure key={key} text={b.text} />;
-          case "image":
-            return <TranscriptImage key={key} block={b} />;
-          case "file":
-            return <TranscriptFile key={key} block={b} />;
-          case "toolCall":
-            return null; // tool calls render as their own ToolCard rows
-          default:
-            return null; // unknown content types render nothing, never crash
+  const nodes: ReactNode[] = [];
+  for (let index = 0; index < content.length; index++) {
+    const block = content[index];
+    if (!block) continue;
+    if (block.type === "image") {
+      const images: ContentBlock[] = [block];
+      while (content[index + 1]?.type === "image") {
+        const next = content[++index];
+        if (next) images.push(next);
+      }
+      nodes.push(
+        <MediaGallery
+          key={`images-${index}`}
+          items={mediaFromContent(images)}
+        />,
+      );
+      continue;
+    }
+    const key = `${block.type}-${index}`;
+    switch (block.type) {
+      case "text":
+        if (contentRole === "user") {
+          const parsed = parseReferenceText(block.text);
+          nodes.push(
+            <div key={key}>
+              <SentReferences references={parsed.references} />
+              {parsed.text ? (
+                <Markdown
+                  text={parsed.text}
+                  renderImage={({ src, alt }) => (
+                    <MediaGallery items={mediaFromMarkdownImage(src, alt)} />
+                  )}
+                />
+              ) : null}
+            </div>,
+          );
+        } else {
+          nodes.push(
+            <Markdown
+              key={key}
+              text={block.text}
+              renderImage={({ src, alt }) => (
+                <MediaGallery items={mediaFromMarkdownImage(src, alt)} />
+              )}
+            />,
+          );
         }
-      })}
-    </>
-  );
+        break;
+      case "thinking":
+        nodes.push(<ThinkingDisclosure key={key} text={block.text} />);
+        break;
+      case "file":
+        nodes.push(<TranscriptFile key={key} block={block} />);
+        break;
+      case "toolCall":
+        break; // tool calls render as their own ToolCard rows
+      default:
+        break; // unknown content types render nothing, never crash
+    }
+  }
+  return <>{nodes}</>;
 }
 
 /** Hover-revealed time + copy row (design.md §6: no inline timestamps). */

@@ -32,6 +32,7 @@ import type {
   AgenaEvent,
   AgentTaskCreated,
   AgentTaskSummary,
+  BlobRef,
   CompactTranscriptEntry,
   CompactTranscriptQuery,
   CompactTranscriptResponse,
@@ -39,6 +40,7 @@ import type {
   CompactTranscriptUser,
   ContentBlock,
   EventSource,
+  ImageBlock,
   ImportLedgerEntry,
   McpSummary,
   SearchHit,
@@ -49,7 +51,7 @@ import type {
   ToolCallDetail,
   UserMessageAnchor,
 } from "@agena/protocol";
-import { durableEventSchemas } from "@agena/protocol";
+import { durableEventSchemas, imageBlockSchema } from "@agena/protocol";
 import { ulid } from "ulid";
 
 type CommitListener = (
@@ -438,6 +440,12 @@ export class SqliteEventStore implements EventStore {
         created_at TEXT NOT NULL
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS media_cache (
+        key        TEXT PRIMARY KEY,
+        blob_hash  TEXT NOT NULL REFERENCES blobs(hash),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS imports (
         id                TEXT PRIMARY KEY,
         session_id        TEXT,
@@ -546,6 +554,34 @@ export class SqliteEventStore implements EventStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
+  }
+
+  async getCachedMedia(key: string) {
+    const row = this.#db
+      .prepare(
+        `SELECT b.hash, b.size_bytes, b.mime
+         FROM media_cache m JOIN blobs b ON b.hash = m.blob_hash
+         WHERE m.key = ?`,
+      )
+      .get(key) as
+      | { hash: string; size_bytes: number; mime: string | null }
+      | undefined;
+    return row
+      ? {
+          blob: row.hash,
+          sizeBytes: row.size_bytes,
+          ...(row.mime ? { mimeType: row.mime } : {}),
+        }
+      : null;
+  }
+
+  async cacheMedia(key: string, ref: BlobRef) {
+    this.#db
+      .prepare(
+        `INSERT INTO media_cache (key, blob_hash, created_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET blob_hash = excluded.blob_hash`,
+      )
+      .run(key, ref.blob, new Date().toISOString());
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
@@ -1314,9 +1350,23 @@ export class SqliteEventStore implements EventStore {
                   source_runtime, source_client_id,
                   CASE
                     WHEN type = 'tool.call.completed'
-                      THEN json_remove(payload, '$.result')
+                      THEN json_set(
+                        json_remove(payload, '$.result'), '$.media',
+                        COALESCE((
+                          SELECT json_group_array(json(value))
+                          FROM json_each(events.payload, '$.result')
+                          WHERE json_extract(value, '$.type') = 'image'
+                        ), json('[]'))
+                      )
                     WHEN type IN ('tool.call.failed', 'tool.call.aborted')
-                      THEN json_remove(payload, '$.partialOutput')
+                      THEN json_set(
+                        json_remove(payload, '$.partialOutput'), '$.media',
+                        COALESCE((
+                          SELECT json_group_array(json(value))
+                          FROM json_each(events.payload, '$.partialOutput')
+                          WHERE json_extract(value, '$.type') = 'image'
+                        ), json('[]'))
+                      )
                     WHEN type = 'compaction.created'
                       THEN json_remove(payload, '$.summary')
                     ELSE payload
@@ -1429,9 +1479,23 @@ export class SqliteEventStore implements EventStore {
                   source_runtime, source_client_id,
                   CASE
                     WHEN type = 'tool.call.completed'
-                      THEN json_remove(payload, '$.result')
+                      THEN json_set(
+                        json_remove(payload, '$.result'), '$.media',
+                        COALESCE((
+                          SELECT json_group_array(json(value))
+                          FROM json_each(events.payload, '$.result')
+                          WHERE json_extract(value, '$.type') = 'image'
+                        ), json('[]'))
+                      )
                     WHEN type IN ('tool.call.failed', 'tool.call.aborted')
-                      THEN json_remove(payload, '$.partialOutput')
+                      THEN json_set(
+                        json_remove(payload, '$.partialOutput'), '$.media',
+                        COALESCE((
+                          SELECT json_group_array(json(value))
+                          FROM json_each(events.payload, '$.partialOutput')
+                          WHERE json_extract(value, '$.type') = 'image'
+                        ), json('[]'))
+                      )
                     ELSE payload
                   END AS payload,
                   created_at
@@ -2691,15 +2755,21 @@ function compactTurns(
       if (event.type === "tool.call.completed") {
         entry.status = "completed";
         entry.durationMs = payload.durationMs as number;
+        const media = imageBlocks(payload.media);
+        if (media.length > 0) entry.media = media;
       } else if (event.type === "tool.call.failed") {
         entry.status = "failed";
         entry.error = payload.error as NonNullable<ToolEntry["error"]>;
+        const media = imageBlocks(payload.media);
+        if (media.length > 0) entry.media = media;
         if (typeof payload.durationMs === "number") {
           entry.durationMs = payload.durationMs;
         }
       } else if (event.type === "tool.call.aborted") {
         entry.status = "aborted";
         entry.abortReason = String(payload.reason ?? "runtime_error");
+        const media = imageBlocks(payload.media);
+        if (media.length > 0) entry.media = media;
       } else if (event.type === "tool.call.denied") {
         entry.status = "denied";
         entry.deniedReason = String(payload.reason ?? "policy");
@@ -2815,6 +2885,14 @@ function compactMarker(
     default:
       return null;
   }
+}
+
+function imageBlocks(value: unknown): ImageBlock[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const parsed = imageBlockSchema.safeParse(item);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 function previewValue(value: unknown): string {

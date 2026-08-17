@@ -40,6 +40,7 @@ test("stores image blobs by content hash and reads them after reopen", async () 
     sizeBytes: bytes.byteLength,
     mimeType: "image/png",
   });
+  await first.cacheMedia("remote-key", ref);
   first.close();
 
   const reopened = new SqliteEventStore(path);
@@ -47,6 +48,7 @@ test("stores image blobs by content hash and reads them after reopen", async () 
     bytes,
     mimeType: "image/png",
   });
+  await expect(reopened.getCachedMedia("remote-key")).resolves.toEqual(ref);
   reopened.close();
 });
 
@@ -190,7 +192,18 @@ test("reads complete turn pages without eager tool results and loads tool detail
         source: pi,
         payload: {
           toolCallId,
-          result: [{ type: "text", text: "heavy-result-body" }],
+          result: [
+            { type: "text", text: "heavy-result-body" },
+            {
+              type: "image",
+              ref: {
+                blob: `sha256:${"a".repeat(64)}`,
+                sizeBytes: 42,
+                mimeType: "image/png",
+              },
+              alt: "Result preview",
+            },
+          ],
           durationMs: 12,
         },
       },
@@ -241,6 +254,17 @@ test("reads complete turn pages without eager tool results and loads tool detail
       argsPreview: '{"url":"https://example.com"}',
       status: "completed",
       durationMs: 12,
+      media: [
+        {
+          type: "image",
+          ref: {
+            blob: `sha256:${"a".repeat(64)}`,
+            sizeBytes: 42,
+            mimeType: "image/png",
+          },
+          alt: "Result preview",
+        },
+      ],
       hasDetails: true,
     },
     { kind: "assistant", content: [{ type: "text", text: "done" }] },
@@ -259,7 +283,10 @@ test("reads complete turn pages without eager tool results and loads tool detail
   ).resolves.toMatchObject({
     toolCallId,
     args: { url: "https://example.com" },
-    result: [{ type: "text", text: "heavy-result-body" }],
+    result: expect.arrayContaining([
+      { type: "text", text: "heavy-result-body" },
+      expect.objectContaining({ type: "image" }),
+    ]),
     status: "ok",
   });
   store.close();

@@ -14,6 +14,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  dedupeMedia,
+  mediaFromContent,
+} from "../../features/transcript/media.ts";
+import { MediaGallery } from "../../features/transcript/media-gallery.tsx";
 import { ActivityReveal, BusyDots, UserSendReveal } from "./animations.tsx";
 import { summarizeToolActivities } from "./project-turns.ts";
 import type {
@@ -208,6 +213,18 @@ function ToolActivityGroup({
 }) {
   const [expanded, setExpanded] = useState(false);
   const summary = summarizeToolActivities(activities);
+  const media = useMemo(
+    () =>
+      dedupeMedia(
+        activities.flatMap((activity) => {
+          if (activity.block.kind !== "tool") return [];
+          return mediaFromContent(
+            activity.block.result ?? activity.block.partialOutput ?? [],
+          );
+        }),
+      ),
+    [activities],
+  );
 
   return (
     <ActivityReveal animate={animate} delayMs={delayMs}>
@@ -254,6 +271,7 @@ function ToolActivityGroup({
             )}
           </span>
         </button>
+        <MediaGallery items={media} className="mt-1" />
         {expanded ? (
           <div className="mt-1 border-l border-border-subtle pl-2">
             {activities.map((activity) => (

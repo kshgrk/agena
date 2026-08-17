@@ -537,6 +537,7 @@ export function createWsBridge(
     listFiles: (o) => need().listFiles(o ?? {}),
     readFile: (path) => need().readFile(path),
     uploadImage: (bytes, mimeType) => need().uploadImage(bytes, mimeType),
+    materializeImageUrl: (url) => need().materializeImageUrl(url),
     uploadAttachment: (bytes, mimeType, name) =>
       need().uploadAttachment(bytes, mimeType, name),
     readBlob: (hash) => need().readBlob(hash),

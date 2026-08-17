@@ -718,6 +718,9 @@ function compactEntryBlock(entry: CompactTranscriptEntry): Block {
         ...(entry.durationMs !== undefined
           ? { durationMs: entry.durationMs }
           : {}),
+        ...(entry.media && entry.media.length > 0
+          ? { result: entry.media }
+          : {}),
         ...(entry.error ? { error: entry.error } : {}),
         ...(entry.abortReason ? { abortReason: entry.abortReason } : {}),
         ...(entry.deniedReason ? { deniedReason: entry.deniedReason } : {}),

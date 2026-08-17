@@ -4,7 +4,7 @@
 // upgrade completes — failure is a raw HTTP 401, never a WS close code (§9.4).
 
 import { spawn } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createReadStream, createWriteStream, realpathSync } from "node:fs";
 import {
   lstat,
@@ -42,6 +42,7 @@ import type {
 import {
   AgentOrchestrator,
   InMemoryEventStore,
+  materializeRuntimeContent,
   OrchestratorError,
   PathViolation,
   resolveWorkspacePath,
@@ -78,6 +79,7 @@ import {
   listFilesQuerySchema,
   listImportsQuerySchema,
   listSessionsQuerySchema,
+  materializeImageRequestSchema,
   navigateSessionRequestSchema,
   PROTOCOL_VERSION,
   pluginIdParamsSchema,
@@ -107,6 +109,7 @@ import { OneTimeTokenStore } from "./one-time-tokens.ts";
 import { PluginService } from "./plugin-service.ts";
 import { ProviderAuthService } from "./provider-auth-service.ts";
 import { PtyManager } from "./pty-manager.ts";
+import { fetchRemoteImage } from "./remote-image.ts";
 import { SessionChangesService } from "./session-changes.ts";
 import { SkillService } from "./skill-service.ts";
 import { SnapshotManager } from "./snapshots.ts";
@@ -775,20 +778,77 @@ export async function startDaemon(
         413,
       );
     }
-    const mimeType = sniffImageMime(bytes);
-    if (!mimeType) {
+    const [block] = await materializeRuntimeContent(
+      [
+        {
+          type: "image",
+          data: Buffer.from(bytes).toString("base64"),
+          mimeType: c.req.header("content-type") ?? "application/octet-stream",
+        },
+      ],
+      (value, mimeType) => store.putBlob(value, mimeType),
+    );
+    if (block?.type !== "image") {
       return c.json(
         {
           code: "INVALID_PAYLOAD",
-          message: "supported images are JPEG, PNG, GIF, WebP, and BMP",
+          message:
+            block?.type === "text"
+              ? block.text
+              : "supported images are JPEG, PNG, GIF, WebP, BMP, AVIF, and safe SVG",
           retryable: false,
         },
         400,
       );
     }
-    return c.json({
-      ref: await store.putBlob(bytes, mimeType),
-    });
+    return c.json({ ref: block.ref });
+  });
+  app.post("/v1/images/materialize", async (c) => {
+    const parsed = materializeImageRequestSchema.safeParse(await c.req.json());
+    if (!parsed.success) return invalidProviderRequest(c);
+    try {
+      const cacheKey = createHash("sha256")
+        .update(parsed.data.url)
+        .digest("hex");
+      const cached = await store.getCachedMedia(cacheKey);
+      if (cached && (await store.readBlob(cached.blob))) {
+        return c.json({ ref: cached });
+      }
+      const remote = await fetchRemoteImage(parsed.data.url);
+      const [block] = await materializeRuntimeContent(
+        [
+          {
+            type: "image",
+            data: Buffer.from(remote.bytes).toString("base64"),
+            mimeType: remote.mimeType,
+          },
+        ],
+        (bytes, mimeType) => store.putBlob(bytes, mimeType),
+      );
+      if (block?.type !== "image") {
+        return c.json(
+          {
+            code: "INVALID_PAYLOAD",
+            message:
+              block?.type === "text" ? block.text : "remote image is invalid",
+            retryable: false,
+          },
+          400,
+        );
+      }
+      await store.cacheMedia(cacheKey, block.ref);
+      return c.json({ ref: block.ref });
+    } catch (error) {
+      return c.json(
+        {
+          code: "INVALID_PAYLOAD",
+          message:
+            error instanceof Error ? error.message : "remote image failed",
+          retryable: false,
+        },
+        400,
+      );
+    }
   });
   app.post("/v1/attachments", async (c) => {
     const parsed = uploadAttachmentQuerySchema.safeParse(c.req.query());

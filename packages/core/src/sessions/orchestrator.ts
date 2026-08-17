@@ -30,6 +30,7 @@ import type {
   SessionRecord,
 } from "../events/store.ts";
 import { pendingApprovalsFromEvents } from "../events/store.ts";
+import { materializeRuntimeContent } from "../runtime/media.ts";
 import type {
   CreateRuntimeSessionInput,
   RuntimeAdapter,
@@ -762,18 +763,28 @@ export class SessionOrchestrator {
       case "tool-call-completed":
         await this.#appendRuntime(s, "tool.call.completed", {
           toolCallId: ev.toolCallId,
-          result: ev.result,
+          result: await materializeRuntimeContent(
+            ev.result,
+            (bytes, mimeType) => this.#store.putBlob(bytes, mimeType),
+          ),
           durationMs: ev.durationMs,
         });
         return;
-      case "tool-call-failed":
+      case "tool-call-failed": {
+        const partialOutput = ev.partialOutput
+          ? await materializeRuntimeContent(
+              ev.partialOutput,
+              (bytes, mimeType) => this.#store.putBlob(bytes, mimeType),
+            )
+          : undefined;
         await this.#appendRuntime(s, "tool.call.failed", {
           toolCallId: ev.toolCallId,
           error: ev.error,
-          ...(ev.partialOutput ? { partialOutput: ev.partialOutput } : {}),
+          ...(partialOutput ? { partialOutput } : {}),
           ...(ev.durationMs !== undefined ? { durationMs: ev.durationMs } : {}),
         });
         return;
+      }
       case "run-completed":
         await this.#appendRuntime(s, "run.completed", {
           runId: ev.runId,
